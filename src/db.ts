@@ -2,7 +2,15 @@ import fs from 'fs';
 import path from 'path';
 import type { GridMap } from './types';
 
-const DB_FILE = path.join(process.cwd(), 'workspace.sqlite');
+// Defaults to ./data so it lands on the mounted volume (see docker-compose.yml) instead of
+// the container's ephemeral filesystem - without a persisted path here, every redeploy
+// replaces the container and silently wipes all saved maps/desk claims.
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+const DB_FILE = path.join(DATA_DIR, 'workspace.sqlite');
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
 
 export interface SQLiteDriver {
   saveMap(map: GridMap): void;

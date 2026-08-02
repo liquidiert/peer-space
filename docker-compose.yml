@@ -11,6 +11,9 @@ services:
       - KEYCLOAK_URL=${KEYCLOAK_URL}
       - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID}
       - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET}
+      - DATA_DIR=/app/data
+    volumes:
+      - peerspace_data:/app/data
     expose:
       - "3000"
     healthcheck:
@@ -19,3 +22,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+volumes:
+  peerspace_data:
