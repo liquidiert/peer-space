@@ -2,9 +2,11 @@ import { Hono } from 'hono';
 import { getRequestListener } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { createServer } from 'http';
+import { createServer as createHttpsServer } from 'https';
 import { Server, Socket } from 'socket.io';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { createServer as createViteServer } from 'vite';
 import { User, GridMap, ChatMessage, MapObject, WhiteboardStroke, StickyNote, PrivateZone } from './src/types';
 import { createDefaultOfficeMap, createBeachRetreatMap } from './src/mapsData';
@@ -59,7 +61,7 @@ async function startServer() {
 
   const listener = getRequestListener(app.fetch);
 
-  const httpServer = createServer((req, res) => {
+  const requestHandler = (req: import('http').IncomingMessage, res: import('http').ServerResponse) => {
     const url = req.url || '';
     if (url.startsWith('/api/') || url.startsWith('/auth/')) {
       listener(req, res);
@@ -70,7 +72,21 @@ async function startServer() {
     } else {
       listener(req, res);
     }
-  });
+  };
+
+  // In local dev, serve HTTPS if mkcert-generated certs are present (certs/dev-cert.pem, certs/dev-key.pem).
+  // Mobile browsers only expose getUserMedia (mic/camera) on secure contexts, and a LAN IP over
+  // plain http:// doesn't qualify - so testing WebRTC features from a phone needs this.
+  const devCertPath = path.resolve(__dirname, 'certs/dev-cert.pem');
+  const devKeyPath = path.resolve(__dirname, 'certs/dev-key.pem');
+  const useHttps = process.env.NODE_ENV !== 'production' && fs.existsSync(devCertPath) && fs.existsSync(devKeyPath);
+
+  const httpServer = useHttps
+    ? createHttpsServer(
+        { cert: fs.readFileSync(devCertPath), key: fs.readFileSync(devKeyPath) },
+        requestHandler
+      )
+    : createServer(requestHandler);
 
   const io = new Server(httpServer, {
     cors: {
@@ -860,7 +876,17 @@ async function startServer() {
   }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`PeerSpace Hono/Bun server running on http://0.0.0.0:${PORT}`);
+    const scheme = useHttps ? 'https' : 'http';
+    console.log(`PeerSpace Hono/Bun server running on ${scheme}://0.0.0.0:${PORT}`);
+    if (useHttps) {
+      const lanIps = Object.values(os.networkInterfaces())
+        .flat()
+        .filter((i): i is os.NetworkInterfaceInfo => !!i && i.family === 'IPv4' && !i.internal)
+        .map((i) => i.address);
+      lanIps.forEach((ip) => {
+        console.log(`  -> Open this URL on your phone (same wifi) to test camera/mic: ${scheme}://${ip}:${PORT}`);
+      });
+    }
   });
 }
 

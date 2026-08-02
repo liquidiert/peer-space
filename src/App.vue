@@ -164,19 +164,44 @@ const users = ref<User[]>([]);
 const currentMap = ref<GridMap>(createDefaultOfficeMap());
 const messages = ref<ChatMessage[]>([]);
 
+// Chat Panel visibility & unread tracking
+const isChatOpen = ref(false);
+const unreadChatCount = ref(0);
+
+watch(
+  () => messages.value.length,
+  (newLen, oldLen) => {
+    if (newLen > oldLen && !isChatOpen.value) {
+      unreadChatCount.value += newLen - oldLen;
+    }
+  }
+);
+
+function handleToggleChat() {
+  isChatOpen.value = !isChatOpen.value;
+  if (isChatOpen.value) {
+    unreadChatCount.value = 0;
+  }
+}
+
 // Audio & Controls
 const isMuted = ref(false);
 const isDeafened = ref(false);
-const isScreenSharing = ref(false);
 
 const {
   initLocalAudio,
   toggleCamera,
+  switchCamera,
+  toggleScreenShare,
   handleSignal,
   syncPeerConnections,
   isVideoOn,
+  isScreenSharing,
   localVideoStream,
   remoteVideoStreams,
+  localScreenStream,
+  remoteScreenStreams,
+  availableVideoDevices,
 } = useWebRTCProximity(socket, currentUser, users, isMuted, isDeafened);
 
 // Map Builder State
@@ -439,9 +464,11 @@ onMounted(() => {
   };
 
   window.addEventListener('message', handleOAuthMessage);
+  window.addEventListener('keydown', handleGlobalHotkeys);
 
   onUnmounted(() => {
     window.removeEventListener('message', handleOAuthMessage);
+    window.removeEventListener('keydown', handleGlobalHotkeys);
   });
 });
 
@@ -526,6 +553,81 @@ function handleTeleportToUser(data: { x: number; y: number }) {
   handleNavigateTile(data);
 }
 
+function handleMoveToDesk() {
+  const desk = currentMap.value?.objects.find(
+    (obj) => obj.type === 'desk' && obj.data?.deskState?.claimedByUserId === currentUser.value.id
+  );
+  if (!desk) return;
+
+  const deskWidth = desk.width || 2;
+  const deskHeight = desk.height || 1;
+  handleNavigateTile({
+    x: desk.x + Math.floor(deskWidth / 2),
+    y: desk.y + deskHeight,
+  });
+}
+
+// Global keyboard shortcuts for every action button (movement's WASD/arrow keys are
+// handled separately in SpatialCanvas.vue, so none of these overlap with w/a/s/d).
+function handleGlobalHotkeys(e: KeyboardEvent) {
+  const target = e.target as HTMLElement | null;
+  if (target && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)) {
+    return;
+  }
+  if (!hasJoined.value || e.metaKey || e.ctrlKey || e.altKey) return;
+
+  if (e.key === 'Escape') {
+    if (activeObjectModal.value) {
+      activeObjectModal.value = null;
+    } else if (showAvatarBuilderModal.value) {
+      showAvatarBuilderModal.value = false;
+    } else if (isChatOpen.value) {
+      isChatOpen.value = false;
+    } else if (builderMode.value) {
+      handleToggleBuilderMode();
+    } else {
+      return;
+    }
+    e.preventDefault();
+    return;
+  }
+
+  switch (e.key.toLowerCase()) {
+    case 'm':
+      handleToggleMute();
+      break;
+    case 'n':
+      handleToggleDeafen();
+      break;
+    case 'v':
+      if (e.shiftKey) {
+        switchCamera();
+      } else {
+        toggleCamera();
+      }
+      break;
+    case 'b':
+      if (e.shiftKey) {
+        handleToggleBuilderMode();
+      } else {
+        toggleScreenShare();
+      }
+      break;
+    case 'c':
+      handleToggleChat();
+      break;
+    case 'p':
+      showAvatarBuilderModal.value = true;
+      break;
+    case 'g':
+      handleMoveToDesk();
+      break;
+    default:
+      return;
+  }
+  e.preventDefault();
+}
+
 function handleToggleMute() {
   isMuted.value = !isMuted.value;
   if (socket.value) {
@@ -540,12 +642,6 @@ function handleToggleDeafen() {
   }
 }
 
-function handleToggleScreenShare() {
-  isScreenSharing.value = !isScreenSharing.value;
-  if (socket.value) {
-    socket.value.emit('user:update_profile', { isScreenSharing: isScreenSharing.value });
-  }
-}
 
 function handleUpdateAvatar(newAvatar: AvatarCustomization) {
   avatarConfig.value = newAvatar;
@@ -701,7 +797,7 @@ function handleToggleBuilderMode() {
                     <p class="font-extrabold text-slate-900">Signed in as {{ authenticatedUser.name }}</p>
                     <span v-if="authenticatedUser.isAdmin" class="bg-amber-400 text-slate-950 px-1.5 py-0.5 rounded text-[9px] font-black border border-slate-900 font-heading uppercase">Admin</span>
                   </div>
-                  <p v-if="authenticatedUser.email" class="text-[10px] text-slate-600 font-semibold truncate max-w-[200px]">{{ authenticatedUser.email }}</p>
+                  <p v-if="authenticatedUser.email" class="text-[10px] text-slate-600 font-semibold truncate max-w-50">{{ authenticatedUser.email }}</p>
                 </div>
               </div>
               <button type="button" @click="handleLogout" class="p-1 hover:bg-amber-200 rounded-lg border border-slate-900 text-slate-900 font-bold flex items-center gap-1 pixel-btn" title="Sign Out">
@@ -778,7 +874,7 @@ function handleToggleBuilderMode() {
           v-if="currentUser.isAdmin"
           type="button"
           @click="handleToggleBuilderMode"
-          :title="builderMode ? 'Close Map Builder' : 'Open Map Builder (Admin)'"
+          :title="builderMode ? 'Close Map Builder (Shift+B)' : 'Open Map Builder (Admin) (Shift+B)'"
           :class="`text-[10px] font-bold px-2.5 py-1 rounded-lg border-2 border-slate-900 flex items-center gap-1.5 transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] font-heading ${
             builderMode
               ? 'bg-amber-400 text-slate-950 hover:bg-amber-300'
@@ -846,8 +942,10 @@ function handleToggleBuilderMode() {
         :currentUser="currentUser"
         :users="users"
         :messages="messages"
+        :isOpen="isChatOpen"
         @sendMessage="handleSendMessage"
         @teleportToUser="handleTeleportToUser"
+        @close="isChatOpen = false"
       />
 
       <!-- Interactive Spatial Minimap -->
@@ -867,12 +965,16 @@ function handleToggleBuilderMode() {
         :builderMode="builderMode"
         :currentUser="currentUser"
         :currentMap="currentMap"
+        :isChatOpen="isChatOpen"
+        :unreadChatCount="unreadChatCount"
         @toggleMute="handleToggleMute"
         @toggleDeafen="handleToggleDeafen"
         @toggleCamera="toggleCamera"
-        @toggleScreenShare="handleToggleScreenShare"
+        @toggleScreenShare="toggleScreenShare"
         @toggleBuilderMode="handleToggleBuilderMode"
         @openAvatarBuilder="showAvatarBuilderModal = true"
+        @toggleChat="handleToggleChat"
+        @moveToDesk="handleMoveToDesk"
       />
 
       <!-- Floating WebRTC Video Dock -->
@@ -882,7 +984,12 @@ function handleToggleBuilderMode() {
         :isVideoOn="isVideoOn"
         :localVideoStream="localVideoStream"
         :remoteVideoStreams="remoteVideoStreams"
+        :isScreenSharing="isScreenSharing"
+        :localScreenStream="localScreenStream"
+        :remoteScreenStreams="remoteScreenStreams"
+        :canSwitchCamera="availableVideoDevices.length > 1"
         @toggleCamera="toggleCamera"
+        @switchCamera="switchCamera()"
       />
     </div>
 

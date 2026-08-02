@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue';
+import { ChevronUp, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-vue-next';
 import type { User, GridMap, MapObject, TileType } from '../types';
 
 const props = defineProps<{
@@ -22,7 +23,33 @@ const emit = defineEmits<{
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const scrollContainerRef = ref<HTMLDivElement | null>(null);
 const CELL_SIZE = 48; // Each spatial tile is 48x48px
+
+// Mobile camera-follow: on small/touch screens the map is larger than the
+// viewport, so we auto-scroll the container to keep the player's avatar centered.
+const isMobile = ref(false);
+function updateIsMobile() {
+  isMobile.value = window.matchMedia('(max-width: 768px)').matches;
+}
+
+function followCameraOnMobile() {
+  if (!isMobile.value) return;
+  const container = scrollContainerRef.value;
+  if (!container) return;
+
+  const displayPos = displayPosMap.get(props.currentUser.socketId);
+  const tileX = displayPos?.x ?? props.currentUser.position?.x ?? 0;
+  const tileY = displayPos?.y ?? props.currentUser.position?.y ?? 0;
+  const px = (tileX + 0.5) * CELL_SIZE;
+  const py = (tileY + 0.5) * CELL_SIZE;
+
+  container.scrollTo({
+    left: px - container.clientWidth / 2,
+    top: py - container.clientHeight / 2,
+    behavior: 'auto',
+  });
+}
 
 // Render Cel-Shaded Tile Helper
 function renderTile(ctx: CanvasRenderingContext2D, type: TileType, x: number, y: number) {
@@ -652,6 +679,26 @@ const displayPosMap = new Map<string, { x: number; y: number; isMoving: boolean 
 let animFrameId: number | null = null;
 
 // Render Cel-Shaded User Character Avatar
+// Draws a rectangle with independently-toggleable rounded corners, falling back to a
+// plain rect if the browser lacks native roundRect support.
+function roundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radii: number | [number, number, number, number]
+) {
+  ctx.beginPath();
+  if (typeof (ctx as any).roundRect === 'function') {
+    (ctx as any).roundRect(x, y, w, h, radii);
+  } else {
+    ctx.rect(x, y, w, h);
+  }
+}
+
+// Character avatar, drawn as flat-colored rounded blocks to match the Avatar Studio
+// preview (see AvatarBuilder.vue) instead of the previous circular/blob rendering.
 function renderUser(
   ctx: CanvasRenderingContext2D,
   user: User,
@@ -674,139 +721,173 @@ function renderUser(
     ctx.strokeStyle = '#22c55e';
     ctx.lineWidth = 4;
     ctx.beginPath();
-    ctx.arc(px, py, 28, 0, Math.PI * 2);
+    ctx.arc(px, py - 2, 26, 0, Math.PI * 2);
     ctx.stroke();
   }
 
   if (isSelf) {
-    // Proximity 7-tile spatial voice radius visual circle
+    // Proximity 4-tile spatial voice radius visual circle
     ctx.strokeStyle = '#6366f1';
     ctx.fillStyle = 'rgba(99, 102, 241, 0.08)';
     ctx.lineWidth = 2;
     ctx.setLineDash([8, 8]);
     ctx.beginPath();
-    ctx.arc(px, py, 7 * CELL_SIZE, 0, Math.PI * 2);
+    ctx.arc(px, py, 4 * CELL_SIZE, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
     ctx.setLineDash([]);
   }
 
-  // 1. Black outer cel-shaded pixel border
-  ctx.fillStyle = '#0f172a';
-  ctx.beginPath();
-  ctx.arc(px, py, 21, 0, Math.PI * 2);
-  ctx.fill();
-
-  // 2. Character Outfit Body (Base)
-  ctx.fillStyle = user.avatar.outfitColor || '#3b82f6';
-  ctx.beginPath();
-  ctx.arc(px, py, 18, 0, Math.PI * 2);
-  ctx.fill();
-
-  // 3. Cel-Shading Shadow on lower crescent
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.25)';
-  ctx.beginPath();
-  ctx.arc(px, py + 3, 15, 0, Math.PI);
-  ctx.fill();
-
   const hairColor = user.avatar.hairColor || '#1e293b';
   const hairStyle = user.avatar.hairStyle || 'short';
   const hatStyle = user.avatar.hatStyle || 'none';
+  const BORDER = '#0f172a';
+
+  const HEAD_W = 20;
+  const HEAD_H = 18;
+  const headX = px - HEAD_W / 2;
+  const headY = py - HEAD_H - 2;
+
+  const BODY_W = 28;
+  const BODY_H = 17;
+  const bodyX = px - BODY_W / 2;
+  const bodyY = py - 2;
 
   // Hair Back Layer (Long hair locks / Afro halo behind head)
   if (hatStyle === 'none') {
     if (hairStyle === 'long') {
       ctx.fillStyle = hairColor;
-      ctx.strokeStyle = '#0f172a';
+      ctx.strokeStyle = BORDER;
       ctx.lineWidth = 1.5;
 
-      ctx.fillRect(px - 14, py - 5, 5, 14);
-      ctx.strokeRect(px - 14, py - 5, 5, 14);
+      roundedRect(ctx, headX - 3, headY + 3, 4, 13, [0, 0, 3, 3]);
+      ctx.fill();
+      ctx.stroke();
 
-      ctx.fillRect(px + 9, py - 5, 5, 14);
-      ctx.strokeRect(px + 9, py - 5, 5, 14);
+      roundedRect(ctx, headX + HEAD_W - 1, headY + 3, 4, 13, [0, 0, 3, 3]);
+      ctx.fill();
+      ctx.stroke();
     } else if (hairStyle === 'afro') {
       ctx.fillStyle = hairColor;
-      ctx.strokeStyle = '#0f172a';
+      ctx.strokeStyle = BORDER;
       ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(px, py - 5, 15, 0, Math.PI * 2);
+      roundedRect(ctx, px - 15, headY - 6, 30, 26, 13);
       ctx.fill();
       ctx.stroke();
     }
   }
 
-  // 4. Character Skin Face/Head Center
-  ctx.fillStyle = user.avatar.skinColor || '#f87171';
-  ctx.beginPath();
-  ctx.arc(px, py - 2, 11, 0, Math.PI * 2);
+  // Body (drawn before the head so the head's border cleanly overlaps the seam)
+  ctx.fillStyle = user.avatar.outfitColor || '#3b82f6';
+  roundedRect(ctx, bodyX, bodyY, BODY_W, BODY_H, [5, 5, 0, 0]);
   ctx.fill();
+  ctx.strokeStyle = BORDER;
+  ctx.lineWidth = 2;
+  roundedRect(ctx, bodyX, bodyY, BODY_W, BODY_H, [5, 5, 0, 0]);
+  ctx.stroke();
+
+  // Head / Face
+  ctx.fillStyle = user.avatar.skinColor || '#f87171';
+  roundedRect(ctx, headX, headY, HEAD_W, HEAD_H, 6);
+  ctx.fill();
+  ctx.strokeStyle = BORDER;
+  ctx.lineWidth = 2;
+  roundedRect(ctx, headX, headY, HEAD_W, HEAD_H, 6);
+  ctx.stroke();
 
   // Hair Top Layer (Short cap, Long top cap, Curly locks)
   if (hatStyle === 'none' && hairStyle !== 'bald') {
     if (hairStyle === 'short' || hairStyle === 'long') {
       ctx.fillStyle = hairColor;
-      ctx.beginPath();
-      ctx.arc(px, py - 2, 11, Math.PI * 0.8, Math.PI * 2.2);
+      roundedRect(ctx, headX - 1, headY - 4, HEAD_W + 2, 7, [4, 4, 0, 0]);
       ctx.fill();
-
-      ctx.strokeStyle = '#0f172a';
+      ctx.strokeStyle = BORDER;
       ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(px, py - 2, 11, Math.PI * 0.8, Math.PI * 2.2);
+      roundedRect(ctx, headX - 1, headY - 4, HEAD_W + 2, 7, [4, 4, 0, 0]);
       ctx.stroke();
     } else if (hairStyle === 'curly') {
       ctx.fillStyle = hairColor;
-      ctx.strokeStyle = '#0f172a';
+      roundedRect(ctx, headX - 1, headY - 5, HEAD_W + 2, 8, [5, 5, 0, 0]);
+      ctx.fill();
+      ctx.strokeStyle = BORDER;
       ctx.lineWidth = 1.5;
-      const curls = [
-        { x: px - 7, y: py - 9, r: 4.5 },
-        { x: px - 2.5, y: py - 11.5, r: 5 },
-        { x: px + 2.5, y: py - 11.5, r: 5 },
-        { x: px + 7, y: py - 9, r: 4.5 },
-      ];
-      curls.forEach((c) => {
+      roundedRect(ctx, headX - 1, headY - 5, HEAD_W + 2, 8, [5, 5, 0, 0]);
+      ctx.stroke();
+
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+      [headX + 3, headX + HEAD_W / 2 - 1, headX + HEAD_W - 5].forEach((cx) => {
         ctx.beginPath();
-        ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+        ctx.arc(cx, headY - 1, 2, 0, Math.PI * 2);
         ctx.fill();
-        ctx.stroke();
       });
     }
   }
 
-  // Face Eyewear / Glasses or Eyes
+  // Face Eyewear / Glasses or plain Eyes
+  const eyeY = headY + 7;
   if (user.avatar.glasses) {
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(px - 8, py - 5, 6, 5);
-    ctx.fillRect(px + 2, py - 5, 6, 5);
-    ctx.fillRect(px - 2, py - 3, 4, 2);
+    ctx.fillStyle = BORDER;
+    ctx.fillRect(px - 8, eyeY, 6, 5);
+    ctx.fillRect(px + 2, eyeY, 6, 5);
+    ctx.fillRect(px - 2, eyeY + 2, 4, 1.5);
     ctx.fillStyle = '#38bdf8';
-    ctx.fillRect(px - 7, py - 4, 4, 3);
-    ctx.fillRect(px + 3, py - 4, 4, 3);
+    ctx.fillRect(px - 7, eyeY + 1, 4, 3);
+    ctx.fillRect(px + 3, eyeY + 1, 4, 3);
+  } else {
+    ctx.fillStyle = BORDER;
+    ctx.fillRect(px - 6, eyeY, 3, 3);
+    ctx.fillRect(px + 3, eyeY, 3, 3);
   }
+
+  // Mouth (flat line, matching the Avatar Studio preview)
+  ctx.strokeStyle = BORDER;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(px - 4, headY + 14);
+  ctx.lineTo(px + 4, headY + 14);
+  ctx.stroke();
 
   // Headwear / Hat
   if (user.avatar.hatStyle === 'cap') {
     ctx.fillStyle = '#dc2626';
-    ctx.fillRect(px - 10, py - 14, 20, 6);
+    roundedRect(ctx, headX, headY - 6, HEAD_W, 6, [4, 4, 0, 0]);
+    ctx.fill();
+    ctx.strokeStyle = BORDER;
+    ctx.lineWidth = 1.5;
+    roundedRect(ctx, headX, headY - 6, HEAD_W, 6, [4, 4, 0, 0]);
+    ctx.stroke();
+
     ctx.fillStyle = '#991b1b';
-    ctx.fillRect(px - 12, py - 8, 24, 3);
+    ctx.fillRect(headX - 2, headY - 1, HEAD_W + 4, 3);
   } else if (user.avatar.hatStyle === 'beanie') {
     ctx.fillStyle = '#059669';
-    ctx.beginPath();
-    ctx.arc(px, py - 10, 10, Math.PI, 0);
+    roundedRect(ctx, headX, headY - 8, HEAD_W, 9, [6, 6, 0, 0]);
     ctx.fill();
+    ctx.strokeStyle = BORDER;
+    ctx.lineWidth = 1.5;
+    roundedRect(ctx, headX, headY - 8, HEAD_W, 9, [6, 6, 0, 0]);
+    ctx.stroke();
+
     ctx.fillStyle = '#f59e0b';
-    ctx.fillRect(px - 3, py - 18, 6, 6);
+    ctx.fillRect(px - 3, headY - 12, 6, 6);
+    ctx.strokeRect(px - 3, headY - 12, 6, 6);
   }
 
-  // Status Emoji or Icon Badge
-  ctx.font = '12px sans-serif';
+  // Status Emoji Badge (bottom-right corner, overlapping the head/body seam)
+  const badgeX = px + BODY_W / 2 - 10;
+  const badgeY = bodyY + 3;
+  ctx.fillStyle = BORDER;
+  roundedRect(ctx, badgeX - 1, badgeY - 1, 16, 16, 4);
+  ctx.fill();
+  ctx.fillStyle = '#fbbf24';
+  roundedRect(ctx, badgeX, badgeY, 14, 14, 4);
+  ctx.fill();
+  ctx.font = '11px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(user.avatar.statusEmoji || '👋', px + 12, py + 12);
+  ctx.fillText(user.avatar.statusEmoji || '👋', badgeX + 7, badgeY + 8);
 
-  // 5. Cel-Shaded Pixel Name Tag Banner Above Head
+  // Cel-Shaded Pixel Name Tag Banner Above Head
   const nameText = isSelf ? `${user.name} (YOU)` : user.name;
   ctx.font = 'bold 12px "Pixelify Sans", cursive, sans-serif';
   const textWidth = ctx.measureText(nameText).width;
@@ -958,6 +1039,8 @@ function renderCanvas() {
 
     renderUser(ctx, user, user.socketId === props.currentUser.socketId, currentPos);
   });
+
+  followCameraOnMobile();
 }
 
 function startAnimLoop() {
@@ -967,6 +1050,20 @@ function startAnimLoop() {
 
 let lastKeyMoveTime = 0;
 const KEY_MOVE_COOLDOWN_MS = 140;
+
+// Shared movement step, used by both keyboard input and the on-screen mobile D-pad
+function movePlayer(dx: number, dy: number, dir: 'up' | 'down' | 'left' | 'right') {
+  const now = Date.now();
+  if (now - lastKeyMoveTime < KEY_MOVE_COOLDOWN_MS) {
+    return;
+  }
+  lastKeyMoveTime = now;
+
+  const targetX = props.currentUser.position.x + dx;
+  const targetY = props.currentUser.position.y + dy;
+
+  emit('move', { x: targetX, y: targetY, direction: dir });
+}
 
 // Keydown Movement Listener
 function handleKeyDown(e: KeyboardEvent) {
@@ -1008,17 +1105,21 @@ function handleKeyDown(e: KeyboardEvent) {
   }
 
   e.preventDefault();
+  movePlayer(dx, dy, dir);
+}
 
-  const now = Date.now();
-  if (now - lastKeyMoveTime < KEY_MOVE_COOLDOWN_MS) {
-    return;
+// On-screen mobile D-pad: fires an immediate move, then repeats while held
+let dpadInterval: number | null = null;
+function startDpadMove(dx: number, dy: number, dir: 'up' | 'down' | 'left' | 'right') {
+  stopDpadMove();
+  movePlayer(dx, dy, dir);
+  dpadInterval = window.setInterval(() => movePlayer(dx, dy, dir), KEY_MOVE_COOLDOWN_MS);
+}
+function stopDpadMove() {
+  if (dpadInterval !== null) {
+    clearInterval(dpadInterval);
+    dpadInterval = null;
   }
-  lastKeyMoveTime = now;
-
-  const targetX = props.currentUser.position.x + dx;
-  const targetY = props.currentUser.position.y + dy;
-
-  emit('move', { x: targetX, y: targetY, direction: dir });
 }
 
 // Canvas Click Event Handler
@@ -1081,11 +1182,15 @@ function handleCanvasClick(e: MouseEvent) {
 
 onMounted(() => {
   window.addEventListener('keydown', handleKeyDown);
+  updateIsMobile();
+  window.addEventListener('resize', updateIsMobile);
   startAnimLoop();
 });
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown);
+  window.removeEventListener('resize', updateIsMobile);
+  stopDpadMove();
   if (animFrameId !== null) {
     cancelAnimationFrame(animFrameId);
   }
@@ -1097,8 +1202,14 @@ watch([() => props.currentUser, () => props.users, () => props.currentMap, () =>
 </script>
 
 <template>
-  <div class="w-full h-full flex items-center justify-center p-4 overflow-auto custom-scrollbar">
-    <div class="relative border-4 border-slate-900 shadow-[8px_8px_0px_0px_#020617] bg-slate-900 overflow-hidden rounded-2xl pixel-rendering">
+  <div
+    ref="scrollContainerRef"
+    :class="[
+      'w-full h-full overflow-auto custom-scrollbar',
+      isMobile ? 'block' : 'flex items-center justify-center p-4',
+    ]"
+  >
+    <div class="inline-block relative border-4 border-slate-900 shadow-[8px_8px_0px_0px_#020617] bg-slate-900 overflow-hidden rounded-2xl pixel-rendering">
       <canvas
         ref="canvasRef"
         @click="handleCanvasClick"
@@ -1106,5 +1217,52 @@ watch([() => props.currentUser, () => props.users, () => props.currentMap, () =>
       />
     </div>
   </div>
-</template>
 
+  <!-- Mobile D-Pad: move widget for touch devices, camera follows the player automatically -->
+  <div class="md:hidden fixed bottom-24 right-4 z-40 grid grid-cols-3 grid-rows-3 gap-1 select-none">
+    <button
+      type="button"
+      class="col-start-2 row-start-1 w-11 h-11 flex items-center justify-center bg-white border-2 border-slate-900 rounded-xl shadow-[3px_3px_0px_0px_#0f172a] active:translate-x-px active:translate-y-px active:shadow-none touch-none"
+      @pointerdown.prevent="startDpadMove(0, -1, 'up')"
+      @pointerup="stopDpadMove"
+      @pointerleave="stopDpadMove"
+      @pointercancel="stopDpadMove"
+      aria-label="Move up"
+    >
+      <ChevronUp class="w-6 h-6 text-slate-900" />
+    </button>
+    <button
+      type="button"
+      class="col-start-1 row-start-2 w-11 h-11 flex items-center justify-center bg-white border-2 border-slate-900 rounded-xl shadow-[3px_3px_0px_0px_#0f172a] active:translate-x-px active:translate-y-px active:shadow-none touch-none"
+      @pointerdown.prevent="startDpadMove(-1, 0, 'left')"
+      @pointerup="stopDpadMove"
+      @pointerleave="stopDpadMove"
+      @pointercancel="stopDpadMove"
+      aria-label="Move left"
+    >
+      <ChevronLeft class="w-6 h-6 text-slate-900" />
+    </button>
+    <button
+      type="button"
+      class="col-start-3 row-start-2 w-11 h-11 flex items-center justify-center bg-white border-2 border-slate-900 rounded-xl shadow-[3px_3px_0px_0px_#0f172a] active:translate-x-px active:translate-y-px active:shadow-none touch-none"
+      @pointerdown.prevent="startDpadMove(1, 0, 'right')"
+      @pointerup="stopDpadMove"
+      @pointerleave="stopDpadMove"
+      @pointercancel="stopDpadMove"
+      aria-label="Move right"
+    >
+      <ChevronRight class="w-6 h-6 text-slate-900" />
+    </button>
+    <button
+      type="button"
+      class="col-start-2 row-start-3 w-11 h-11 flex items-center justify-center bg-white border-2 border-slate-900 rounded-xl shadow-[3px_3px_0px_0px_#0f172a] active:translate-x-px active:translate-y-px active:shadow-none touch-none"
+      @pointerdown.prevent="startDpadMove(0, 1, 'down')"
+      @pointerup="stopDpadMove"
+      @pointerleave="stopDpadMove"
+      @pointercancel="stopDpadMove"
+      aria-label="Move down"
+    >
+      <ChevronDown class="w-6 h-6 text-slate-900" />
+    </button>
+  </div>
+</template>

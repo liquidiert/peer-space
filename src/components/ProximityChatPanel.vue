@@ -9,7 +9,6 @@ import {
   Mic,
   MicOff,
   ChevronDown,
-  ChevronUp,
   MessageCircle,
 } from 'lucide-vue-next';
 import type { User, ChatMessage } from '../types';
@@ -18,37 +17,25 @@ const props = defineProps<{
   currentUser: User;
   users: User[];
   messages: ChatMessage[];
+  isOpen: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: 'sendMessage', payload: { text: string; isSpatial: boolean }): void;
   (e: 'teleportToUser', payload: { x: number; y: number }): void;
+  (e: 'close'): void;
 }>();
 
 const activeTab = ref<'spatial' | 'global' | 'users'>('spatial');
 const inputText = ref('');
 const messagesContainerRef = ref<HTMLDivElement | null>(null);
 
-// Collapsible Chat state & unread message counter
-const isCollapsed = ref(false);
-const unreadCount = ref(0);
-
 watch(
-  () => props.messages.length,
-  (newLen, oldLen) => {
-    if (newLen > oldLen && isCollapsed.value) {
-      unreadCount.value += newLen - oldLen;
-    }
+  () => props.isOpen,
+  (open) => {
+    if (open) scrollToBottom();
   }
 );
-
-function toggleCollapse() {
-  isCollapsed.value = !isCollapsed.value;
-  if (!isCollapsed.value) {
-    unreadCount.value = 0;
-    scrollToBottom();
-  }
-}
 
 function getDistance(otherUser: User): number {
   if (!props.currentUser || !otherUser) return 0;
@@ -111,33 +98,28 @@ function handleSend() {
 </script>
 
 <template>
-  <div :class="`fixed bottom-20 right-4 w-80 sm:w-88 bg-white border-3 border-slate-900 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] z-40 text-slate-900 flex flex-col transition-all duration-200 overflow-hidden ${isCollapsed ? 'h-auto' : 'h-96'}`">
-    <!-- Collapsible Header Bar -->
+  <div
+    v-if="isOpen"
+    class="fixed z-40 bottom-20 left-1/2 -translate-x-1/2 w-[92vw] sm:w-88 sm:left-auto sm:right-4 sm:translate-x-0 h-96 bg-white border-3 border-slate-900 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] text-slate-900 flex flex-col overflow-hidden"
+  >
+    <!-- Header Bar -->
     <div class="flex items-center justify-between px-3 py-2 bg-slate-900 text-white border-b-2 border-slate-900 select-none">
-      <div @click="toggleCollapse" class="flex items-center gap-2 cursor-pointer flex-1">
+      <div class="flex items-center gap-2 flex-1">
         <MessageCircle class="w-4 h-4 text-amber-400" />
         <span class="font-extrabold text-xs font-heading tracking-wide">Chat & People</span>
-        <span
-          v-if="unreadCount > 0 && isCollapsed"
-          class="bg-rose-500 text-white font-black text-[10px] px-2 py-0.5 rounded-full animate-pulse shadow-sm"
-        >
-          +{{ unreadCount }} new
-        </span>
       </div>
 
       <button
         type="button"
-        @click="toggleCollapse"
+        @click="emit('close')"
         class="p-1 rounded text-slate-300 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
-        :title="isCollapsed ? 'Expand Chat' : 'Collapse Chat'"
+        title="Close Chat"
       >
-        <ChevronUp v-if="isCollapsed" class="w-4 h-4" />
-        <ChevronDown v-else class="w-4 h-4" />
+        <ChevronDown class="w-4 h-4" />
       </button>
     </div>
 
-    <template v-if="!isCollapsed">
-      <!-- Panel Tab Bar -->
+    <!-- Panel Tab Bar -->
       <div class="flex items-center border-b-2 border-slate-900 bg-amber-50 p-1.5 gap-1">
         <button
           type="button"
@@ -288,6 +270,5 @@ function handleSend() {
         <Send class="w-4 h-4" />
       </button>
     </form>
-    </template>
   </div>
 </template>

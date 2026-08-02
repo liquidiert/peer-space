@@ -253,7 +253,7 @@ watch(
 <template>
   <div
     ref="minimapRef"
-    class="fixed bottom-24 left-4 z-30 flex flex-col items-start gap-1 select-none"
+    class="hidden md:flex fixed bottom-24 left-4 z-30 flex-col items-start gap-1 select-none"
     :style="pos ? { position: 'fixed', left: `${pos.x}px`, top: `${pos.y}px`, bottom: 'auto', right: 'auto' } : {}"
   >
     <!-- Hovered User Tooltip Card -->
