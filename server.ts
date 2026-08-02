@@ -19,7 +19,7 @@ async function startServer() {
 
   // In-memory application state
   const users: Map<string, User> = new Map(); // socket.id -> User
-  
+
   // Available maps (Loaded from SQLite database or initialized with defaults)
   const maps: Map<string, GridMap> = new Map();
   const defaultOffice = createDefaultOfficeMap();
@@ -680,7 +680,7 @@ async function startServer() {
       }
 
       const tokens: any = await tokenRes.json();
-      
+
       const parseJwtPayload = (token?: string) => {
         if (!token || typeof token !== 'string') return null;
         try {
@@ -821,14 +821,19 @@ async function startServer() {
               <p>Welcome, ${userData.name}! Returning to peer-space...</p>
             </div>
             <script>
+              const userData = ${JSON.stringify(userData)};
               if (window.opener) {
-                window.opener.postMessage({
-                  type: 'OAUTH_AUTH_SUCCESS',
-                  user: ${JSON.stringify(userData)}
-                }, '*');
+                try {
+                  window.opener.postMessage({
+                    type: 'OAUTH_AUTH_SUCCESS',
+                    user: userData
+                  }, '*');
+                } catch (e) {
+                  console.error('Failed to postMessage to opener:', e);
+                }
                 setTimeout(() => { window.close(); }, 800);
               } else {
-                window.location.href = '/';
+                window.location.href = '/?auth_user=' + encodeURIComponent(JSON.stringify(userData));
               }
             </script>
           </body>

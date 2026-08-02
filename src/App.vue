@@ -27,7 +27,39 @@ import { findPathAStar } from './lib/pathfinding';
 const socket = ref<Socket | null>(null);
 const hasJoined = ref(false);
 const userNameInput = ref('');
-const authenticatedUser = ref<{ name: string; email?: string; isAdmin?: boolean } | null>(null);
+
+const AUTH_USER_PERSISTENCE_KEY = 'peerspace_auth_user';
+const AVATAR_PERSISTENCE_KEY = 'peerspace_avatar_config';
+const USER_NAME_PERSISTENCE_KEY = 'peerspace_user_name';
+
+function loadSavedAuthUser() {
+  try {
+    const saved = localStorage.getItem(AUTH_USER_PERSISTENCE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === 'object' && parsed.name) {
+        return parsed;
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+const authenticatedUser = ref<{ name: string; email?: string; isAdmin?: boolean } | null>(loadSavedAuthUser());
+
+watch(
+  authenticatedUser,
+  (newVal) => {
+    try {
+      if (newVal) {
+        localStorage.setItem(AUTH_USER_PERSISTENCE_KEY, JSON.stringify(newVal));
+      } else {
+        localStorage.removeItem(AUTH_USER_PERSISTENCE_KEY);
+      }
+    } catch (e) {}
+  },
+  { deep: true }
+);
 
 // Handle Keycloak / Google Social Login Popup
 async function handleKeycloakLogin(idp = 'google') {
@@ -64,10 +96,11 @@ async function handleKeycloakLogin(idp = 'google') {
 function handleLogout() {
   authenticatedUser.value = null;
   userNameInput.value = '';
+  try {
+    localStorage.removeItem(AUTH_USER_PERSISTENCE_KEY);
+    localStorage.removeItem(USER_NAME_PERSISTENCE_KEY);
+  } catch (e) {}
 }
-
-const AVATAR_PERSISTENCE_KEY = 'peerspace_avatar_config';
-const USER_NAME_PERSISTENCE_KEY = 'peerspace_user_name';
 
 function loadSavedAvatar(): AvatarCustomization {
   const defaultAvatar: AvatarCustomization = {
@@ -355,23 +388,52 @@ onMounted(() => {
     if (me) currentUser.value = me;
   });
 
+  // Check for auth_user param in URL (e.g. from redirect)
+  try {
+    const urlParams = new URLSearchParams(window.location.search);
+    const authUserParam = urlParams.get('auth_user');
+    if (authUserParam) {
+      const parsed = JSON.parse(authUserParam);
+      if (parsed && parsed.name) {
+        authenticatedUser.value = parsed;
+        userNameInput.value = parsed.name;
+        // Clean URL parameter
+        const newUrl = window.location.pathname + window.location.hash;
+        window.history.replaceState({}, document.title, newUrl);
+      }
+    }
+  } catch (e) {}
+
   const handleOAuthMessage = (event: MessageEvent) => {
     const origin = event.origin;
-    if (!origin.endsWith('.run.app') && !origin.includes('localhost') && !origin.includes('127.0.0.1')) {
+    const isSameOrigin = origin === window.location.origin;
+    const isAllowedDomain =
+      origin.endsWith('.run.app') ||
+      origin.includes('localhost') ||
+      origin.includes('127.0.0.1') ||
+      origin.includes('personalclientcare.com');
+
+    if (!isSameOrigin && !isAllowedDomain) {
       return;
     }
+
     if (event.data?.type === 'OAUTH_AUTH_SUCCESS' && event.data?.user) {
-      authenticatedUser.value = event.data.user;
-      if (event.data.user.name) {
-        userNameInput.value = event.data.user.name;
-        if (hasJoined.value && socket.value) {
-          currentUser.value.name = event.data.user.name;
-          currentUser.value.isAdmin = Boolean(event.data.user.isAdmin);
-          socket.value.emit('user:update_profile', {
-            name: event.data.user.name,
-            isAdmin: Boolean(event.data.user.isAdmin),
-          });
-        }
+      const u = event.data.user;
+      authenticatedUser.value = u;
+      if (u.name) {
+        userNameInput.value = u.name;
+      }
+
+      // Automatically join workspace if not joined yet
+      if (!hasJoined.value) {
+        handleJoinSpace();
+      } else if (socket.value) {
+        currentUser.value.name = u.name || 'Member';
+        currentUser.value.isAdmin = Boolean(u.isAdmin);
+        socket.value.emit('user:update_profile', {
+          name: u.name || 'Member',
+          isAdmin: Boolean(u.isAdmin),
+        });
       }
     }
   };
@@ -390,9 +452,9 @@ onUnmounted(() => {
 });
 
 async function handleJoinSpace() {
-  if (!authenticatedUser.value || !socket.value) return;
-  const nameToUse = authenticatedUser.value.name || 'Member';
-  const isAdmin = Boolean(authenticatedUser.value.isAdmin);
+  if (!socket.value) return;
+  const nameToUse = authenticatedUser.value?.name || userNameInput.value || 'Member';
+  const isAdmin = Boolean(authenticatedUser.value?.isAdmin);
   hasJoined.value = true;
   currentUser.value.name = nameToUse;
   currentUser.value.avatar = avatarConfig.value;
