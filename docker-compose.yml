@@ -1,22 +1,20 @@
-version: '3.8'
-
 services:
   peerspace:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: peerspace-app
     restart: unless-stopped
-    ports:
-      - "3000:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - KEYCLOAK_URL=${KEYCLOAK_URL:-https://cloak.dev.personalclientcare.com/realms/peer-space}
-      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-peer-space-login}
-      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET:-}
+      - KEYCLOAK_URL=${KEYCLOAK_URL}
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID}
+      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET}
+    expose:
+      - "3000"
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
+      start_period: 10s
