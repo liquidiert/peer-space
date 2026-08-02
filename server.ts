@@ -11,6 +11,7 @@ import { createServer as createViteServer } from 'vite';
 import { User, GridMap, ChatMessage, MapObject, WhiteboardStroke, StickyNote, PrivateZone } from './src/types';
 import { createDefaultOfficeMap, createBeachRetreatMap } from './src/mapsData';
 import { initWorkspaceDatabase } from './src/db';
+import { createSessionToken, verifySessionToken } from './src/lib/session';
 
 async function startServer() {
   const app = new Hono();
@@ -171,14 +172,28 @@ async function startServer() {
     console.log(`User connected: ${socket.id}`);
 
     // Join room
-    socket.on('user:join', (payload: { name: string; avatar: any; isAdmin?: boolean }) => {
+    socket.on('user:join', (payload: { name: string; avatar: any; isAdmin?: boolean; clientId?: string; email?: string; sessionToken?: string }) => {
       const map = maps.get(currentMapId) || defaultOffice;
       const initialZone = getPrivateZoneId(map, map.spawnPoint.x, map.spawnPoint.y);
 
+      // isAdmin and a cross-device stable identity (email) can ONLY come from a verified
+      // Keycloak session token - payload.isAdmin/email are otherwise fully client-controlled
+      // and must never be trusted directly (that was previously a trivial privilege-escalation
+      // hole: any client could just send { isAdmin: true }).
+      const session = verifySessionToken(payload.sessionToken);
+      const isAdmin = session ? session.isAdmin : false;
+      const email = session ? session.email : undefined;
+      const displayName = session?.name || payload.name || `Guest_${socket.id.substring(0, 4)}`;
+
+      // Prefer a stable identity that survives reloads/reconnects (socket.id is re-generated
+      // every connection) - the verified email when authenticated, else the persisted
+      // per-browser clientId, else fall back to socket.id for older/guest clients.
+      const stableId = email || payload.clientId || socket.id;
+
       const newUser: User = {
-        id: socket.id,
+        id: stableId,
         socketId: socket.id,
-        name: payload.name || `Guest_${socket.id.substring(0, 4)}`,
+        name: displayName,
         position: { ...map.spawnPoint },
         direction: 'down',
         avatar: payload.avatar || {
@@ -194,7 +209,7 @@ async function startServer() {
         isDeafened: false,
         isSpeaking: false,
         isScreenSharing: false,
-        isAdmin: Boolean(payload.isAdmin),
+        isAdmin,
         currentZoneId: initialZone,
         lastSeen: Date.now(),
       };
@@ -812,11 +827,18 @@ async function startServer() {
         return false;
       };
 
+      const verifiedName = resolveName();
+      const verifiedEmail = getEmail();
+      const verifiedIsAdmin = checkIsAdminGroup();
+
       const userData = {
-        name: resolveName(),
-        email: getEmail(),
-        isAdmin: checkIsAdminGroup(),
+        name: verifiedName,
+        email: verifiedEmail,
+        isAdmin: verifiedIsAdmin,
         authenticated: true,
+        // Signed by the server after this Keycloak exchange was verified - the socket layer
+        // trusts this token (never raw client-submitted name/email/isAdmin) for identity/admin.
+        sessionToken: createSessionToken({ email: verifiedEmail, name: verifiedName, isAdmin: verifiedIsAdmin }),
       };
 
       return c.html(`

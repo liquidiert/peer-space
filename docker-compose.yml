@@ -11,6 +11,7 @@ services:
       - KEYCLOAK_URL=${KEYCLOAK_URL}
       - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID}
       - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET}
+      - SESSION_SECRET=${SESSION_SECRET}
       - DATA_DIR=/app/data
     volumes:
       - peerspace_data:/app/data

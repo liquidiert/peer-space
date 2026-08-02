@@ -31,6 +31,24 @@ const userNameInput = ref('');
 const AUTH_USER_PERSISTENCE_KEY = 'peerspace_auth_user';
 const AVATAR_PERSISTENCE_KEY = 'peerspace_avatar_config';
 const USER_NAME_PERSISTENCE_KEY = 'peerspace_user_name';
+const CLIENT_ID_PERSISTENCE_KEY = 'peerspace_client_id';
+
+// A user's socket.id (and therefore the old `user.id`) is re-generated on every reload,
+// so anything keyed by it - like a claimed desk's claimedByUserId - would silently stop
+// matching the "same" user after a refresh. This stable id survives reloads instead.
+function getOrCreateClientId(): string {
+  try {
+    let id = localStorage.getItem(CLIENT_ID_PERSISTENCE_KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(CLIENT_ID_PERSISTENCE_KEY, id);
+    }
+    return id;
+  } catch (e) {
+    return crypto.randomUUID();
+  }
+}
+const clientId = getOrCreateClientId();
 
 function loadSavedAuthUser() {
   try {
@@ -45,7 +63,9 @@ function loadSavedAuthUser() {
   return null;
 }
 
-const authenticatedUser = ref<{ name: string; email?: string; isAdmin?: boolean } | null>(loadSavedAuthUser());
+const authenticatedUser = ref<{ name: string; email?: string; isAdmin?: boolean; sessionToken?: string } | null>(
+  loadSavedAuthUser()
+);
 
 watch(
   authenticatedUser,
@@ -490,6 +510,11 @@ async function handleJoinSpace() {
     name: nameToUse,
     avatar: avatarConfig.value,
     isAdmin,
+    clientId,
+    email: authenticatedUser.value?.email,
+    // The server verifies this and derives isAdmin/email from it directly - it does not
+    // trust the isAdmin/email fields above on their own (see server.ts user:join handler).
+    sessionToken: authenticatedUser.value?.sessionToken,
   });
 
   // Initialize WebRTC audio stream & voice activity detection
