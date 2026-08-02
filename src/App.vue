@@ -55,7 +55,11 @@ function loadSavedAuthUser() {
     const saved = localStorage.getItem(AUTH_USER_PERSISTENCE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (parsed && typeof parsed === 'object' && parsed.name) {
+      // Entries cached before session tokens existed (or ones missing it for any other
+      // reason) can't be verified server-side, so isAdmin would silently come back false
+      // even for a real admin. Drop them instead of restoring a half-authenticated state -
+      // the user just needs to log in again to get a fresh, verifiable token.
+      if (parsed && typeof parsed === 'object' && parsed.name && parsed.sessionToken) {
         return parsed;
       }
     }
