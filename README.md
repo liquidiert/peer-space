@@ -62,12 +62,12 @@ node dist/server.js
 
 ---
 
-### 3. Deploying with Docker
+### 3. Deploying with Docker (Bun)
 
-Build and run a standalone production container using the multi-stage `Dockerfile`:
+Build and run a lightweight production container using Bun (`oven/bun:1-alpine`):
 
 ```bash
-# Build the Docker image
+# Build the Bun Docker image
 docker build -t peerspace-app .
 
 # Run the container mapping port 3000
@@ -169,7 +169,7 @@ To ensure Keycloak includes custom user groups (e.g. `/admin` or `admin`) or cli
 
 If you are using Identity Provider (IDP) Brokered Authentication (e.g., social logins, external OIDC brokers, Google Workspace), configure the **First Broker Login - No Auto User** flow in Keycloak under **Authentication**:
 
-![Keycloak Authentication Flow Configuration](./assets/.aistudio/auth-flow.png)
+![Keycloak Authentication Flow Configuration](./public/keycloak_auth_flow.jpg)
 
 #### Execution Steps & Requirements:
 
