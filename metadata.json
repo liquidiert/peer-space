@@ -1,0 +1,11 @@
+{
+  "name": "peer-space",
+  "description": "A spatial 2D virtual office with real-time proximity WebRTC voice chat, interactive map objects, custom avatars, private zones, and map builder.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
