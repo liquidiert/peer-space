@@ -344,15 +344,27 @@ export function useWebRTCProximity(
       if (event.track.kind === 'audio') {
         attachRemoteAudioStream(targetSocketId, remoteStream);
       } else if (event.track.kind === 'video') {
-        const newMap = new Map(remoteVideoStreams.value);
-        newMap.set(targetSocketId, remoteStream);
-        remoteVideoStreams.value = newMap;
-
-        event.track.onended = () => {
+        const addStream = () => {
+          const m = new Map(remoteVideoStreams.value);
+          m.set(targetSocketId, remoteStream);
+          remoteVideoStreams.value = m;
+        };
+        const removeStream = () => {
           const m = new Map(remoteVideoStreams.value);
           m.delete(targetSocketId);
           remoteVideoStreams.value = m;
         };
+
+        // Proximity-based add/removeTrack (see updatePeerVideoConnections) doesn't tear down
+        // the transceiver - it renegotiates the same one, which mutes the remote track rather
+        // than ending it. Without handling mute/unmute here, a peer walking out of range would
+        // leave a frozen/blacked-out tile behind instead of the tile disappearing.
+        if (!event.track.muted) {
+          addStream();
+        }
+        event.track.onunmute = addStream;
+        event.track.onmute = removeStream;
+        event.track.onended = removeStream;
       }
     };
 
