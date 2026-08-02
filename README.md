@@ -169,7 +169,7 @@ To ensure Keycloak includes custom user groups (e.g. `/admin` or `admin`) or cli
 
 If you are using Identity Provider (IDP) Brokered Authentication (e.g., social logins, external OIDC brokers, Google Workspace), configure the **First Broker Login - No Auto User** flow in Keycloak under **Authentication**:
 
-![Keycloak Authentication Flow Configuration](./public/keycloak_auth_flow.jpg)
+![Keycloak Authentication Flow Configuration](./assets/auth-flow.png)
 
 #### Execution Steps & Requirements:
 
