@@ -12,8 +12,8 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - KEYCLOAK_URL=${KEYCLOAK_URL:-https://cloak.dev.personalclientcare.com/realms/ins3c}
-      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-ins3c-login}
+      - KEYCLOAK_URL=${KEYCLOAK_URL:-https://cloak.dev.personalclientcare.com/realms/peer-space}
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-peer-space-login}
       - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET:-}
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1"]
