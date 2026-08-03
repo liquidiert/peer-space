@@ -12,6 +12,7 @@ import { User, GridMap, ChatMessage, MapObject, WhiteboardStroke, StickyNote, Pr
 import { createDefaultOfficeMap, createBeachRetreatMap } from './src/mapsData';
 import { initWorkspaceDatabase } from './src/db';
 import { createSessionToken, verifySessionToken } from './src/lib/session';
+import { isTileWalkable } from './src/lib/pathfinding';
 
 async function startServer() {
   const app = new Hono();
@@ -172,9 +173,28 @@ async function startServer() {
     console.log(`User connected: ${socket.id}`);
 
     // Join room
-    socket.on('user:join', (payload: { name: string; avatar: any; isAdmin?: boolean; clientId?: string; email?: string; sessionToken?: string }) => {
+    socket.on(
+      'user:join',
+      (payload: {
+        name: string;
+        avatar: any;
+        isAdmin?: boolean;
+        clientId?: string;
+        email?: string;
+        sessionToken?: string;
+        lastPosition?: { mapId: string; x: number; y: number };
+      }) => {
       const map = maps.get(currentMapId) || defaultOffice;
-      const initialZone = getPrivateZoneId(map, map.spawnPoint.x, map.spawnPoint.y);
+
+      // Resume where the browser last left off, as long as it was on this same map and the
+      // tile is still walkable (map layout may have changed via the builder since then).
+      const lp = payload.lastPosition;
+      const startPosition =
+        lp && lp.mapId === map.id && isTileWalkable(map, lp.x, lp.y)
+          ? { x: lp.x, y: lp.y }
+          : { ...map.spawnPoint };
+
+      const initialZone = getPrivateZoneId(map, startPosition.x, startPosition.y);
 
       // isAdmin and a cross-device stable identity (email) can ONLY come from a verified
       // Keycloak session token - payload.isAdmin/email are otherwise fully client-controlled
@@ -194,7 +214,7 @@ async function startServer() {
         id: stableId,
         socketId: socket.id,
         name: displayName,
-        position: { ...map.spawnPoint },
+        position: startPosition,
         direction: 'down',
         avatar: payload.avatar || {
           skinColor: '#f87171',
@@ -227,7 +247,8 @@ async function startServer() {
       socket.broadcast.emit('user:joined', newUser);
 
       updateSpatialProximity();
-    });
+      }
+    );
 
     // Handle User Movement
     socket.on('user:move', (data: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right' }) => {

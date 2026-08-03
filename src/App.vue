@@ -32,6 +32,20 @@ const AUTH_USER_PERSISTENCE_KEY = 'peerspace_auth_user';
 const AVATAR_PERSISTENCE_KEY = 'peerspace_avatar_config';
 const USER_NAME_PERSISTENCE_KEY = 'peerspace_user_name';
 const CLIENT_ID_PERSISTENCE_KEY = 'peerspace_client_id';
+const LAST_POSITION_PERSISTENCE_KEY = 'peerspace_last_position';
+
+function loadSavedPosition(): { mapId: string; x: number; y: number } | null {
+  try {
+    const saved = localStorage.getItem(LAST_POSITION_PERSISTENCE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed.mapId === 'string' && typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+        return parsed;
+      }
+    }
+  } catch (e) {}
+  return null;
+}
 
 // A user's socket.id (and therefore the old `user.id`) is re-generated on every reload,
 // so anything keyed by it - like a claimed desk's claimedByUserId - would silently stop
@@ -187,6 +201,22 @@ const currentUser = ref<User>({
 const users = ref<User[]>([]);
 const currentMap = ref<GridMap>(createDefaultOfficeMap());
 const messages = ref<ChatMessage[]>([]);
+
+// Remember the last tile we stood on so a reload/re-login resumes there instead of
+// respawning at the map's spawn point (server re-validates this against the live map).
+watch(
+  () => (hasJoined.value ? currentUser.value.position : null),
+  (pos) => {
+    if (!pos || !currentMap.value) return;
+    try {
+      localStorage.setItem(
+        LAST_POSITION_PERSISTENCE_KEY,
+        JSON.stringify({ mapId: currentMap.value.id, x: pos.x, y: pos.y })
+      );
+    } catch (e) {}
+  },
+  { deep: true }
+);
 
 // Chat Panel visibility & unread tracking
 const isChatOpen = ref(false);
@@ -519,6 +549,8 @@ async function handleJoinSpace() {
     // The server verifies this and derives isAdmin/email from it directly - it does not
     // trust the isAdmin/email fields above on their own (see server.ts user:join handler).
     sessionToken: authenticatedUser.value?.sessionToken,
+    // Resume where we left off last time, if the server decides the tile/map are still valid.
+    lastPosition: loadSavedPosition(),
   });
 
   // Initialize WebRTC audio stream & voice activity detection
