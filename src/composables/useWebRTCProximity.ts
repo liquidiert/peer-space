@@ -81,6 +81,20 @@ export function useWebRTCProximity(
       });
 
       setupVoiceActivityDetection(stream);
+
+      // On a fresh page load, the server's init:state (which drives syncPeerConnections)
+      // can easily arrive before the mic permission prompt is resolved - the user has to
+      // physically click "Allow" first. Any peer connections that got created in the
+      // meantime went out with no audio track and would otherwise stay silent forever;
+      // attach the track retroactively instead.
+      peerConnections.forEach((pc, targetSocketId) => {
+        const hasAudioSender = pc.getSenders().some((s) => s.track?.kind === 'audio');
+        if (!hasAudioSender) {
+          stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
+          safeRenegotiate(targetSocketId, pc);
+        }
+      });
+
       return stream;
     } catch (err) {
       console.warn('Microphone access denied or unavailable:', err);
@@ -369,13 +383,37 @@ export function useWebRTCProximity(
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        // Terminal - rebuild immediately rather than leaving the peer silent until some
+        // unrelated event (someone else joining/leaving) happens to call
+        // syncPeerConnections() again.
         removePeerConnection(targetSocketId);
+        reconnectToPeerIfInitiator(targetSocketId);
+      } else if (pc.connectionState === 'disconnected') {
+        // Often transient (a brief network blip) and the ICE agent recovers on its own -
+        // only force a rebuild if it's still stuck after a few seconds.
+        setTimeout(() => {
+          if (peerConnections.get(targetSocketId) === pc && pc.connectionState === 'disconnected') {
+            removePeerConnection(targetSocketId);
+            reconnectToPeerIfInitiator(targetSocketId);
+          }
+        }, 5000);
       }
     };
 
     peerConnections.set(targetSocketId, pc);
     return pc;
+  }
+
+  // Re-establish a connection to a peer after it's been torn down, but only from the side
+  // that would have initiated it in the first place (same tiebreak as syncPeerConnections) -
+  // otherwise both sides would race to recreate it at once.
+  function reconnectToPeerIfInitiator(targetSocketId: string) {
+    const myId = currentUserRef.value.socketId;
+    const stillPresent = usersRef.value.some((u) => u.socketId === targetSocketId);
+    if (stillPresent && myId < targetSocketId) {
+      connectToUser(targetSocketId);
+    }
   }
 
   function attachRemoteAudioStream(targetSocketId: string, stream: MediaStream) {
@@ -558,6 +596,27 @@ export function useWebRTCProximity(
 
     try {
       if (signal.type === 'offer') {
+        // Glare: both sides can independently decide to renegotiate at the same moment
+        // (e.g. two peers both walking into range simultaneously each call
+        // updatePeerVideoConnections and send an offer), so our own offer can already be
+        // outstanding when the peer's offer arrives. Without handling this, whichever
+        // side's setRemoteDescription() lands second throws, is only console.error'd, and
+        // that connection is left stuck in 'have-local-offer' forever - this was a real
+        // source of "audio/video sometimes doesn't come back" reports.
+        //
+        // Fix: standard "perfect negotiation" polite/impolite split, using the same
+        // deterministic id comparison already used to decide who initiates in
+        // syncPeerConnections. The polite side rolls back its own offer and accepts the
+        // incoming one; the impolite side ignores the incoming offer and keeps its own.
+        const offerCollision = pc.signalingState !== 'stable';
+        if (offerCollision) {
+          const isPolite = currentUserRef.value.socketId > from;
+          if (!isPolite) {
+            return;
+          }
+          await pc.setLocalDescription({ type: 'rollback' } as any);
+        }
+
         await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
 
         // Process buffered candidate signals
@@ -745,5 +804,10 @@ export function useWebRTCProximity(
     remoteScreenStreams,
     availableVideoDevices,
     currentVideoDeviceId,
+    // Read-only escape hatch for integration tests to inspect actual RTCPeerConnection state
+    // (signaling state, senders/tracks) instead of re-deriving it from reactive refs alone.
+    // Not used by any UI component.
+    __debugPeerConnections: peerConnections,
+    __debugScreenPeerConnections: screenPeerConnections,
   };
 }
