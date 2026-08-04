@@ -25,7 +25,7 @@ ENV PORT=3000
 
 # Copy package manifests & install production dependencies only
 COPY package.json bun.lock* ./
-RUN bun install --production
+RUN bun install --production --verbose
 
 # Copy built application output from builder stage
 COPY --from=builder /app/dist ./dist
@@ -35,4 +35,3 @@ EXPOSE 3000
 
 # Start Hono server with Bun
 CMD ["bun", "dist/server.js"]
-
