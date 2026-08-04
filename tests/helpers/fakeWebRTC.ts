@@ -101,6 +101,10 @@ export class FakeRTCPeerConnection {
   private senders: FakeRTCRtpSender[] = [];
   private listeners = new Map<string, Set<() => void>>();
 
+  /** The other side's FakeRTCPeerConnection, wired up by the test harness once it knows
+   * which two connections belong to the same logical session (see SignalBus). */
+  private linkedRemote: FakeRTCPeerConnection | null = null;
+
   constructor(_config?: unknown) {
     allPeerConnections.push(this);
   }
@@ -124,15 +128,44 @@ export class FakeRTCPeerConnection {
     this.emit('signalingstatechange');
   }
 
+  /** Wires this connection up to its counterpart so addTrack/removeTrack actually deliver
+   * media across the fake "network", instead of tracks just sitting in `senders` unseen. */
+  linkTo(remote: FakeRTCPeerConnection) {
+    if (this.linkedRemote === remote) return;
+    this.linkedRemote = remote;
+    // Catch up on anything already added before the link existed (addTrack calls made
+    // while creating the connection happen before any signaling round-trip completes).
+    this.senders.forEach((s) => {
+      if (s.track) remote.emitRemoteTrack(s.track);
+    });
+  }
+
   addTrack(track: FakeMediaStreamTrack, _stream?: FakeMediaStream) {
     const sender = new FakeRTCRtpSender(track);
     this.senders.push(sender);
+
+    if (this.linkedRemote) {
+      if (track.muted && track.onunmute) {
+        // Re-adding a track that this same connection previously delivered and then
+        // removed (proximity re-entry) reuses the existing transceiver in real WebRTC,
+        // so the far side observes 'unmute', not a brand new 'ontrack'.
+        track.muted = false;
+        track.onunmute();
+      } else {
+        this.linkedRemote.emitRemoteTrack(track);
+      }
+    }
     return sender;
   }
 
   removeTrack(sender: FakeRTCRtpSender) {
     // Matches the browser: the sender stays attached to the connection, its track goes null.
+    const track = sender.track;
     sender.track = null;
+    if (track && this.linkedRemote && !track.muted) {
+      track.muted = true;
+      track.onmute?.();
+    }
   }
 
   getSenders() {
@@ -245,6 +278,12 @@ export class FakeAudioContext {
   }
 }
 
+/** Toggle to simulate a browser's autoplay policy rejecting audio.play(). */
+export let autoplayBlocked = false;
+export function setAutoplayBlocked(blocked: boolean) {
+  autoplayBlocked = blocked;
+}
+
 export class FakeAudioElement {
   autoplay = false;
   volume = 1;
@@ -252,6 +291,11 @@ export class FakeAudioElement {
   paused = true;
   setAttribute() {}
   play() {
+    if (autoplayBlocked) {
+      // Real browsers reject with a NotAllowedError DOMException; the message isn't
+      // load-bearing for the app, only that the promise rejects.
+      return Promise.reject(new Error('NotAllowedError'));
+    }
     this.paused = false;
     return Promise.resolve();
   }
@@ -267,6 +311,7 @@ export interface MediaHarnessOptions {
 
 export function installWebRTCMocks(options: MediaHarnessOptions = {}) {
   allPeerConnections.length = 0;
+  autoplayBlocked = false;
 
   const pendingUserMedia: Array<(stream: FakeMediaStream) => void> = [];
 

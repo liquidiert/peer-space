@@ -46,6 +46,42 @@ export function useWebRTCProximity(
   // Pending ICE candidates buffer if remote description is not set yet
   const pendingCandidates = new Map<string, RTCIceCandidateInit[]>();
 
+  // Whether any remote peer's audio element is currently blocked by the browser's autoplay
+  // policy (play() rejected) - surfaced so the UI can prompt for a tap to unblock sound.
+  const isAudioPlaybackBlocked = ref(false);
+
+  // Browsers commonly reject audio.play() for an <audio> element that's created and played
+  // asynchronously (e.g. when a remote track arrives well after the page loaded) unless it
+  // happens inside a direct user-gesture handler. This retries playback on the next tap/
+  // click/keypress anywhere on the page, which is exactly such a gesture - this is the
+  // standard "unlock autoplay" pattern and fixes the classic "I can see they're talking but
+  // hear nothing" symptom that only affects some browsers/devices.
+  function unlockBlockedAudioPlayback() {
+    const pausedElements = Array.from(remoteAudioElements.values()).filter((audio) => audio.paused);
+    if (pausedElements.length === 0) {
+      isAudioPlaybackBlocked.value = false;
+      return;
+    }
+
+    // play() is async, so the flag must wait for every attempt to actually settle -
+    // updating it synchronously right after calling play() would just re-read the stale
+    // "still blocked" state from before this attempt.
+    const attempts = pausedElements.map((audio) =>
+      audio.play().then(
+        () => true,
+        () => false
+      )
+    );
+    Promise.all(attempts).then((results) => {
+      isAudioPlaybackBlocked.value = results.some((succeeded) => !succeeded);
+    });
+  }
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pointerdown', unlockBlockedAudioPlayback);
+    window.addEventListener('keydown', unlockBlockedAudioPlayback);
+  }
+
   // Screen share uses its own dedicated peer connection per peer (kept separate from the
   // camera/mic connection) so a sharer's video track never collides with their camera track.
   const isScreenSharing = ref(false);
@@ -425,7 +461,10 @@ export function useWebRTCProximity(
       remoteAudioElements.set(targetSocketId, audio);
     }
     audio.srcObject = stream;
-    audio.play().catch((err) => console.warn('Autoplay audio blocked:', err));
+    audio.play().catch((err) => {
+      console.warn('Autoplay audio blocked, will retry on next user interaction:', err);
+      isAudioPlaybackBlocked.value = true;
+    });
 
     updateRemoteVolume(targetSocketId);
   }
@@ -762,6 +801,10 @@ export function useWebRTCProximity(
     if (typeof navigator !== 'undefined' && navigator.mediaDevices) {
       navigator.mediaDevices.removeEventListener?.('devicechange', refreshVideoDevices);
     }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pointerdown', unlockBlockedAudioPlayback);
+      window.removeEventListener('keydown', unlockBlockedAudioPlayback);
+    }
     if (vadInterval) clearInterval(vadInterval);
     if (audioCtx) audioCtx.close();
     if (localAudioStream.value) {
@@ -804,6 +847,8 @@ export function useWebRTCProximity(
     remoteScreenStreams,
     availableVideoDevices,
     currentVideoDeviceId,
+    isAudioPlaybackBlocked,
+    unlockBlockedAudioPlayback,
     // Read-only escape hatch for integration tests to inspect actual RTCPeerConnection state
     // (signaling state, senders/tracks) instead of re-deriving it from reactive refs alone.
     // Not used by any UI component.

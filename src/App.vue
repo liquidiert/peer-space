@@ -256,6 +256,8 @@ const {
   localScreenStream,
   remoteScreenStreams,
   availableVideoDevices,
+  isAudioPlaybackBlocked,
+  unlockBlockedAudioPlayback,
 } = useWebRTCProximity(socket, currentUser, users, isMuted, isDeafened);
 
 // Map Builder State
@@ -963,6 +965,22 @@ function handleToggleBuilderMode() {
           <span>{{ activeZoneBanner }}</span>
         </div>
       </transition>
+
+      <!-- Autoplay-blocked Audio Prompt: some browsers (especially mobile Safari) refuse to
+           play a peer's incoming audio until there's a direct user gesture on the page. -->
+      <div
+        v-if="isAudioPlaybackBlocked"
+        class="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-rose-400 text-slate-950 border-3 border-slate-900 px-4 py-2.5 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] font-heading font-extrabold text-xs flex items-center gap-3 max-w-md text-center"
+      >
+        <span>🔇 Audio is blocked by your browser</span>
+        <button
+          type="button"
+          @click="unlockBlockedAudioPlayback"
+          class="bg-white hover:bg-slate-100 border-2 border-slate-900 rounded-lg px-3 py-1 pixel-btn shrink-0"
+        >
+          Tap to Enable
+        </button>
+      </div>
 
       <!-- Spatial Canvas -->
       <SpatialCanvas

@@ -71,7 +71,28 @@ export class SignalBus {
   private deliver(msg: EmittedSignal) {
     const target = this.clients.get(msg.to);
     if (!target) return; // peer already gone - mirrors io.to(<stale id>) being a no-op
-    this.inFlight.push(target.api.handleSignal({ from: msg.from, signal: msg.signal }));
+    const handled = target.api
+      .handleSignal({ from: msg.from, signal: msg.signal })
+      .then(() => this.linkPeerConnections(msg.from, msg.to, msg.signal?.channel));
+    this.inFlight.push(handled);
+  }
+
+  /** Once both sides have created their RTCPeerConnection for each other, wire them
+   * together so addTrack/removeTrack on one side actually reach the other's ontrack -
+   * a real signaling server never needs to know about this, it's purely a test-harness
+   * stand-in for the two browsers' independent WebRTC stacks. */
+  private linkPeerConnections(idA: string, idB: string, channel?: string) {
+    const clientA = this.clients.get(idA);
+    const clientB = this.clients.get(idB);
+    if (!clientA || !clientB) return;
+
+    const debugKey = channel === 'screen' ? '__debugScreenPeerConnections' : '__debugPeerConnections';
+    const pcA = (clientA.api as any)[debugKey]?.get(idB);
+    const pcB = (clientB.api as any)[debugKey]?.get(idA);
+    if (pcA && pcB) {
+      pcA.linkTo(pcB);
+      pcB.linkTo(pcA);
+    }
   }
 
   /** Deliver everything queued while paused. */

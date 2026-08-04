@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { nextTick } from 'vue';
-import { installWebRTCMocks, FakeMediaStream, FakeMediaStreamTrack } from './helpers/fakeWebRTC';
+import {
+  installWebRTCMocks,
+  setAutoplayBlocked,
+  FakeMediaStream,
+  FakeMediaStreamTrack,
+} from './helpers/fakeWebRTC';
 import { SignalBus, createPeerClient, makeUser, type PeerClient } from './helpers/peerHarness';
 
 /**
@@ -307,6 +312,39 @@ describe('proximity audio/video reconnection', () => {
     const pc = peerConnectionTo(a, B);
     const audioSenders = pc.getSenders().filter((s: any) => s.track?.kind === 'audio');
     expect(audioSenders.length, 'local mic track must be attached to the existing connection').toBe(1);
+
+    a.destroy();
+    b.destroy();
+  });
+
+  it('recovers audio blocked by the browser autoplay policy after a user gesture', async () => {
+    // Reproduces "I can see they're talking but can't hear anything": the remote track
+    // arrives and is wired up correctly, but audio.play() is rejected by the browser
+    // because it wasn't called inside a direct user-gesture handler.
+    const users = usersInRange();
+    const a = createPeerClient(bus, A, users);
+    const b = createPeerClient(bus, B, users);
+
+    setAutoplayBlocked(true);
+
+    await giveAudio(a);
+    await giveAudio(b);
+    a.api.syncPeerConnections();
+    b.api.syncPeerConnections();
+    await settle();
+
+    expect(a.api.isAudioPlaybackBlocked.value).toBe(true);
+
+    // Still blocked - nothing magically fixes itself without a gesture.
+    a.api.unlockBlockedAudioPlayback();
+    await settle();
+    expect(a.api.isAudioPlaybackBlocked.value).toBe(true);
+
+    // A user gesture (tap/click) arrives - playback should recover.
+    setAutoplayBlocked(false);
+    a.api.unlockBlockedAudioPlayback();
+    await settle();
+    expect(a.api.isAudioPlaybackBlocked.value).toBe(false);
 
     a.destroy();
     b.destroy();
