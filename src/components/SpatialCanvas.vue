@@ -51,624 +51,716 @@ function followCameraOnMobile() {
   });
 }
 
-// Render Cel-Shaded Tile Helper
-function renderTile(ctx: CanvasRenderingContext2D, type: TileType, x: number, y: number) {
-  const px = x * CELL_SIZE;
-  const py = y * CELL_SIZE;
+// ============================================================================
+// Cel-Shaded Pixel Art Toolkit
+// ============================================================================
+// Every tile and object is authored on a virtual 16x16 grid per cell (PX screen
+// pixels per art pixel), so nothing lands on a half-pixel and the whole map
+// stays crisp. Shading follows one convention everywhere: a hard OUTLINE edge,
+// a mid `base` tone, `dark` on the bottom/right (facing away from the light)
+// and `light`/`hi` on the top/left, using flat bands and dithering rather than
+// gradients - that combination is what reads as "cel-shaded" instead of muddy.
 
-  // Base background fill
-  switch (type) {
-    case 'floor_wood':
-      // Soft natural warm Scandinavian oak wood floor with smooth tile blending
-      ctx.fillStyle = '#c89f6d';
-      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+const ART = 16; // art pixels per tile edge
+const PX = CELL_SIZE / ART; // screen pixels per art pixel
+const OUTLINE = '#0f172a';
 
-      // Plank 1 (Top half)
-      ctx.fillStyle = '#d8ae7d';
-      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE / 2 - 1);
-      ctx.fillStyle = '#e6c8a2'; // Soft top grain highlight
-      ctx.fillRect(px + ((x % 2) * 12), py + 3, CELL_SIZE - 12, 1);
+interface Ramp {
+  dark: string;
+  base: string;
+  light: string;
+  hi: string;
+}
 
-      // Plank 2 (Bottom half)
-      ctx.fillStyle = '#b88d5c';
-      ctx.fillRect(px, py + CELL_SIZE / 2, CELL_SIZE, CELL_SIZE / 2);
-      ctx.fillStyle = '#cb9f6e'; // Soft bottom grain highlight
-      ctx.fillRect(px + (((x + 1) % 2) * 12), py + CELL_SIZE / 2 + 3, CELL_SIZE - 12, 1);
+const PALETTE: Record<string, Ramp> = {
+  oak: { dark: '#8a5a2b', base: '#b9834a', light: '#d3a068', hi: '#e8c48f' },
+  // Distinctly blue so carpeted areas never read as concrete at a glance.
+  carpet: { dark: '#28405e', base: '#39597f', light: '#4d75a3', hi: '#6b93c0' },
+  marble: { dark: '#94a3b8', base: '#e2e8f0', light: '#f1f5f9', hi: '#ffffff' },
+  grass: { dark: '#3f6212', base: '#4d7c0f', light: '#65a30d', hi: '#84cc16' },
+  // Neutral grey (deliberately desaturated) to stay clearly apart from the blue carpet.
+  concrete: { dark: '#4a4f57', base: '#61666e', light: '#7a8089', hi: '#99a0a9' },
+  brick: { dark: '#7f1d1d', base: '#b91c1c', light: '#dc2626', hi: '#f87171' },
+  darkwood: { dark: '#3b1a06', base: '#6b3410', light: '#8b4a18', hi: '#b06a2c' },
+  water: { dark: '#0c4a6e', base: '#0369a1', light: '#0ea5e9', hi: '#7dd3fc' },
+  steel: { dark: '#334155', base: '#64748b', light: '#94a3b8', hi: '#cbd5e1' },
+  indigo: { dark: '#312e81', base: '#4f46e5', light: '#6366f1', hi: '#a5b4fc' },
+  amber: { dark: '#b45309', base: '#f59e0b', light: '#fbbf24', hi: '#fde68a' },
+  leaf: { dark: '#14532d', base: '#15803d', light: '#22c55e', hi: '#86efac' },
+};
 
-      // Horizontal plank seam
-      ctx.fillStyle = 'rgba(110, 70, 30, 0.2)';
-      ctx.fillRect(px, py + CELL_SIZE / 2 - 1, CELL_SIZE, 1);
+/** Stable pseudo-random in [0,1) for a grid cell - deterministic so texture never flickers. */
+function tileHash(x: number, y: number, salt = 0): number {
+  let h = Math.imul(x, 374761393) ^ Math.imul(y, 668265263) ^ Math.imul(salt, 1274126177);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
 
-      // Vertical staggered plank joints
-      ctx.fillRect(px + ((x * 16) % CELL_SIZE), py, 1, CELL_SIZE / 2 - 1);
-      ctx.fillRect(px + (((x * 16) + 24) % CELL_SIZE), py + CELL_SIZE / 2, 1, CELL_SIZE / 2);
+/** Fill a rect in art-pixel units relative to an origin. */
+function fx(
+  ctx: CanvasRenderingContext2D,
+  ox: number,
+  oy: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: string
+) {
+  ctx.fillStyle = color;
+  ctx.fillRect(ox + x * PX, oy + y * PX, w * PX, h * PX);
+}
 
-      // Soft, subtle outer blend border
-      ctx.strokeStyle = 'rgba(110, 70, 30, 0.12)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(px + 0.5, py + 0.5, CELL_SIZE - 1, CELL_SIZE - 1);
-      break;
+/** 1-art-pixel-thick outline rect (drawn as 4 fills so it stays perfectly crisp). */
+function ox1(
+  ctx: CanvasRenderingContext2D,
+  ox: number,
+  oy: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: string
+) {
+  fx(ctx, ox, oy, x, y, w, 1, color);
+  fx(ctx, ox, oy, x, y + h - 1, w, 1, color);
+  fx(ctx, ox, oy, x, y, 1, h, color);
+  fx(ctx, ox, oy, x + w - 1, y, 1, h, color);
+}
 
-    case 'floor_carpet':
-      // Soft muted slate-blue plush office carpet
-      ctx.fillStyle = '#3b4859';
-      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-
-      // Light carpet weave inner pad
-      ctx.fillStyle = '#48566a';
-      ctx.fillRect(px + 1, py + 1, CELL_SIZE - 2, CELL_SIZE - 2);
-
-      // Soft pixel weave highlights
-      ctx.fillStyle = '#607085';
-      ctx.fillRect(px + 10, py + 10, 4, 4);
-      ctx.fillRect(px + 30, py + 10, 4, 4);
-      ctx.fillRect(px + 20, py + 22, 4, 4);
-      ctx.fillRect(px + 10, py + 34, 4, 4);
-      ctx.fillRect(px + 30, py + 34, 4, 4);
-
-      // Soft seamless tile border
-      ctx.strokeStyle = 'rgba(15, 23, 42, 0.15)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(px + 0.5, py + 0.5, CELL_SIZE - 1, CELL_SIZE - 1);
-      break;
-
-    case 'floor_tile':
-      // Soft ceramic marble tile with smooth grout lines
-      ctx.fillStyle = '#cbd5e1';
-      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-
-      // Tile face
-      ctx.fillStyle = '#f1f5f9';
-      ctx.fillRect(px + 1, py + 1, CELL_SIZE - 2, CELL_SIZE - 2);
-
-      // Soft sheen highlight
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(px + 3, py + 3, CELL_SIZE - 6, 2);
-      ctx.fillRect(px + 3, py + 3, 2, CELL_SIZE - 6);
-
-      // Soft grout border
-      ctx.strokeStyle = '#94a3b8';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(px + 0.5, py + 0.5, CELL_SIZE - 1, CELL_SIZE - 1);
-      break;
-
-    case 'floor_grass':
-      // Soft natural meadow pixel grass
-      ctx.fillStyle = '#3f6212';
-      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-
-      ctx.fillStyle = '#4d7c0f';
-      ctx.fillRect(px + 1, py + 1, CELL_SIZE - 2, CELL_SIZE - 2);
-
-      // Grass tufts
-      ctx.fillStyle = '#65a30d';
-      ctx.fillRect(px + 8, py + 10, 3, 6);
-      ctx.fillRect(px + 11, py + 7, 3, 9);
-      ctx.fillRect(px + 28, py + 22, 3, 8);
-      ctx.fillRect(px + 31, py + 19, 3, 11);
-
-      ctx.strokeStyle = 'rgba(20, 60, 10, 0.15)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(px + 0.5, py + 0.5, CELL_SIZE - 1, CELL_SIZE - 1);
-      break;
-
-    case 'floor_concrete':
-      // Soft industrial slate concrete
-      ctx.fillStyle = '#475569';
-      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-
-      ctx.fillStyle = '#64748b';
-      ctx.fillRect(px + 1, py + 1, CELL_SIZE - 2, CELL_SIZE - 2);
-
-      // Specks
-      ctx.fillStyle = '#94a3b8';
-      ctx.fillRect(px + 12, py + 12, 3, 3);
-      ctx.fillRect(px + 28, py + 28, 3, 3);
-
-      ctx.strokeStyle = 'rgba(15, 23, 42, 0.15)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(px + 0.5, py + 0.5, CELL_SIZE - 1, CELL_SIZE - 1);
-      break;
-
-    case 'wall_wood':
-      ctx.fillStyle = '#78350f';
-      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-      ctx.fillStyle = '#92400e';
-      ctx.fillRect(px + 1, py + 1, CELL_SIZE - 2, CELL_SIZE - 2);
-      ctx.strokeStyle = '#451a03';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(px + 0.5, py + 0.5, CELL_SIZE - 1, CELL_SIZE - 1);
-      break;
-
-    case 'water':
-      ctx.fillStyle = '#0284c7';
-      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-      ctx.fillStyle = '#0ea5e9';
-      ctx.fillRect(px + 3, py + 3, CELL_SIZE - 6, CELL_SIZE - 6);
-      ctx.fillStyle = '#38bdf8';
-      ctx.fillRect(px + 6, py + 6, CELL_SIZE - 12, 4);
-      break;
-      ctx.fillStyle = '#dc2626';
-      // Row 1
-      ctx.fillRect(px + 2, py + 2, 20, 18);
-      ctx.fillRect(px + 24, py + 2, 22, 18);
-      // Row 2
-      ctx.fillRect(px + 2, py + 22, 10, 22);
-      ctx.fillRect(px + 14, py + 22, 20, 22);
-      ctx.fillRect(px + 36, py + 22, 10, 22);
-
-      // Brick highlights
-      ctx.fillStyle = '#f87171';
-      ctx.fillRect(px + 4, py + 4, 16, 3);
-      ctx.fillRect(px + 26, py + 4, 18, 3);
-      ctx.fillRect(px + 16, py + 24, 16, 3);
-
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(px + 1, py + 1, CELL_SIZE - 2, CELL_SIZE - 2);
-      break;
-
-    case 'wall_wood':
-      ctx.fillStyle = '#451a03';
-      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-
-      ctx.fillStyle = '#78350f';
-      ctx.fillRect(px + 3, py + 3, CELL_SIZE - 6, CELL_SIZE - 6);
-
-      ctx.fillStyle = '#b45309';
-      ctx.fillRect(px + 6, py + 6, CELL_SIZE - 12, 6);
-      ctx.fillRect(px + 6, py + 24, CELL_SIZE - 12, 6);
-
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(px + 1, py + 1, CELL_SIZE - 2, CELL_SIZE - 2);
-      break;
-
-    case 'water':
-      ctx.fillStyle = '#0e7490';
-      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-
-      ctx.fillStyle = '#06b6d4';
-      ctx.fillRect(px + 2, py + 2, CELL_SIZE - 4, CELL_SIZE - 4);
-
-      // Pixel ripple reflections
-      ctx.fillStyle = '#67e8f9';
-      ctx.fillRect(px + 8, py + 8, 12, 4);
-      ctx.fillRect(px + 24, py + 20, 16, 4);
-      ctx.fillRect(px + 10, py + 34, 14, 4);
-
-      ctx.strokeStyle = '#164e63';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(px + 1, py + 1, CELL_SIZE - 2, CELL_SIZE - 2);
-      break;
+/** Checkerboard dithering - the pixel-art stand-in for a gradient/soft texture. */
+function dither(
+  ctx: CanvasRenderingContext2D,
+  ox: number,
+  oy: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: string,
+  parity = 0
+) {
+  ctx.fillStyle = color;
+  for (let j = 0; j < h; j++) {
+    for (let i = 0; i < w; i++) {
+      if ((i + j) % 2 === parity) {
+        ctx.fillRect(ox + (x + i) * PX, oy + (y + j) * PX, PX, PX);
+      }
+    }
   }
 }
 
-// Render Cel-Shaded Object Helper
-function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
-  const px = obj.x * CELL_SIZE;
-  const py = obj.y * CELL_SIZE;
-  const w = obj.width * CELL_SIZE;
-  const h = obj.height * CELL_SIZE;
+/** A solid block with cel shading: light top/left edge, dark bottom/right edge. */
+function shadedBlock(
+  ctx: CanvasRenderingContext2D,
+  ox: number,
+  oy: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  ramp: Ramp,
+  outlined = true
+) {
+  fx(ctx, ox, oy, x, y, w, h, ramp.base);
+  fx(ctx, ox, oy, x, y, w, 1, ramp.light); // top highlight
+  fx(ctx, ox, oy, x, y, 1, h, ramp.light); // left highlight
+  fx(ctx, ox, oy, x, y + h - 1, w, 1, ramp.dark); // bottom shadow
+  fx(ctx, ox, oy, x + w - 1, y, 1, h, ramp.dark); // right shadow
+  if (outlined) ox1(ctx, ox, oy, x, y, w, h, OUTLINE);
+}
 
-  ctx.save();
+// ============================================================================
+// Tiles
+// ============================================================================
 
-  // Cel-shaded pixel drop shadow
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.4)';
-  ctx.fillRect(px + 4, py + 4, w - 4, h - 4);
+function renderTile(ctx: CanvasRenderingContext2D, type: TileType, x: number, y: number) {
+  const ox = x * CELL_SIZE;
+  const oy = y * CELL_SIZE;
 
-  switch (obj.type) {
-    case 'desk': {
-      // 1. Dark cel-shaded outline
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 1, py + 1, w - 2, h - 2);
+  switch (type) {
+    case 'floor_wood': {
+      const p = PALETTE.oak;
+      fx(ctx, ox, oy, 0, 0, 16, 16, p.base);
 
-      const isClaimed = !!obj.data?.deskState?.claimedByUserId;
+      // Two horizontal planks per tile, with the end-joint staggered per row so the
+      // floor reads as continuous boards rather than a repeating stamp.
+      const jointA = (x * 7 + y * 3) % 16;
+      const jointB = (x * 5 + y * 11 + 8) % 16;
 
-      // 2. Dual-tone Desk Tabletop (Warm Oak / Sleek Modern)
-      const surfaceEdge = isClaimed ? '#d97706' : '#64748b';
-      const surfaceBase = isClaimed ? '#f59e0b' : '#cbd5e1';
-      const surfaceTop = isClaimed ? '#fef08a' : '#f8fafc';
-
-      ctx.fillStyle = surfaceEdge;
-      ctx.fillRect(px + 3, py + 3, w - 6, h - 6);
-
-      ctx.fillStyle = surfaceBase;
-      ctx.fillRect(px + 4, py + 4, w - 8, h - 8);
-
-      // Top edge highlight bevel
-      ctx.fillStyle = surfaceTop;
-      ctx.fillRect(px + 5, py + 5, w - 10, 3);
-
-      // Bottom bevel shadow line
-      ctx.fillStyle = isClaimed ? '#b45309' : '#94a3b8';
-      ctx.fillRect(px + 5, py + h - 7, w - 10, 2);
-
-      // 3. Desk Mat / Leather Mousepad in center
-      const matW = w * 0.54;
-      const matH = h * 0.55;
-      const matX = px + (w - matW) / 2;
-      const matY = py + 7;
-
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(matX - 1, matY - 1, matW + 2, matH + 2);
-      ctx.fillStyle = isClaimed ? '#312e81' : '#1e293b';
-      ctx.fillRect(matX, matY, matW, matH);
-
-      // Mat top accent line
-      ctx.fillStyle = isClaimed ? '#6366f1' : '#38bdf8';
-      ctx.fillRect(matX + 1, matY + 1, matW - 2, 2);
-
-      // 4. Pixel Keyboard & Mouse
-      const kbW = 22;
-      const kbH = 7;
-      const kbX = matX + (matW - kbW) / 2 - 4;
-      const kbY = matY + matH - 10;
-
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(kbX, kbY, kbW, kbH);
-      ctx.fillStyle = '#475569';
-      ctx.fillRect(kbX + 1, kbY + 1, kbW - 2, kbH - 2);
-      ctx.fillStyle = '#e2e8f0';
-      ctx.fillRect(kbX + 3, kbY + 2.5, 16, 2);
-
-      // Mouse
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(kbX + kbW + 4, kbY, 5, 7);
-      ctx.fillStyle = '#94a3b8';
-      ctx.fillRect(kbX + kbW + 4.5, kbY + 0.5, 4, 6);
-
-      // 5. Equipment (Monitors / Laptop / Tablet / Gaming Rig)
-      const equipment = obj.data?.deskState?.equipment || 'laptop';
-      const centerX = px + w / 2;
-
-      if (equipment === 'dual_monitors') {
-        // Dual Monitor Stand
-        ctx.fillStyle = '#0f172a';
-        ctx.fillRect(centerX - 8, matY + 3, 16, 4);
-
-        // Left Monitor Screen
-        const m1X = centerX - 23;
-        const m1Y = py + 5;
-        ctx.fillStyle = '#0f172a';
-        ctx.fillRect(m1X, m1Y, 20, 14);
-        ctx.fillStyle = '#0284c7';
-        ctx.fillRect(m1X + 2, m1Y + 2, 16, 10);
-        // Code screen highlights
-        ctx.fillStyle = '#38bdf8';
-        ctx.fillRect(m1X + 4, m1Y + 4, 10, 2);
-        ctx.fillStyle = '#f43f5e';
-        ctx.fillRect(m1X + 4, m1Y + 7, 7, 2);
-        ctx.fillStyle = '#a855f7';
-        ctx.fillRect(m1X + 4, m1Y + 10, 11, 1.5);
-
-        // Right Monitor Screen
-        const m2X = centerX + 3;
-        const m2Y = py + 5;
-        ctx.fillStyle = '#0f172a';
-        ctx.fillRect(m2X, m2Y, 20, 14);
-        ctx.fillStyle = '#4338ca';
-        ctx.fillRect(m2X + 2, m2Y + 2, 16, 10);
-        ctx.fillStyle = '#818cf8';
-        ctx.beginPath();
-        ctx.arc(m2X + 10, m2Y + 7, 3, 0, Math.PI * 2);
-        ctx.fill();
-      } else if (equipment === 'designer_tablet') {
-        // Ultrawide Screen
-        const tw = 36;
-        const th = 15;
-        const tx = centerX - tw / 2;
-        const ty = py + 5;
-        ctx.fillStyle = '#0f172a';
-        ctx.fillRect(tx, ty, tw, th);
-        ctx.fillStyle = '#0f766e';
-        ctx.fillRect(tx + 2, ty + 2, tw - 4, th - 4);
-        // Canvas graphics
-        ctx.fillStyle = '#f43f5e';
-        ctx.fillRect(tx + 4, ty + 4, 6, 6);
-        ctx.fillStyle = '#eab308';
-        ctx.fillRect(tx + 12, ty + 4, 6, 6);
-        ctx.fillStyle = '#06b6d4';
-        ctx.fillRect(tx + 20, ty + 4, 6, 6);
-      } else if (equipment === 'gaming_rig') {
-        // Gaming Rig with RGB Glow
-        const tw = 32;
-        const th = 15;
-        const tx = centerX - tw / 2;
-        const ty = py + 5;
-        ctx.fillStyle = 'rgba(236, 72, 153, 0.4)';
-        ctx.fillRect(tx - 3, ty - 2, tw + 6, th + 4);
-        ctx.fillStyle = '#0f172a';
-        ctx.fillRect(tx, ty, tw, th);
-        ctx.fillStyle = '#ec4899';
-        ctx.fillRect(tx + 2, ty + 2, tw - 4, th - 4);
-        ctx.fillStyle = '#f87171';
-        ctx.fillRect(tx + 5, ty + 5, 12, 6);
-      } else {
-        // Opened Laptop
-        const lw = 26;
-        const lh = 14;
-        const lx = centerX - lw / 2;
-        const ly = py + 5;
-
-        ctx.fillStyle = '#0f172a';
-        ctx.fillRect(lx, ly, lw, lh);
-        ctx.fillStyle = '#0284c7';
-        ctx.fillRect(lx + 2, ly + 2, lw - 4, lh - 4);
-        ctx.fillStyle = '#38bdf8';
-        ctx.fillRect(lx + 4, ly + 4, lw - 8, 4);
-        ctx.fillStyle = '#e0f2fe';
-        ctx.fillRect(lx + 6, ly + 9, 8, 2);
-
-        // Hinge
-        ctx.fillStyle = '#64748b';
-        ctx.fillRect(lx - 2, ly + lh, lw + 4, 3);
-      }
-
-      // 6. Accessories (Mug at Top Right, Post-it at Top Left)
-      // Coffee Mug
-      const mugX = px + w - 16;
-      const mugY = py + 6;
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(mugX, mugY, 8, 8);
-      ctx.fillStyle = '#ef4444';
-      ctx.fillRect(mugX + 1, mugY + 1, 6, 6);
-      ctx.fillStyle = '#78350f';
-      ctx.fillRect(mugX + 2, mugY + 2, 4, 2);
-
-      // Sticky Note
-      const noteX = px + 8;
-      const noteY = py + 6;
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(noteX, noteY, 7, 7);
-      ctx.fillStyle = '#fef08a';
-      ctx.fillRect(noteX + 1, noteY + 1, 5, 5);
-      ctx.fillStyle = '#ca8a04';
-      ctx.fillRect(noteX + 2, noteY + 2, 3, 1);
-
-      // 7. Desk Status / Owner Badge
-      if (obj.data?.deskState?.claimedByUserName) {
-        const ownerName = obj.data.deskState.claimedByUserName;
-        ctx.font = 'bold 9px "Pixelify Sans", cursive, sans-serif';
-        const labelW = Math.min(w - 8, ctx.measureText(`👤 ${ownerName}`).width + 8);
-        const labelX = centerX - labelW / 2;
-        const labelY = py + h - 11;
-
-        ctx.fillStyle = '#0f172a';
-        ctx.fillRect(labelX + 1, labelY + 1, labelW, 11);
-        ctx.fillStyle = '#fbbf24';
-        ctx.fillRect(labelX, labelY, labelW, 11);
-        ctx.fillStyle = '#0f172a';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(`👤 ${ownerName}`, centerX, labelY + 6);
-      } else {
-        const labelText = obj.data?.deskState?.deskLabel || obj.name || 'Workstation';
-        ctx.font = '9px "Pixelify Sans", cursive, sans-serif';
-        ctx.fillStyle = '#475569';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(`✨ ${labelText}`, centerX, py + h - 6);
+      for (const [top, joint] of [
+        [0, jointA],
+        [8, jointB],
+      ] as const) {
+        fx(ctx, ox, oy, 0, top, 16, 1, p.light); // plank top catch-light
+        fx(ctx, ox, oy, 0, top + 7, 16, 1, p.dark); // plank bottom shadow / seam
+        fx(ctx, ox, oy, joint, top, 1, 7, p.dark); // butt joint between boards
+        // Grain: a couple of stable dashes per plank.
+        const g1 = Math.floor(tileHash(x, y, top) * 10);
+        const g2 = Math.floor(tileHash(x, y, top + 99) * 10) + 4;
+        fx(ctx, ox, oy, g1, top + 2, 4, 1, p.dark);
+        fx(ctx, ox, oy, g2, top + 5, 3, 1, p.hi);
       }
       break;
     }
 
-    case 'chair':
-      // Cel-shaded Ergonomic Office Chair
-      ctx.fillStyle = '#0f172a';
-      ctx.beginPath();
-      ctx.arc(px + w / 2, py + h / 2, 13, 0, Math.PI * 2);
-      ctx.fill();
+    case 'floor_carpet': {
+      const p = PALETTE.carpet;
+      // Plush pile: a light base with a soft dither. Kept deliberately low-contrast -
+      // carpet covers large areas, so heavy texture here turns the floor into visual noise.
+      fx(ctx, ox, oy, 0, 0, 16, 16, p.light);
+      dither(ctx, ox, oy, 0, 0, 16, 16, p.base, (x + y) % 2);
 
-      // Cushion base
-      ctx.fillStyle = '#475569';
-      ctx.beginPath();
-      ctx.arc(px + w / 2, py + h / 2, 10, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Inner seat cushion
-      ctx.fillStyle = '#6366f1';
-      ctx.beginPath();
-      ctx.arc(px + w / 2, py + h / 2, 7, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Armrests
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + w / 2 - 14, py + h / 2 - 3, 4, 6);
-      ctx.fillRect(px + w / 2 + 10, py + h / 2 - 3, 4, 6);
+      // Woven pile: short horizontal loops in offset rows. The directional weave is what
+      // distinguishes carpet from concrete's random speckle, independent of colour.
+      for (let row = 1; row < 16; row += 3) {
+        const shift = (row + x * 2 + y) % 4;
+        for (let i = shift; i < 16; i += 4) {
+          fx(ctx, ox, oy, i, row, 2, 1, p.hi);
+        }
+      }
+      fx(ctx, ox, oy, 0, 15, 16, 1, p.dark);
+      fx(ctx, ox, oy, 15, 0, 1, 16, p.dark);
       break;
+    }
 
-    case 'computer':
-      // Small standalone PC setup
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 4, py + 4, w - 8, h - 8);
-      ctx.fillStyle = '#1e293b';
-      ctx.fillRect(px + 6, py + 6, w - 12, h - 12);
-      ctx.fillStyle = '#38bdf8';
-      ctx.fillRect(px + 8, py + 8, w - 16, h - 16);
+    case 'floor_tile': {
+      const p = PALETTE.marble;
+      fx(ctx, ox, oy, 0, 0, 16, 16, p.dark); // grout
+      // Four 7x7 ceramic tiles with a 1px grout gap, each with a corner specular.
+      for (const [tx, ty] of [
+        [0, 0],
+        [8, 0],
+        [0, 8],
+        [8, 8],
+      ] as const) {
+        fx(ctx, ox, oy, tx, ty, 7, 7, p.light);
+        fx(ctx, ox, oy, tx, ty, 7, 1, p.hi);
+        fx(ctx, ox, oy, tx, ty, 1, 7, p.hi);
+        fx(ctx, ox, oy, tx + 6, ty + 1, 1, 6, p.base);
+        fx(ctx, ox, oy, tx + 1, ty + 6, 6, 1, p.base);
+        fx(ctx, ox, oy, tx + 2, ty + 2, 2, 1, p.hi); // specular glint
+      }
       break;
+    }
 
-    case 'couch':
-      // Dark outer border
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 2, py + 2, w - 4, h - 4);
+    case 'floor_grass': {
+      const p = PALETTE.grass;
+      fx(ctx, ox, oy, 0, 0, 16, 16, p.base);
+      dither(ctx, ox, oy, 0, 0, 16, 16, p.dark, (x * 3 + y) % 2);
 
-      // Base couch color
-      ctx.fillStyle = '#818cf8';
-      ctx.fillRect(px + 4, py + 4, w - 8, h - 8);
-
-      // Seat cushions cel shading
-      ctx.fillStyle = '#4f46e5';
-      ctx.fillRect(px + 6, py + h / 2, w / 2 - 8, h / 2 - 6);
-      ctx.fillRect(px + w / 2 + 2, py + h / 2, w / 2 - 8, h / 2 - 6);
-
-      // Cushion highlights
-      ctx.fillStyle = '#c7d2fe';
-      ctx.fillRect(px + 8, py + 6, w / 2 - 12, 4);
-      ctx.fillRect(px + w / 2 + 4, py + 6, w / 2 - 12, 4);
+      // A few stable blades, plus an occasional flower for variation.
+      const blades = 3 + Math.floor(tileHash(x, y, 1) * 3);
+      for (let i = 0; i < blades; i++) {
+        const bx = Math.floor(tileHash(x, y, 10 + i) * 14) + 1;
+        const by = Math.floor(tileHash(x, y, 20 + i) * 11) + 2;
+        fx(ctx, ox, oy, bx, by, 1, 3, p.light);
+        fx(ctx, ox, oy, bx + 1, by - 1, 1, 3, p.hi);
+      }
+      if (tileHash(x, y, 77) > 0.88) {
+        const fxp = Math.floor(tileHash(x, y, 78) * 12) + 2;
+        const fyp = Math.floor(tileHash(x, y, 79) * 12) + 2;
+        fx(ctx, ox, oy, fxp, fyp, 2, 2, '#fde68a');
+        fx(ctx, ox, oy, fxp, fyp, 1, 1, '#fbbf24');
+      }
       break;
+    }
 
-    case 'plant':
-      // Pot base with thick outline
-      ctx.fillStyle = '#0f172a';
-      ctx.beginPath();
-      ctx.arc(px + w / 2, py + h / 2, 14, 0, Math.PI * 2);
-      ctx.fill();
+    case 'floor_concrete': {
+      const p = PALETTE.concrete;
+      fx(ctx, ox, oy, 0, 0, 16, 16, p.base);
+      dither(ctx, ox, oy, 0, 0, 16, 16, p.light, (x + y * 2) % 2);
 
-      ctx.fillStyle = '#f59e0b';
-      ctx.beginPath();
-      ctx.arc(px + w / 2, py + h / 2, 11, 0, Math.PI * 2);
-      ctx.fill();
+      // Expansion joints on a 2-tile rhythm, so slabs read at map scale.
+      if (x % 2 === 0) fx(ctx, ox, oy, 0, 0, 1, 16, p.dark);
+      if (y % 2 === 0) fx(ctx, ox, oy, 0, 0, 16, 1, p.dark);
 
-      // Cel-shaded Plant Leaves
-      ctx.fillStyle = '#15803d';
-      ctx.fillRect(px + w / 2 - 10, py + h / 2 - 10, 10, 10);
-      ctx.fillRect(px + w / 2, py + h / 2 - 12, 10, 10);
-      ctx.fillRect(px + w / 2 - 6, py + h / 2, 12, 10);
-
-      ctx.fillStyle = '#4ade80';
-      ctx.fillRect(px + w / 2 - 8, py + h / 2 - 8, 6, 6);
-      ctx.fillRect(px + w / 2 + 2, py + h / 2 - 10, 6, 6);
+      const specks = Math.floor(tileHash(x, y, 5) * 4);
+      for (let i = 0; i < specks; i++) {
+        const sx = Math.floor(tileHash(x, y, 30 + i) * 14) + 1;
+        const sy = Math.floor(tileHash(x, y, 40 + i) * 14) + 1;
+        fx(ctx, ox, oy, sx, sy, 1, 1, p.hi);
+      }
       break;
+    }
 
-    case 'whiteboard':
-      // Thick outer frame
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 2, py + 2, w - 4, h - 4);
+    case 'wall_brick': {
+      const p = PALETTE.brick;
+      fx(ctx, ox, oy, 0, 0, 16, 16, '#5b1414'); // mortar
 
-      // Board Surface
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(px + 5, py + 5, w - 10, h - 10);
+      // Four courses of staggered bricks. Each brick gets its own top light /
+      // bottom shade so the wall reads as masonry rather than a flat red square.
+      for (let course = 0; course < 4; course++) {
+        const by = course * 4;
+        const offset = course % 2 === 0 ? 0 : -4;
+        for (let bx = offset; bx < 16; bx += 8) {
+          const left = Math.max(bx, 0);
+          const right = Math.min(bx + 7, 16);
+          const bw = right - left;
+          if (bw <= 0) continue;
+          fx(ctx, ox, oy, left, by, bw, 3, p.base);
+          fx(ctx, ox, oy, left, by, bw, 1, p.light);
+          fx(ctx, ox, oy, left, by + 2, bw, 1, p.dark);
+        }
+      }
 
-      // Top Blue Banner
-      ctx.fillStyle = '#3b82f6';
-      ctx.fillRect(px + 5, py + 5, w - 10, 10);
-
-      ctx.font = 'bold 13px "Silkscreen", cursive';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText('BOARD', px + w / 2, py + 10);
-
-      // Content doodles
-      ctx.fillStyle = '#ef4444';
-      ctx.fillRect(px + 12, py + 22, 20, 3);
-      ctx.fillStyle = '#10b981';
-      ctx.fillRect(px + 12, py + 28, 32, 3);
+      // Top cap: reads as the lit top face of a solid block seen from above.
+      fx(ctx, ox, oy, 0, 0, 16, 2, p.hi);
+      fx(ctx, ox, oy, 0, 2, 16, 1, p.light);
+      ox1(ctx, ox, oy, 0, 0, 16, 16, OUTLINE);
       break;
+    }
 
-    case 'sticky_notes':
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 2, py + 2, w - 4, h - 4);
+    case 'wall_wood': {
+      const p = PALETTE.darkwood;
+      fx(ctx, ox, oy, 0, 0, 16, 16, p.base);
 
-      ctx.fillStyle = '#fef08a';
-      ctx.fillRect(px + 4, py + 4, w - 8, h - 8);
+      // Vertical planking with a lit left edge and shaded right edge per board.
+      for (let i = 0; i < 16; i += 4) {
+        fx(ctx, ox, oy, i, 0, 1, 16, p.light);
+        fx(ctx, ox, oy, i + 3, 0, 1, 16, p.dark);
+      }
+      // Cross beam + nail heads.
+      fx(ctx, ox, oy, 0, 6, 16, 3, p.light);
+      fx(ctx, ox, oy, 0, 6, 16, 1, p.hi);
+      fx(ctx, ox, oy, 0, 8, 16, 1, p.dark);
+      fx(ctx, ox, oy, 2, 7, 1, 1, p.dark);
+      fx(ctx, ox, oy, 13, 7, 1, 1, p.dark);
 
-      ctx.fillStyle = '#ca8a04';
-      ctx.fillRect(px + 4, py + 4, w - 8, 8);
-
-      ctx.font = 'bold 13px "Silkscreen", cursive';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#0f172a';
-      ctx.fillText('📌 NOTES', px + w / 2, py + h / 2);
+      fx(ctx, ox, oy, 0, 0, 16, 2, p.hi); // top cap
+      ox1(ctx, ox, oy, 0, 0, 16, 16, OUTLINE);
       break;
+    }
 
-    case 'game_table':
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 3, py + 3, w - 6, h - 6);
+    case 'water': {
+      const p = PALETTE.water;
+      fx(ctx, ox, oy, 0, 0, 16, 16, p.base);
+      dither(ctx, ox, oy, 0, 0, 16, 16, p.dark, (x + y) % 2);
 
-      ctx.fillStyle = '#e0e7ff';
-      ctx.fillRect(px + 6, py + 6, w - 12, h - 12);
-
-      // Grid
-      ctx.fillStyle = '#6366f1';
-      ctx.fillRect(px + w / 2 - 1, py + 10, 2, h - 20);
-      ctx.fillRect(px + 10, py + h / 2 - 1, w - 20, 2);
-
-      ctx.font = 'bold 20px "Press Start 2P", monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('🎮', px + w / 2, py + h / 2);
+      // Gentle drift so water feels alive; quantised to art pixels so it stays
+      // chunky pixel art instead of sliding smoothly.
+      const t = Math.floor(Date.now() / 240);
+      for (let i = 0; i < 3; i++) {
+        const seed = tileHash(x, y, 60 + i);
+        const ry = Math.floor(seed * 14) + 1;
+        const drift = (Math.floor(seed * 7) + t) % 20;
+        const rx = drift - 4;
+        const rw = 4 + Math.floor(seed * 3);
+        if (rx + rw <= 0 || rx >= 16) continue;
+        const left = Math.max(rx, 0);
+        const right = Math.min(rx + rw, 16);
+        fx(ctx, ox, oy, left, ry, right - left, 1, p.light);
+        fx(ctx, ox, oy, left, ry - 1, Math.max(1, (right - left) - 2), 1, p.hi);
+      }
       break;
+    }
+  }
+}
 
-    case 'jukebox':
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 2, py + 2, w - 4, h - 4);
+// ============================================================================
+// Objects
+// ============================================================================
 
-      ctx.fillStyle = '#ec4899';
-      ctx.fillRect(px + 4, py + 4, w - 8, h - 8);
+function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
+  const ox = obj.x * CELL_SIZE;
+  const oy = obj.y * CELL_SIZE;
+  const W = (obj.width || 1) * ART; // object width in art pixels
+  const H = (obj.height || 1) * ART;
 
-      ctx.fillStyle = '#f472b6';
-      ctx.fillRect(px + 6, py + 6, w - 12, 6);
+  ctx.save();
 
-      ctx.font = '16px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('📻', px + w / 2, py + h / 2 + 2);
+  // Contact shadow - offset flat block, the cel-shaded way to ground a sprite.
+  fx(ctx, ox, oy, 1, H - 2, W - 1, 2, 'rgba(15, 23, 42, 0.35)');
+  fx(ctx, ox, oy, W - 2, 2, 2, H - 2, 'rgba(15, 23, 42, 0.25)');
+
+  switch (obj.type) {
+    case 'desk': {
+      const isClaimed = !!obj.data?.deskState?.claimedByUserId;
+      const wood: Ramp = isClaimed ? PALETTE.amber : PALETTE.oak;
+
+      // Desktop slab
+      shadedBlock(ctx, ox, oy, 0, 2, W - 1, H - 4, wood);
+      // Wood grain across the top
+      for (let i = 2; i < W - 3; i += 5) {
+        fx(ctx, ox, oy, i, 5, 3, 1, wood.dark);
+        fx(ctx, ox, oy, i + 2, H - 7, 2, 1, wood.hi);
+      }
+
+      const cx = Math.floor(W / 2);
+
+      // Desk mat / mousepad
+      const matW = Math.max(8, Math.floor(W * 0.5));
+      const matX = cx - Math.floor(matW / 2);
+      const matY = H - 9;
+      fx(ctx, ox, oy, matX, matY, matW, 5, isClaimed ? PALETTE.indigo.dark : '#1e293b');
+      ox1(ctx, ox, oy, matX, matY, matW, 5, OUTLINE);
+      fx(ctx, ox, oy, matX + 1, matY + 1, matW - 2, 1, isClaimed ? PALETTE.indigo.light : '#38bdf8');
+
+      // Keyboard + mouse on the mat
+      const kbW = Math.max(5, matW - 5);
+      fx(ctx, ox, oy, matX + 1, matY + 2, kbW, 2, PALETTE.steel.light);
+      ox1(ctx, ox, oy, matX + 1, matY + 2, kbW, 2, OUTLINE);
+      for (let i = matX + 2; i < matX + kbW; i += 2) {
+        fx(ctx, ox, oy, i, matY + 3, 1, 1, PALETTE.steel.dark);
+      }
+      fx(ctx, ox, oy, matX + kbW + 2, matY + 2, 2, 2, PALETTE.steel.hi);
+      ox1(ctx, ox, oy, matX + kbW + 2, matY + 2, 2, 2, OUTLINE);
+
+      // Equipment on the back edge of the desk
+      const equipment = obj.data?.deskState?.equipment || 'laptop';
+      const scrY = 3;
+
+      const drawScreen = (sx: number, sw: number, sh: number, screen: Ramp, content: () => void) => {
+        shadedBlock(ctx, ox, oy, sx, scrY, sw, sh, PALETTE.steel);
+        fx(ctx, ox, oy, sx + 1, scrY + 1, sw - 2, sh - 2, screen.dark);
+        content();
+        fx(ctx, ox, oy, sx + 1, scrY + 1, sw - 2, 1, screen.hi); // screen glare
+      };
+
+      if (equipment === 'dual_monitors') {
+        drawScreen(cx - 11, 10, 7, PALETTE.water, () => {
+          fx(ctx, ox, oy, cx - 9, scrY + 2, 6, 1, PALETTE.water.hi);
+          fx(ctx, ox, oy, cx - 9, scrY + 4, 4, 1, '#f472b6');
+        });
+        drawScreen(cx + 1, 10, 7, PALETTE.indigo, () => {
+          fx(ctx, ox, oy, cx + 3, scrY + 2, 6, 1, PALETTE.indigo.hi);
+          fx(ctx, ox, oy, cx + 3, scrY + 4, 3, 1, '#86efac');
+        });
+        fx(ctx, ox, oy, cx - 1, scrY + 7, 2, 2, PALETTE.steel.dark); // shared stand
+      } else if (equipment === 'designer_tablet') {
+        drawScreen(cx - 10, 20, 8, PALETTE.leaf, () => {
+          fx(ctx, ox, oy, cx - 8, scrY + 2, 4, 4, '#f43f5e');
+          fx(ctx, ox, oy, cx - 3, scrY + 2, 4, 4, '#eab308');
+          fx(ctx, ox, oy, cx + 2, scrY + 2, 4, 4, '#06b6d4');
+        });
+      } else if (equipment === 'gaming_rig') {
+        // RGB spill behind the screen
+        fx(ctx, ox, oy, cx - 10, scrY - 1, 20, 10, 'rgba(236, 72, 153, 0.35)');
+        drawScreen(cx - 9, 18, 8, { ...PALETTE.indigo, dark: '#4c1d95' }, () => {
+          fx(ctx, ox, oy, cx - 7, scrY + 2, 14, 1, '#ec4899');
+          fx(ctx, ox, oy, cx - 7, scrY + 4, 9, 1, '#22d3ee');
+          fx(ctx, ox, oy, cx - 7, scrY + 5, 5, 1, '#a3e635');
+        });
+      } else {
+        // Laptop: lid + hinge + deck
+        drawScreen(cx - 7, 14, 7, PALETTE.water, () => {
+          fx(ctx, ox, oy, cx - 5, scrY + 2, 8, 1, PALETTE.water.hi);
+          fx(ctx, ox, oy, cx - 5, scrY + 4, 5, 1, '#e0f2fe');
+        });
+        fx(ctx, ox, oy, cx - 8, scrY + 7, 16, 2, PALETTE.steel.base);
+        ox1(ctx, ox, oy, cx - 8, scrY + 7, 16, 2, OUTLINE);
+      }
+
+      // Coffee mug (top-right) and sticky note (top-left)
+      fx(ctx, ox, oy, W - 6, 3, 4, 4, '#ef4444');
+      ox1(ctx, ox, oy, W - 6, 3, 4, 4, OUTLINE);
+      fx(ctx, ox, oy, W - 5, 4, 2, 1, '#78350f'); // coffee surface
+      fx(ctx, ox, oy, W - 2, 4, 1, 2, '#b91c1c'); // handle
+
+      fx(ctx, ox, oy, 2, 3, 4, 4, '#fde68a');
+      ox1(ctx, ox, oy, 2, 3, 4, 4, OUTLINE);
+      fx(ctx, ox, oy, 3, 4, 2, 1, '#ca8a04');
+      fx(ctx, ox, oy, 3, 5, 2, 1, '#ca8a04');
+
+      // Nameplate / label along the bottom edge
+      const centerScreenX = ox + (W * PX) / 2;
+      if (obj.data?.deskState?.claimedByUserName) {
+        const owner = obj.data.deskState.claimedByUserName;
+        ctx.font = 'bold 9px "Pixelify Sans", cursive, sans-serif';
+        const textW = ctx.measureText(`👤 ${owner}`).width;
+        const plateW = Math.min(W * PX - 8, textW + 10);
+        const plateX = centerScreenX - plateW / 2;
+        const plateY = oy + (H - 3) * PX;
+        ctx.fillStyle = OUTLINE;
+        ctx.fillRect(plateX - PX, plateY - PX, plateW + PX * 2, 11 + PX);
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillRect(plateX, plateY, plateW, 11);
+        ctx.fillStyle = OUTLINE;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`👤 ${owner}`, centerScreenX, plateY + 6);
+      } else {
+        // Unclaimed: a dark plate keeps the label readable over both light and dark
+        // floors, and clipping to the desk stops long names spilling onto neighbours.
+        const label = obj.data?.deskState?.deskLabel || obj.name || 'Workstation';
+        ctx.font = '9px "Pixelify Sans", cursive, sans-serif';
+        const textW = ctx.measureText(label).width;
+        const plateW = Math.min(W * PX - 6, textW + 10);
+        const plateX = centerScreenX - plateW / 2;
+        const plateY = oy + (H - 3) * PX;
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+        ctx.fillRect(plateX, plateY, plateW, 11);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(plateX, plateY, plateW, 11);
+        ctx.clip();
+        ctx.fillStyle = '#e2e8f0';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, centerScreenX, plateY + 6);
+        ctx.restore();
+      }
       break;
+    }
 
-    case 'tv':
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 2, py + 2, w - 4, h - 4);
+    case 'chair': {
+      const p = PALETTE.steel;
+      // Seen from above: backrest at the top in a darker tone, seat cushion below in a
+      // lighter one. The tonal split (rather than one flat colour) is what makes the
+      // two parts legible at this size.
+      const back: Ramp = { ...PALETTE.indigo, base: PALETTE.indigo.dark, light: PALETTE.indigo.base };
+      const seat = PALETTE.indigo;
 
-      ctx.fillStyle = '#0284c7';
-      ctx.fillRect(px + 5, py + 5, w - 10, h - 10);
+      shadedBlock(ctx, ox, oy, 2, 0, 12, 5, back); // backrest
+      fx(ctx, ox, oy, 4, 2, 8, 1, PALETTE.indigo.base); // lumbar line
 
-      // Scanlines effect
-      ctx.fillStyle = '#38bdf8';
-      ctx.fillRect(px + 8, py + 8, w - 16, 4);
-      ctx.fillRect(px + 8, py + 18, w - 16, 4);
+      shadedBlock(ctx, ox, oy, 1, 5, 14, 8, seat); // seat cushion
+      fx(ctx, ox, oy, 3, 8, 10, 1, seat.dark); // cushion seam
+      fx(ctx, ox, oy, 3, 6, 10, 1, seat.hi); // cushion catch-light
 
-      ctx.font = '14px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('📺', px + w / 2, py + h / 2);
+      shadedBlock(ctx, ox, oy, 0, 5, 2, 6, p); // armrests
+      shadedBlock(ctx, ox, oy, 14, 5, 2, 6, p);
+
+      shadedBlock(ctx, ox, oy, 6, 13, 4, 2, p); // gas lift
+      fx(ctx, ox, oy, 4, 14, 2, 1, p.dark); // castors
+      fx(ctx, ox, oy, 10, 14, 2, 1, p.dark);
       break;
+    }
 
-    case 'coffee_machine':
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 2, py + 2, w - 4, h - 4);
+    case 'couch': {
+      const p = PALETTE.indigo;
+      // Darker backrest behind lighter seat cushions - same trick as the chair, so the
+      // parts separate without needing outlines everywhere.
+      const back: Ramp = { ...p, base: p.dark, light: p.base };
 
-      ctx.fillStyle = '#d97706';
-      ctx.fillRect(px + 4, py + 4, w - 8, h - 8);
+      shadedBlock(ctx, ox, oy, 0, 1, W, 5, back); // backrest
+      fx(ctx, ox, oy, 2, 3, W - 4, 1, p.base); // backrest seam
 
-      ctx.fillStyle = '#f59e0b';
-      ctx.fillRect(px + 6, py + 6, w - 12, 6);
+      shadedBlock(ctx, ox, oy, 0, 5, 3, H - 6, back); // armrests
+      shadedBlock(ctx, ox, oy, W - 3, 5, 3, H - 6, back);
 
-      ctx.font = '16px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('☕', px + w / 2, py + h / 2);
+      const seatW = W - 6;
+      const cushions = Math.max(2, Math.round(seatW / 8));
+      const cw = Math.floor(seatW / cushions);
+      for (let i = 0; i < cushions; i++) {
+        const cxs = 3 + i * cw;
+        const cwidth = i === cushions - 1 ? seatW - i * cw : cw;
+        shadedBlock(ctx, ox, oy, cxs, 6, cwidth, H - 8, p);
+        fx(ctx, ox, oy, cxs + 1, 7, cwidth - 2, 1, p.hi); // cushion piping
+      }
       break;
+    }
 
-    case 'bookshelf':
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 2, py + 2, w - 4, h - 4);
+    case 'plant': {
+      const pot = PALETTE.amber;
+      const leaf = PALETTE.leaf;
 
-      ctx.fillStyle = '#78350f';
-      ctx.fillRect(px + 4, py + 4, w - 8, h - 8);
+      // Foliage drawn back-to-front: darker outer fronds first, brighter ones on top,
+      // so the canopy reads as layered leaves rather than one green mass.
+      const fronds: Array<[number, number, number, number, string]> = [
+        [1, 3, 5, 4, leaf.dark],
+        [10, 3, 5, 4, leaf.dark],
+        [3, 0, 4, 5, leaf.base],
+        [9, 0, 4, 5, leaf.base],
+        [5, 2, 6, 6, leaf.light],
+      ];
+      fronds.forEach(([lx, ly, lw, lh, shade]) => {
+        fx(ctx, ox, oy, lx, ly, lw, lh, shade);
+        ox1(ctx, ox, oy, lx, ly, lw, lh, OUTLINE);
+      });
+      // Leaf veins / specular on the front frond
+      fx(ctx, ox, oy, 7, 3, 2, 4, leaf.hi);
+      fx(ctx, ox, oy, 6, 4, 4, 1, leaf.hi);
 
-      // Pixel book spines
-      ctx.fillStyle = '#ef4444';
-      ctx.fillRect(px + 6, py + 6, 6, 12);
-      ctx.fillStyle = '#3b82f6';
-      ctx.fillRect(px + 14, py + 6, 6, 12);
-      ctx.fillStyle = '#10b981';
-      ctx.fillRect(px + 22, py + 6, 6, 12);
-
-      ctx.fillStyle = '#f59e0b';
-      ctx.fillRect(px + 6, py + 26, 8, 12);
-      ctx.fillStyle = '#8b5cf6';
-      ctx.fillRect(px + 16, py + 26, 8, 12);
+      // Terracotta pot: wide rim over a tapered body.
+      shadedBlock(ctx, ox, oy, 3, 9, 10, 3, { ...pot, base: pot.light, light: pot.hi });
+      fx(ctx, ox, oy, 4, 10, 8, 1, '#3f2410'); // soil in the rim
+      shadedBlock(ctx, ox, oy, 4, 12, 8, 4, pot);
+      fx(ctx, ox, oy, 5, 13, 1, 2, pot.hi); // pot highlight
       break;
+    }
 
-    default:
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(px + 2, py + 2, w - 4, h - 4);
-      ctx.fillStyle = '#64748b';
-      ctx.fillRect(px + 4, py + 4, w - 8, h - 8);
+    case 'computer': {
+      const p = PALETTE.steel;
+      // A single monitor on a stand reads far better at 1 tile than a cramped
+      // tower-plus-monitor pair, so this is deliberately one clear silhouette.
+      shadedBlock(ctx, ox, oy, 1, 1, 14, 9, p);
+      fx(ctx, ox, oy, 3, 3, 10, 5, PALETTE.water.dark); // screen
+
+      // Screen content: a couple of "code" lines plus a cursor block.
+      fx(ctx, ox, oy, 4, 4, 6, 1, PALETTE.water.hi);
+      fx(ctx, ox, oy, 4, 6, 4, 1, '#86efac');
+      fx(ctx, ox, oy, 9, 6, 1, 1, '#fbbf24');
+      fx(ctx, ox, oy, 3, 3, 10, 1, '#7dd3fc'); // glare band
+
+      fx(ctx, ox, oy, 13, 8, 1, 1, '#22c55e'); // power LED
+
+      shadedBlock(ctx, ox, oy, 7, 10, 2, 2, p); // neck
+      shadedBlock(ctx, ox, oy, 4, 12, 8, 2, p); // foot
       break;
+    }
+
+    case 'whiteboard': {
+      // Frame + board + marker tray
+      shadedBlock(ctx, ox, oy, 0, 0, W, H - 3, PALETTE.steel);
+      fx(ctx, ox, oy, 2, 2, W - 4, H - 8, '#ffffff');
+      fx(ctx, ox, oy, 2, 2, W - 4, 1, '#f8fafc');
+      // Doodles
+      fx(ctx, ox, oy, 4, 5, Math.max(4, W - 12), 1, '#ef4444');
+      fx(ctx, ox, oy, 4, 7, Math.max(3, W - 9), 1, '#10b981');
+      fx(ctx, ox, oy, 4, 9, Math.max(3, W - 14), 1, '#3b82f6');
+      // Marker tray with three markers
+      shadedBlock(ctx, ox, oy, 1, H - 4, W - 2, 2, PALETTE.steel);
+      fx(ctx, ox, oy, 3, H - 4, 3, 1, '#ef4444');
+      fx(ctx, ox, oy, 7, H - 4, 3, 1, '#3b82f6');
+      fx(ctx, ox, oy, 11, H - 4, 3, 1, '#10b981');
+      break;
+    }
+
+    case 'sticky_notes': {
+      // Cork board with pinned notes at slight offsets
+      shadedBlock(ctx, ox, oy, 0, 0, W, H - 1, { dark: '#78350f', base: '#b45309', light: '#d97706', hi: '#f59e0b' });
+      const notes: Array<[number, number, string]> = [
+        [2, 2, '#fde68a'],
+        [8, 3, '#fca5a5'],
+        [3, 8, '#a7f3d0'],
+        [9, 9, '#bfdbfe'],
+      ];
+      notes.forEach(([nx, ny, color]) => {
+        if (nx + 5 > W || ny + 5 > H) return;
+        fx(ctx, ox, oy, nx, ny, 5, 5, color);
+        ox1(ctx, ox, oy, nx, ny, 5, 5, OUTLINE);
+        fx(ctx, ox, oy, nx + 1, ny + 2, 3, 1, 'rgba(15,23,42,0.35)');
+        fx(ctx, ox, oy, nx + 1, ny + 3, 2, 1, 'rgba(15,23,42,0.35)');
+        fx(ctx, ox, oy, nx + 2, ny, 1, 1, '#ef4444'); // pin
+      });
+      break;
+    }
+
+    case 'game_table': {
+      shadedBlock(ctx, ox, oy, 0, 1, W, H - 2, PALETTE.darkwood);
+      // Checkerboard playfield
+      const boardX = 2;
+      const boardY = 3;
+      const cells = 6;
+      const cs = Math.max(1, Math.floor((Math.min(W, H) - 6) / cells));
+      for (let j = 0; j < cells; j++) {
+        for (let i = 0; i < cells; i++) {
+          fx(ctx, ox, oy, boardX + i * cs, boardY + j * cs, cs, cs, (i + j) % 2 ? '#e0e7ff' : '#4338ca');
+        }
+      }
+      ox1(ctx, ox, oy, boardX, boardY, cells * cs, cells * cs, OUTLINE);
+      // A couple of pieces
+      fx(ctx, ox, oy, boardX + cs, boardY + cs, cs, cs, '#f43f5e');
+      fx(ctx, ox, oy, boardX + cs * 4, boardY + cs * 3, cs, cs, '#fbbf24');
+      break;
+    }
+
+    case 'jukebox': {
+      const body: Ramp = { dark: '#9d174d', base: '#db2777', light: '#ec4899', hi: '#f9a8d4' };
+      // Arched top
+      fx(ctx, ox, oy, 2, 1, W - 4, 2, body.light);
+      fx(ctx, ox, oy, 1, 3, W - 2, H - 5, body.base);
+      ox1(ctx, ox, oy, 1, 3, W - 2, H - 5, OUTLINE);
+      ox1(ctx, ox, oy, 2, 1, W - 4, 3, OUTLINE);
+      // Glowing arch light
+      fx(ctx, ox, oy, 3, 2, W - 6, 1, '#fde68a');
+      // Speaker grille
+      fx(ctx, ox, oy, 3, 5, W - 6, 5, body.dark);
+      for (let i = 4; i < W - 4; i += 2) {
+        fx(ctx, ox, oy, i, 5, 1, 5, '#4c0519');
+      }
+      // Control buttons
+      fx(ctx, ox, oy, 4, 11, 2, 2, '#22d3ee');
+      fx(ctx, ox, oy, 7, 11, 2, 2, '#fbbf24');
+      fx(ctx, ox, oy, 10, 11, 2, 2, '#a3e635');
+      break;
+    }
+
+    case 'tv': {
+      // Wall-mounted flat screen
+      shadedBlock(ctx, ox, oy, 0, 1, W, H - 4, PALETTE.steel);
+      fx(ctx, ox, oy, 2, 3, W - 4, H - 8, '#0c4a6e');
+      // Screen content + scanlines
+      fx(ctx, ox, oy, 3, 4, W - 6, 2, '#0ea5e9');
+      fx(ctx, ox, oy, 3, 7, Math.max(2, W - 10), 2, '#38bdf8');
+      for (let j = 4; j < H - 5; j += 2) {
+        fx(ctx, ox, oy, 2, j, W - 4, 1, 'rgba(12, 74, 110, 0.35)');
+      }
+      fx(ctx, ox, oy, 2, 3, W - 4, 1, '#7dd3fc'); // glare
+      // Stand
+      shadedBlock(ctx, ox, oy, Math.floor(W / 2) - 2, H - 3, 4, 1, PALETTE.steel);
+      shadedBlock(ctx, ox, oy, Math.floor(W / 2) - 4, H - 2, 8, 1, PALETTE.steel);
+      break;
+    }
+
+    case 'coffee_machine': {
+      const body: Ramp = { dark: '#4c1d0a', base: '#92400e', light: '#c2410c', hi: '#fb923c' };
+      const steel = PALETTE.steel;
+
+      // Tall body with a chrome upper deck, so the machine silhouette is obvious.
+      shadedBlock(ctx, ox, oy, 1, 0, 14, 12, body);
+      shadedBlock(ctx, ox, oy, 2, 1, 12, 3, steel); // chrome top / bean hopper
+      fx(ctx, ox, oy, 3, 2, 4, 1, '#22c55e'); // ready lamp
+      fx(ctx, ox, oy, 11, 2, 2, 1, '#ef4444'); // power lamp
+
+      // Group head with the portafilter below it.
+      shadedBlock(ctx, ox, oy, 5, 5, 6, 2, steel);
+      fx(ctx, ox, oy, 7, 7, 2, 1, '#3f2410'); // espresso stream
+
+      // Cup sitting on the drip tray.
+      shadedBlock(ctx, ox, oy, 6, 8, 4, 3, { dark: '#94a3b8', base: '#f1f5f9', light: '#ffffff', hi: '#ffffff' });
+      fx(ctx, ox, oy, 7, 9, 2, 1, '#78350f'); // coffee surface
+      fx(ctx, ox, oy, 10, 9, 1, 1, '#e2e8f0'); // handle
+
+      shadedBlock(ctx, ox, oy, 3, 12, 10, 2, steel); // drip tray
+      for (let i = 4; i < 12; i += 2) fx(ctx, ox, oy, i, 12, 1, 1, steel.dark); // tray grate
+      break;
+    }
+
+    case 'bookshelf': {
+      shadedBlock(ctx, ox, oy, 0, 0, W, H - 1, PALETTE.darkwood);
+      // Two shelves of varied book spines
+      const shelfTops = [2, 9];
+      shelfTops.forEach((sy, si) => {
+        fx(ctx, ox, oy, 1, sy + 5, W - 2, 1, PALETTE.darkwood.dark); // shelf board
+        let bx = 2;
+        let i = 0;
+        while (bx < W - 3) {
+          const bw = 1 + ((i + si) % 3);
+          const bh = 4 - ((i + si) % 2);
+          const colors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+          const color = colors[(i * 2 + si * 3) % colors.length];
+          if (bx + bw > W - 2) break;
+          fx(ctx, ox, oy, bx, sy + 5 - bh, bw, bh, color);
+          ox1(ctx, ox, oy, bx, sy + 5 - bh, bw, bh, OUTLINE);
+          bx += bw + 1;
+          i++;
+        }
+      });
+      break;
+    }
+
+    case 'door': {
+      // Frame
+      shadedBlock(ctx, ox, oy, 0, 0, W, H - 1, PALETTE.steel);
+      // Door leaf with two recessed panels
+      shadedBlock(ctx, ox, oy, 2, 1, W - 4, H - 3, PALETTE.darkwood);
+      const panelW = W - 8;
+      fx(ctx, ox, oy, 4, 3, panelW, 4, PALETTE.darkwood.dark);
+      ox1(ctx, ox, oy, 4, 3, panelW, 4, PALETTE.darkwood.hi);
+      fx(ctx, ox, oy, 4, 9, panelW, 4, PALETTE.darkwood.dark);
+      ox1(ctx, ox, oy, 4, 9, panelW, 4, PALETTE.darkwood.hi);
+      // Handle
+      fx(ctx, ox, oy, W - 5, 7, 2, 2, PALETTE.amber.light);
+      ox1(ctx, ox, oy, W - 5, 7, 2, 2, OUTLINE);
+      break;
+    }
+
+    default: {
+      shadedBlock(ctx, ox, oy, 1, 1, W - 2, H - 2, PALETTE.steel);
+      break;
+    }
   }
 
   ctx.restore();
