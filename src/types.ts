@@ -1,5 +1,7 @@
 export type Direction = 'up' | 'down' | 'left' | 'right';
 
+export type PresenceStatus = 'available' | 'busy' | 'dnd';
+
 export interface AvatarCustomization {
   skinColor: string;
   hairStyle: string;
@@ -35,6 +37,7 @@ export interface User {
   isAdmin?: boolean;
   currentZoneId: string | null;
   lastSeen: number;
+  presenceStatus: PresenceStatus;
 }
 
 export type TileType = 

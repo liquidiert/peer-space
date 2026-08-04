@@ -13,7 +13,7 @@ import {
   MessageCircle,
   Armchair,
 } from 'lucide-vue-next';
-import type { User, GridMap } from '../types';
+import type { User, GridMap, PresenceStatus } from '../types';
 
 const props = defineProps<{
   isMuted: boolean;
@@ -36,11 +36,20 @@ const emit = defineEmits<{
   (e: 'openAvatarBuilder'): void;
   (e: 'toggleChat'): void;
   (e: 'moveToDesk'): void;
+  (e: 'cyclePresenceStatus'): void;
 }>();
 
 const currentZone = computed(() => {
   return props.currentMap.privateZones.find((z) => z.id === props.currentUser.currentZoneId);
 });
+
+const PRESENCE_META: Record<PresenceStatus, { label: string; dot: string; next: string }> = {
+  available: { label: 'Available', dot: 'bg-emerald-500', next: 'Busy' },
+  busy: { label: 'Busy', dot: 'bg-amber-500', next: 'Do Not Disturb' },
+  dnd: { label: 'Do Not Disturb', dot: 'bg-rose-500', next: 'Available' },
+};
+
+const presenceMeta = computed(() => PRESENCE_META[props.currentUser.presenceStatus] || PRESENCE_META.available);
 
 const myDesk = computed(() => {
   return props.currentMap.objects.find(
@@ -63,7 +72,7 @@ const myDesk = computed(() => {
       v-if="myDesk"
       type="button"
       @click="emit('moveToDesk')"
-      title="Walk to Your Desk (G)"
+      title="Walk to Your Desk"
       class="h-10 px-3 sm:px-3.5 rounded-xl border-2 border-slate-900 inline-flex items-center justify-center gap-2 text-xs font-bold transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] bg-amber-300 text-slate-950 hover:bg-amber-200"
     >
       <Armchair class="w-4 h-4 shrink-0" />
@@ -165,6 +174,17 @@ const myDesk = computed(() => {
     >
       <Sparkles class="w-4 h-4 text-indigo-700 shrink-0" />
       <span class="hidden sm:inline font-heading whitespace-nowrap">Avatar</span>
+    </button>
+
+    <!-- Presence Status: click to cycle Available -> Busy -> Do Not Disturb -->
+    <button
+      type="button"
+      @click="emit('cyclePresenceStatus')"
+      :title="`Status: ${presenceMeta.label} (click for ${presenceMeta.next})`"
+      class="h-10 px-3 sm:px-3.5 bg-slate-100 hover:bg-slate-200 border-2 border-slate-900 rounded-xl text-xs font-bold text-slate-900 inline-flex items-center justify-center gap-2 transition-colors pixel-btn shadow-[2px_2px_0px_0px_#0f172a]"
+    >
+      <span :class="`w-3 h-3 rounded-full border-2 border-slate-900 shrink-0 ${presenceMeta.dot}`" />
+      <span class="hidden sm:inline font-heading whitespace-nowrap">{{ presenceMeta.label }}</span>
     </button>
   </div>
 </template>

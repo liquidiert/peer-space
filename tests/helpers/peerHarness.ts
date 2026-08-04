@@ -32,6 +32,7 @@ export function makeUser(overrides: Partial<User> & { socketId: string }): User 
     isScreenSharing: false,
     currentZoneId: null,
     lastSeen: Date.now(),
+    presenceStatus: 'available',
     ...overrides,
   } as User;
 }

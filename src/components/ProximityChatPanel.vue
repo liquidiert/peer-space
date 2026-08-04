@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue';
+import { ref, computed, watch, nextTick, onUnmounted } from 'vue';
 import {
   MessageSquare,
   Users,
@@ -10,6 +10,7 @@ import {
   MicOff,
   ChevronDown,
   MessageCircle,
+  BellRing,
 } from 'lucide-vue-next';
 import type { User, ChatMessage } from '../types';
 
@@ -23,8 +24,30 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'sendMessage', payload: { text: string; isSpatial: boolean }): void;
   (e: 'teleportToUser', payload: { x: number; y: number }): void;
+  (e: 'chimeUser', payload: { socketId: string }): void;
   (e: 'close'): void;
 }>();
+
+// Local cooldown mirror of the server's, purely so the button visibly disables itself
+// instead of looking like a no-op click if someone double-taps it.
+const CHIME_COOLDOWN_MS = 8000;
+const chimedAt = ref<Record<string, number>>({});
+const now = ref(Date.now());
+const nowTickInterval = window.setInterval(() => {
+  now.value = Date.now();
+}, 500);
+onUnmounted(() => clearInterval(nowTickInterval));
+
+function isChimeOnCooldown(socketId: string): boolean {
+  const last = chimedAt.value[socketId];
+  return !!last && now.value - last < CHIME_COOLDOWN_MS;
+}
+
+function sendChime(socketId: string) {
+  if (isChimeOnCooldown(socketId)) return;
+  chimedAt.value = { ...chimedAt.value, [socketId]: Date.now() };
+  emit('chimeUser', { socketId });
+}
 
 const activeTab = ref<'spatial' | 'global' | 'users'>('spatial');
 const inputText = ref('');
@@ -167,11 +190,23 @@ function handleSend() {
         >
           <div class="flex items-center gap-2.5">
             <!-- Avatar Dot -->
-            <div
-              class="w-8 h-8 rounded-lg border-2 border-slate-900 flex items-center justify-center font-bold text-[12px] text-white shadow-sm"
-              :style="{ backgroundColor: user.avatar.outfitColor || '#3b82f6' }"
-            >
-              {{ user.avatar.statusEmoji || '👤' }}
+            <div class="relative shrink-0">
+              <div
+                class="w-8 h-8 rounded-lg border-2 border-slate-900 flex items-center justify-center font-bold text-[12px] text-white shadow-sm"
+                :style="{ backgroundColor: user.avatar.outfitColor || '#3b82f6' }"
+              >
+                {{ user.avatar.statusEmoji || '👤' }}
+              </div>
+              <span
+                :class="`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
+                  user.presenceStatus === 'busy'
+                    ? 'bg-amber-500'
+                    : user.presenceStatus === 'dnd'
+                    ? 'bg-rose-500'
+                    : 'bg-emerald-500'
+                }`"
+                :title="user.presenceStatus === 'busy' ? 'Busy' : user.presenceStatus === 'dnd' ? 'Do Not Disturb' : 'Available'"
+              />
             </div>
 
             <div class="flex flex-col">
@@ -210,6 +245,27 @@ function handleSend() {
           <div class="flex items-center gap-1.5">
             <MicOff v-if="user.isMuted" class="w-3.5 h-3.5 text-rose-600" />
             <Mic v-else :class="`w-3.5 h-3.5 ${user.isSpeaking ? 'text-emerald-600 animate-pulse' : 'text-slate-400'}`" />
+
+            <button
+              v-if="user.socketId !== currentUser.socketId"
+              type="button"
+              @click="sendChime(user.socketId)"
+              :disabled="isChimeOnCooldown(user.socketId)"
+              :title="
+                isChimeOnCooldown(user.socketId)
+                  ? 'Chime sent - wait a moment before ringing again'
+                  : user.presenceStatus === 'available'
+                  ? `Chime ${user.name}`
+                  : `Ring ${user.name} (${user.presenceStatus === 'dnd' ? 'Do Not Disturb' : 'Busy'})`
+              "
+              :class="`p-1.5 border-2 border-slate-900 rounded-lg transition-all pixel-btn ${
+                isChimeOnCooldown(user.socketId)
+                  ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                  : 'bg-indigo-300 hover:bg-indigo-400 text-slate-950'
+              }`"
+            >
+              <BellRing class="w-3.5 h-3.5" />
+            </button>
 
             <button
               v-if="user.socketId !== currentUser.socketId"

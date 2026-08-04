@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { io, Socket } from 'socket.io-client';
 import SpatialCanvas from './components/SpatialCanvas.vue';
 import ControlBar from './components/ControlBar.vue';
@@ -9,7 +9,8 @@ import MiniMap from './components/MiniMap.vue';
 import AvatarBuilder from './components/AvatarBuilder.vue';
 import ObjectModals from './components/ObjectModals.vue';
 import VideoDock from './components/VideoDock.vue';
-import { Sparkles, Compass, LogIn, CheckCircle2, LogOut, ShieldCheck, Hammer } from 'lucide-vue-next';
+import { Sparkles, Compass, LogIn, CheckCircle2, LogOut, ShieldCheck, Hammer, RefreshCw } from 'lucide-vue-next';
+import { useRegisterSW } from 'virtual:pwa-register/vue';
 import type {
   User,
   GridMap,
@@ -19,10 +20,11 @@ import type {
   AvatarCustomization,
   WhiteboardStroke,
   StickyNote,
+  PresenceStatus,
 } from './types';
 import { createDefaultOfficeMap } from './mapsData';
 import { useWebRTCProximity } from './composables/useWebRTCProximity';
-import { findPathAStar } from './lib/pathfinding';
+import { findPathAStar, occupiedKeySet } from './lib/pathfinding';
 
 const socket = ref<Socket | null>(null);
 const hasJoined = ref(false);
@@ -33,6 +35,7 @@ const AVATAR_PERSISTENCE_KEY = 'peerspace_avatar_config';
 const USER_NAME_PERSISTENCE_KEY = 'peerspace_user_name';
 const CLIENT_ID_PERSISTENCE_KEY = 'peerspace_client_id';
 const LAST_POSITION_PERSISTENCE_KEY = 'peerspace_last_position';
+const PRESENCE_STATUS_PERSISTENCE_KEY = 'peerspace_presence_status';
 
 function loadSavedPosition(): { mapId: string; x: number; y: number } | null {
   try {
@@ -183,6 +186,34 @@ watch(
   { deep: true }
 );
 
+function loadSavedPresenceStatus(): PresenceStatus {
+  try {
+    const saved = localStorage.getItem(PRESENCE_STATUS_PERSISTENCE_KEY);
+    if (saved === 'available' || saved === 'busy' || saved === 'dnd') return saved;
+  } catch (e) {}
+  return 'available';
+}
+
+const presenceStatus = ref<PresenceStatus>(loadSavedPresenceStatus());
+const PRESENCE_STATUS_CYCLE: PresenceStatus[] = ['available', 'busy', 'dnd'];
+
+function cyclePresenceStatus() {
+  const idx = PRESENCE_STATUS_CYCLE.indexOf(presenceStatus.value);
+  presenceStatus.value = PRESENCE_STATUS_CYCLE[(idx + 1) % PRESENCE_STATUS_CYCLE.length];
+}
+
+watch(presenceStatus, (newVal) => {
+  try {
+    localStorage.setItem(PRESENCE_STATUS_PERSISTENCE_KEY, newVal);
+  } catch (e) {
+    console.warn('Failed to persist presence status to browser storage:', e);
+  }
+  if (hasJoined.value && socket.value) {
+    currentUser.value.presenceStatus = newVal;
+    socket.value.emit('user:update_profile', { presenceStatus: newVal });
+  }
+});
+
 const currentUser = ref<User>({
   id: '',
   socketId: '',
@@ -196,6 +227,7 @@ const currentUser = ref<User>({
   isScreenSharing: false,
   currentZoneId: null,
   lastSeen: Date.now(),
+  presenceStatus: presenceStatus.value,
 });
 
 const users = ref<User[]>([]);
@@ -217,6 +249,16 @@ watch(
   },
   { deep: true }
 );
+
+// PWA update toast: registerType is 'prompt' (not 'autoUpdate'), so a new service worker
+// installs quietly in the background and we surface it here instead of force-reloading
+// someone mid call/screen-share.
+const { needRefresh, updateServiceWorker } = useRegisterSW();
+const updateToastDismissed = ref(false);
+const showUpdateToast = computed(() => needRefresh.value && !updateToastDismissed.value);
+function reloadForUpdate() {
+  updateServiceWorker();
+}
 
 // Chat Panel visibility & unread tracking
 const isChatOpen = ref(false);
@@ -336,6 +378,11 @@ onMounted(() => {
 
   sk.on('chat:message', (msg: ChatMessage) => {
     messages.value = [...messages.value, msg];
+  });
+
+  sk.on('chime:received', (data: { fromSocketId: string; fromName: string }) => {
+    playChimeSound();
+    showChimeToast(data.fromName);
   });
 
   // Object updates
@@ -542,6 +589,7 @@ async function handleJoinSpace() {
   currentUser.value.name = nameToUse;
   currentUser.value.avatar = avatarConfig.value;
   currentUser.value.isAdmin = isAdmin;
+  currentUser.value.presenceStatus = presenceStatus.value;
   socket.value.emit('user:join', {
     name: nameToUse,
     avatar: avatarConfig.value,
@@ -553,6 +601,7 @@ async function handleJoinSpace() {
     sessionToken: authenticatedUser.value?.sessionToken,
     // Resume where we left off last time, if the server decides the tile/map are still valid.
     lastPosition: loadSavedPosition(),
+    presenceStatus: presenceStatus.value,
   });
 
   // Initialize WebRTC audio stream & voice activity detection
@@ -568,7 +617,7 @@ function stopPathWalking() {
   }
 }
 
-function handleMove(data: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right' }) {
+function handleMove(data: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right'; ghost?: boolean }) {
   stopPathWalking();
   if (socket.value && hasJoined.value) {
     socket.value.emit('user:move', data);
@@ -580,7 +629,12 @@ function handleNavigateTile(target: { x: number; y: number }) {
   if (!currentMap.value || !currentUser.value?.position || !socket.value || !hasJoined.value) return;
 
   const start = { x: currentUser.value.position.x, y: currentUser.value.position.y };
-  const path = findPathAStar(currentMap.value, start, target);
+  // Route around other users' current tiles (best-effort - someone can still step into the
+  // path mid-walk, at which point the server simply rejects that step; see user:move).
+  const occupied = occupiedKeySet(
+    users.value.filter((u) => u.socketId !== currentUser.value.socketId).map((u) => u.position)
+  );
+  const path = findPathAStar(currentMap.value, start, target, occupied);
 
   if (path.length === 0) return;
 
@@ -616,6 +670,50 @@ function handleTeleportToUser(data: { x: number; y: number }) {
   handleNavigateTile(data);
 }
 
+function handleChimeUser(data: { socketId: string }) {
+  if (socket.value) {
+    socket.value.emit('user:chime', { to: data.socketId });
+  }
+}
+
+// A short two-tone chime via Web Audio - no audio asset needed, and it still fires even
+// if the WebRTC mic/audio stack never initialized (e.g. mic permission was denied).
+function playChimeSound() {
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    const ctx = new AudioCtx();
+    const playTone = (freq: number, startTime: number, duration: number) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.25, startTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + duration);
+    };
+    const now = ctx.currentTime;
+    playTone(880, now, 0.18);
+    playTone(1174.66, now + 0.16, 0.22);
+    setTimeout(() => ctx.close(), 500);
+  } catch (e) {
+    console.warn('Could not play chime sound:', e);
+  }
+}
+
+const chimeToast = ref<string | null>(null);
+let chimeToastTimeout: number | null = null;
+function showChimeToast(fromName: string) {
+  chimeToast.value = `🔔 ${fromName} is trying to reach you!`;
+  if (chimeToastTimeout) clearTimeout(chimeToastTimeout);
+  chimeToastTimeout = window.setTimeout(() => {
+    chimeToast.value = null;
+  }, 5000);
+}
+
 function handleMoveToDesk() {
   const desk = currentMap.value?.objects.find(
     (obj) => obj.type === 'desk' && obj.data?.deskState?.claimedByUserId === currentUser.value.id
@@ -630,8 +728,9 @@ function handleMoveToDesk() {
   });
 }
 
-// Global keyboard shortcuts for every action button (movement's WASD/arrow keys are
-// handled separately in SpatialCanvas.vue, so none of these overlap with w/a/s/d).
+// Global keyboard shortcuts for every action button (movement's WASD/arrow keys, and
+// holding "g" for Ghost Mode, are handled separately in SpatialCanvas.vue - "g" is
+// deliberately not bound to anything here so it's free for that).
 function handleGlobalHotkeys(e: KeyboardEvent) {
   const target = e.target as HTMLElement | null;
   if (target && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)) {
@@ -681,9 +780,6 @@ function handleGlobalHotkeys(e: KeyboardEvent) {
       break;
     case 'p':
       showAvatarBuilderModal.value = true;
-      break;
-    case 'g':
-      handleMoveToDesk();
       break;
     default:
       return;
@@ -917,6 +1013,40 @@ function handleToggleBuilderMode() {
       </div>
     </div>
 
+    <!-- PWA Update Toast: shown regardless of join state, since an update can land while
+         someone's still sitting on the login screen. Never force-reloads on its own. -->
+    <transition
+      enter-active-class="transition duration-300 ease-out"
+      enter-from-class="opacity-0 translate-y-4"
+      enter-to-class="opacity-100 translate-y-0"
+      leave-active-class="transition duration-200 ease-in"
+      leave-from-class="opacity-100 translate-y-0"
+      leave-to-class="opacity-0 translate-y-4"
+    >
+      <div
+        v-if="showUpdateToast"
+        class="fixed bottom-4 right-4 z-[60] bg-indigo-500 text-white border-3 border-slate-900 px-4 py-2.5 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] font-heading font-extrabold text-xs flex items-center gap-3 max-w-xs"
+      >
+        <RefreshCw class="w-4 h-4 shrink-0" />
+        <span class="flex-1">A new version is ready</span>
+        <button
+          type="button"
+          @click="reloadForUpdate"
+          class="bg-white hover:bg-slate-100 text-slate-900 border-2 border-slate-900 rounded-lg px-3 py-1 pixel-btn shrink-0"
+        >
+          Reload
+        </button>
+        <button
+          type="button"
+          @click="updateToastDismissed = true"
+          title="Dismiss"
+          class="text-white/80 hover:text-white shrink-0"
+        >
+          ✕
+        </button>
+      </div>
+    </transition>
+
     <!-- Main Spatial Workspace Canvas -->
     <div class="flex-1 relative flex items-center justify-center overflow-hidden">
       <!-- Header Bar & Private Zone Notification Banner -->
@@ -982,6 +1112,23 @@ function handleToggleBuilderMode() {
         </button>
       </div>
 
+      <!-- Chime Toast: another user rang you (via the bell button in Chat & People) -->
+      <transition
+        enter-active-class="transition duration-300 ease-out"
+        enter-from-class="opacity-0 -translate-y-4"
+        enter-to-class="opacity-100 translate-y-0"
+        leave-active-class="transition duration-200 ease-in"
+        leave-from-class="opacity-100 translate-y-0"
+        leave-to-class="opacity-0 -translate-y-4"
+      >
+        <div
+          v-if="chimeToast"
+          class="absolute top-4 right-4 z-50 bg-indigo-400 text-slate-950 border-3 border-slate-900 px-4 py-2.5 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] font-heading font-extrabold text-xs flex items-center gap-2 max-w-xs text-center"
+        >
+          <span>{{ chimeToast }}</span>
+        </div>
+      </transition>
+
       <!-- Spatial Canvas -->
       <SpatialCanvas
         :currentUser="currentUser"
@@ -1024,6 +1171,7 @@ function handleToggleBuilderMode() {
         :isOpen="isChatOpen"
         @sendMessage="handleSendMessage"
         @teleportToUser="handleTeleportToUser"
+        @chimeUser="handleChimeUser"
         @close="isChatOpen = false"
       />
 
@@ -1054,6 +1202,7 @@ function handleToggleBuilderMode() {
         @openAvatarBuilder="showAvatarBuilderModal = true"
         @toggleChat="handleToggleChat"
         @moveToDesk="handleMoveToDesk"
+        @cyclePresenceStatus="cyclePresenceStatus"
       />
 
       <!-- Floating WebRTC Video Dock -->

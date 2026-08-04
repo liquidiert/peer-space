@@ -14,7 +14,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'move', payload: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right' }): void;
+  (e: 'move', payload: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right'; ghost?: boolean }): void;
   (e: 'navigateTile', payload: { x: number; y: number }): void;
   (e: 'interactObject', object: MapObject): void;
   (e: 'placeObject', newObj: MapObject): void;
@@ -25,6 +25,10 @@ const emit = defineEmits<{
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const scrollContainerRef = ref<HTMLDivElement | null>(null);
 const CELL_SIZE = 48; // Each spatial tile is 48x48px
+
+// Ghost Mode: holding "g" lets you walk through other users. The server is still the
+// authority on collision (see server.ts user:move), this just flags the request.
+const isGhostMode = ref(false);
 
 // Mobile camera-follow: on small/touch screens the map is larger than the
 // viewport, so we auto-scroll the container to keep the player's avatar centered.
@@ -795,7 +799,8 @@ function renderUser(
   ctx: CanvasRenderingContext2D,
   user: User,
   isSelf: boolean,
-  displayPos: { x: number; y: number; isMoving: boolean }
+  displayPos: { x: number; y: number; isMoving: boolean },
+  isGhost = false
 ) {
   let px = displayPos.x * CELL_SIZE + CELL_SIZE / 2;
   let py = displayPos.y * CELL_SIZE + CELL_SIZE / 2;
@@ -807,6 +812,11 @@ function renderUser(
   }
 
   ctx.save();
+
+  // Ghost Mode: your own avatar turns translucent while phasing through others
+  if (isSelf && isGhost) {
+    ctx.globalAlpha = 0.45;
+  }
 
   // Proximity Voice Halo Ring (If speaking)
   if (user.isSpeaking) {
@@ -963,6 +973,29 @@ function renderUser(
     ctx.fillStyle = '#f59e0b';
     ctx.fillRect(px - 3, headY - 12, 6, 6);
     ctx.strokeRect(px - 3, headY - 12, 6, 6);
+  }
+
+  // Presence Status Dot (top-right corner of the head, Discord-style)
+  const presenceColors: Record<string, string> = {
+    available: '#22c55e',
+    busy: '#f59e0b',
+    dnd: '#ef4444',
+  };
+  const presenceColor = presenceColors[user.presenceStatus] || presenceColors.available;
+  const dotX = headX + HEAD_W - 1;
+  const dotY = headY + 1;
+  ctx.fillStyle = BORDER;
+  ctx.beginPath();
+  ctx.arc(dotX, dotY, 4.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = presenceColor;
+  ctx.beginPath();
+  ctx.arc(dotX, dotY, 3, 0, Math.PI * 2);
+  ctx.fill();
+  if (user.presenceStatus === 'dnd') {
+    // A short bar reads as "do not disturb" even at a glance, matching common chat apps.
+    ctx.fillStyle = BORDER;
+    ctx.fillRect(dotX - 1.5, dotY - 0.75, 3, 1.5);
   }
 
   // Status Emoji Badge (bottom-right corner, overlapping the head/body seam)
@@ -1129,7 +1162,8 @@ function renderCanvas() {
       }
     }
 
-    renderUser(ctx, user, user.socketId === props.currentUser.socketId, currentPos);
+    const isSelfUser = user.socketId === props.currentUser.socketId;
+    renderUser(ctx, user, isSelfUser, currentPos, isSelfUser && isGhostMode.value);
   });
 
   followCameraOnMobile();
@@ -1154,12 +1188,17 @@ function movePlayer(dx: number, dy: number, dir: 'up' | 'down' | 'left' | 'right
   const targetX = props.currentUser.position.x + dx;
   const targetY = props.currentUser.position.y + dy;
 
-  emit('move', { x: targetX, y: targetY, direction: dir });
+  emit('move', { x: targetX, y: targetY, direction: dir, ghost: isGhostMode.value });
 }
 
 // Keydown Movement Listener
 function handleKeyDown(e: KeyboardEvent) {
   if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
+    return;
+  }
+
+  if (e.key === 'g' || e.key === 'G') {
+    isGhostMode.value = true;
     return;
   }
 
@@ -1198,6 +1237,18 @@ function handleKeyDown(e: KeyboardEvent) {
 
   e.preventDefault();
   movePlayer(dx, dy, dir);
+}
+
+// Keyup: releasing "g" ends Ghost Mode. Also handles the tab losing focus while held
+// (window blur) so ghost mode never gets "stuck" on.
+function handleKeyUp(e: KeyboardEvent) {
+  if (e.key === 'g' || e.key === 'G') {
+    isGhostMode.value = false;
+  }
+}
+
+function endGhostMode() {
+  isGhostMode.value = false;
 }
 
 // On-screen mobile D-pad: fires an immediate move, then repeats while held
@@ -1274,6 +1325,8 @@ function handleCanvasClick(e: MouseEvent) {
 
 onMounted(() => {
   window.addEventListener('keydown', handleKeyDown);
+  window.addEventListener('keyup', handleKeyUp);
+  window.addEventListener('blur', endGhostMode);
   updateIsMobile();
   window.addEventListener('resize', updateIsMobile);
   startAnimLoop();
@@ -1281,6 +1334,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown);
+  window.removeEventListener('keyup', handleKeyUp);
+  window.removeEventListener('blur', endGhostMode);
   window.removeEventListener('resize', updateIsMobile);
   stopDpadMove();
   if (animFrameId !== null) {

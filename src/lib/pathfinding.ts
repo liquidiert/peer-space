@@ -1,6 +1,11 @@
 import type { GridMap, Point } from '../types';
 
-export function isTileWalkable(map: GridMap, x: number, y: number): boolean {
+/** Build the `occupied` key set findPathAStar/isTileWalkable expect from a list of positions. */
+export function occupiedKeySet(positions: Point[]): Set<string> {
+  return new Set(positions.map((p) => `${p.x},${p.y}`));
+}
+
+export function isTileWalkable(map: GridMap, x: number, y: number, occupied?: Set<string>): boolean {
   if (x < 0 || x >= map.width || y < 0 || y >= map.height) return false;
 
   const tile = map.tiles[y]?.[x];
@@ -13,22 +18,24 @@ export function isTileWalkable(map: GridMap, x: number, y: number): boolean {
   );
   if (blockingObj) return false;
 
+  if (occupied?.has(`${x},${y}`)) return false;
+
   return true;
 }
 
-export function findPathAStar(map: GridMap, start: Point, end: Point): Point[] {
+export function findPathAStar(map: GridMap, start: Point, end: Point, occupied?: Set<string>): Point[] {
   if (!map) return [];
   if (start.x === end.x && start.y === end.y) return [];
 
   // If destination tile itself is blocked, find the nearest walkable neighboring tile
   let target = { ...end };
-  if (!isTileWalkable(map, target.x, target.y)) {
+  if (!isTileWalkable(map, target.x, target.y, occupied)) {
     const neighbors = [
       { x: end.x, y: end.y - 1 },
       { x: end.x, y: end.y + 1 },
       { x: end.x - 1, y: end.y },
       { x: end.x + 1, y: end.y },
-    ].filter((p) => isTileWalkable(map, p.x, p.y));
+    ].filter((p) => isTileWalkable(map, p.x, p.y, occupied));
 
     if (neighbors.length === 0) return [];
     neighbors.sort(
@@ -98,7 +105,7 @@ export function findPathAStar(map: GridMap, start: Point, end: Point): Point[] {
       const nKey = key(nx, ny);
 
       if (closedSet.has(nKey)) continue;
-      if (!isTileWalkable(map, nx, ny)) continue;
+      if (!isTileWalkable(map, nx, ny, occupied)) continue;
 
       const gScore = current.g + 1;
       let neighbor = openList.find((n) => n.x === nx && n.y === ny);

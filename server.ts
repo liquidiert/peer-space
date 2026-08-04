@@ -8,7 +8,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { createServer as createViteServer } from 'vite';
-import { User, GridMap, ChatMessage, MapObject, WhiteboardStroke, StickyNote, PrivateZone } from './src/types';
+import { User, GridMap, ChatMessage, MapObject, WhiteboardStroke, StickyNote, PrivateZone, PresenceStatus } from './src/types';
 import { createDefaultOfficeMap, createBeachRetreatMap } from './src/mapsData';
 import { initWorkspaceDatabase } from './src/db';
 import { createSessionToken, verifySessionToken } from './src/lib/session';
@@ -23,6 +23,10 @@ async function startServer() {
 
   // In-memory application state
   const users: Map<string, User> = new Map(); // socket.id -> User
+  // Per (from, to) pair cooldown for the chime feature, enforced server-side so a
+  // misbehaving/hacked client can't spam someone regardless of any client-side disabling.
+  const lastChimeAt: Map<string, number> = new Map();
+  const CHIME_COOLDOWN_MS = 8000;
 
   // Available maps (Loaded from SQLite database or initialized with defaults)
   const maps: Map<string, GridMap> = new Map();
@@ -127,6 +131,41 @@ async function startServer() {
     return null;
   }
 
+  // Helper: is this tile currently stood on by some other connected user?
+  function isOccupiedByOtherUser(x: number, y: number, excludeSocketId: string): boolean {
+    for (const u of users.values()) {
+      if (u.socketId !== excludeSocketId && u.position.x === x && u.position.y === y) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Helper: nearest walkable, unoccupied tile to `preferred` - used when a join/resume
+  // position would otherwise land a new user directly on top of someone already there.
+  function findFreeSpawnTile(
+    map: GridMap,
+    preferred: { x: number; y: number },
+    excludeSocketId: string
+  ): { x: number; y: number } {
+    if (isTileWalkable(map, preferred.x, preferred.y) && !isOccupiedByOtherUser(preferred.x, preferred.y, excludeSocketId)) {
+      return preferred;
+    }
+    for (let radius = 1; radius <= 10; radius++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue; // ring only
+          const x = preferred.x + dx;
+          const y = preferred.y + dy;
+          if (isTileWalkable(map, x, y) && !isOccupiedByOtherUser(x, y, excludeSocketId)) {
+            return { x, y };
+          }
+        }
+      }
+    }
+    return preferred; // give up - overlap is better than an infinite/failed join
+  }
+
   // Calculate proximity and emit peer connections list to all users
   function updateSpatialProximity() {
     const map = maps.get(currentMapId);
@@ -183,16 +222,20 @@ async function startServer() {
         email?: string;
         sessionToken?: string;
         lastPosition?: { mapId: string; x: number; y: number };
+        presenceStatus?: PresenceStatus;
       }) => {
       const map = maps.get(currentMapId) || defaultOffice;
 
       // Resume where the browser last left off, as long as it was on this same map and the
       // tile is still walkable (map layout may have changed via the builder since then).
       const lp = payload.lastPosition;
-      const startPosition =
+      const preferredPosition =
         lp && lp.mapId === map.id && isTileWalkable(map, lp.x, lp.y)
           ? { x: lp.x, y: lp.y }
           : { ...map.spawnPoint };
+      // Collision detection means two users can no longer share a tile - if the resume/spawn
+      // tile is already taken, nudge the new arrival to the nearest free tile instead.
+      const startPosition = findFreeSpawnTile(map, preferredPosition, socket.id);
 
       const initialZone = getPrivateZoneId(map, startPosition.x, startPosition.y);
 
@@ -209,6 +252,11 @@ async function startServer() {
       // every connection) - the verified email when authenticated, else the persisted
       // per-browser clientId, else fall back to socket.id for older/guest clients.
       const stableId = email || payload.clientId || socket.id;
+
+      const validPresenceStatuses: PresenceStatus[] = ['available', 'busy', 'dnd'];
+      const presenceStatus = validPresenceStatuses.includes(payload.presenceStatus as PresenceStatus)
+        ? (payload.presenceStatus as PresenceStatus)
+        : 'available';
 
       const newUser: User = {
         id: stableId,
@@ -232,6 +280,7 @@ async function startServer() {
         isAdmin,
         currentZoneId: initialZone,
         lastSeen: Date.now(),
+        presenceStatus,
       };
 
       users.set(socket.id, newUser);
@@ -251,7 +300,7 @@ async function startServer() {
     );
 
     // Handle User Movement
-    socket.on('user:move', (data: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right' }) => {
+    socket.on('user:move', (data: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right'; ghost?: boolean }) => {
       const user = users.get(socket.id);
       if (!user) return;
 
@@ -280,6 +329,14 @@ async function startServer() {
       });
 
       if (blockingObj) {
+        return; // blocked
+      }
+
+      // Collision with other users - two people can no longer occupy the same tile, unless
+      // the mover is holding Ghost mode (client sends `ghost: true` while "g" is held).
+      // Authoritative here (not just client-side) so simultaneous moves from two clients
+      // can't both land on the same tile via a race.
+      if (!data.ghost && isOccupiedByOtherUser(data.x, data.y, socket.id)) {
         return; // blocked
       }
 
@@ -312,6 +369,9 @@ async function startServer() {
       if (typeof updates.isSpeaking === 'boolean') user.isSpeaking = updates.isSpeaking;
       if (typeof updates.isVideoOn === 'boolean') user.isVideoOn = updates.isVideoOn;
       if (typeof updates.isAdmin === 'boolean' && user.isAdmin) user.isAdmin = updates.isAdmin;
+      if (updates.presenceStatus && ['available', 'busy', 'dnd'].includes(updates.presenceStatus)) {
+        user.presenceStatus = updates.presenceStatus;
+      }
 
       io.emit('user:updated', user);
     });
@@ -355,6 +415,25 @@ async function startServer() {
         // Broadcast global room message
         io.emit('chat:message', chatMsg);
       }
+    });
+
+    // Chime: ring a colleague's client to get their attention (particularly meant for
+    // reaching someone marked Busy/DND, but works on anyone).
+    socket.on('user:chime', (payload: { to: string }) => {
+      const sender = users.get(socket.id);
+      const target = users.get(payload?.to);
+      if (!sender || !target || target.socketId === sender.socketId) return;
+
+      const key = `${sender.socketId}->${target.socketId}`;
+      const now = Date.now();
+      const last = lastChimeAt.get(key) || 0;
+      if (now - last < CHIME_COOLDOWN_MS) return; // rate limited, ignore silently
+      lastChimeAt.set(key, now);
+
+      io.to(target.socketId).emit('chime:received', {
+        fromSocketId: sender.socketId,
+        fromName: sender.name,
+      });
     });
 
     // Interactive Object: Whiteboard stroke
@@ -617,6 +696,13 @@ async function startServer() {
       users.delete(socket.id);
       io.emit('user:left', socket.id);
       updateSpatialProximity();
+
+      // Drop any chime cooldown entries involving this socket so the map doesn't grow forever.
+      for (const key of lastChimeAt.keys()) {
+        if (key.startsWith(`${socket.id}->`) || key.endsWith(`->${socket.id}`)) {
+          lastChimeAt.delete(key);
+        }
+      }
     });
   });
 
