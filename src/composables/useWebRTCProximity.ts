@@ -46,6 +46,25 @@ export function useWebRTCProximity(
   // Pending ICE candidates buffer if remote description is not set yet
   const pendingCandidates = new Map<string, RTCIceCandidateInit[]>();
 
+  // Serializes every negotiation step (both locally-initiated renegotiation via
+  // connectToUser and incoming signals via handleSignal) per peer connection, so they can
+  // never interleave and race each other's signalingState transitions. Without this, two
+  // renegotiations for the same pair firing close together - e.g. two people's cameras
+  // both turning on around the same moment, which gets more likely with every additional
+  // participant - could hit a second collision while still resolving the first, slip past
+  // the polite/impolite check, and silently drop an offer/answer with no retry. That
+  // showed up as video sometimes just never (re)connecting for a given pair, especially in
+  // calls with 3+ people where more renegotiations overlap.
+  const negotiationQueues = new Map<string, Promise<void>>();
+  function enqueueNegotiation(key: string, task: () => Promise<void>): Promise<void> {
+    const prev = negotiationQueues.get(key) || Promise.resolve();
+    const next = prev.then(task).catch((err) => {
+      console.error(`Negotiation error for ${key}:`, err);
+    });
+    negotiationQueues.set(key, next);
+    return next;
+  }
+
   // Whether any remote peer's audio element is currently blocked by the browser's autoplay
   // policy (play() rejected) - surfaced so the UI can prompt for a tap to unblock sound.
   const isAudioPlaybackBlocked = ref(false);
@@ -482,6 +501,18 @@ export function useWebRTCProximity(
       remoteAudioElements.delete(targetSocketId);
     }
     pendingCandidates.delete(targetSocketId);
+
+    // This was previously missing, which left a permanent frozen "ghost" video tile in
+    // VideoDock every time a connection was torn down (ICE failure, reload, or the peer
+    // just leaving) - the old MediaStream's tracks stop, but the map entry itself lived on
+    // forever since nothing here ever deleted it. A brand new connection to the same
+    // person after a reload uses a new socket id, so the stale tile was never overwritten
+    // either - it just sat there alongside the real, working reconnect.
+    if (remoteVideoStreams.value.has(targetSocketId)) {
+      const m = new Map(remoteVideoStreams.value);
+      m.delete(targetSocketId);
+      remoteVideoStreams.value = m;
+    }
   }
 
   // Screen Share Peer Connection Helper (separate connection so its video track
@@ -521,9 +552,29 @@ export function useWebRTCProximity(
       };
     };
 
+    // Unlike the main audio/video connection, screen share only ever has one possible
+    // initiator (whoever is sharing) - so on failure we just re-share to this same viewer,
+    // no tiebreak needed. Without this, one viewer's screen share silently stayed broken
+    // for the rest of the session after any ICE hiccup, even though the other viewers (and
+    // the sharer's own camera/mic connection to that same person) recovered fine.
+    const rebuildScreenConnection = () => {
+      removeScreenPeerConnection(targetSocketId);
+      const stillSharingWithThisPeer =
+        isScreenSharing.value && usersRef.value.some((u) => u.socketId === targetSocketId);
+      if (stillSharingWithThisPeer) {
+        connectScreenToUser(targetSocketId);
+      }
+    };
+
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        removeScreenPeerConnection(targetSocketId);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        rebuildScreenConnection();
+      } else if (pc.connectionState === 'disconnected') {
+        setTimeout(() => {
+          if (screenPeerConnections.get(targetSocketId) === pc && pc.connectionState === 'disconnected') {
+            rebuildScreenConnection();
+          }
+        }, 5000);
       }
     };
 
@@ -543,21 +594,26 @@ export function useWebRTCProximity(
     screenPendingCandidates.delete(targetSocketId);
   }
 
-  async function connectScreenToUser(targetSocketId: string) {
-    try {
+  function connectScreenToUser(targetSocketId: string) {
+    return enqueueNegotiation(`${targetSocketId}:screen`, async () => {
       const pc = getOrCreateScreenPeerConnection(targetSocketId);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      if (socketRef.value) {
-        socketRef.value.emit('webrtc:signal', {
-          to: targetSocketId,
-          signal: { channel: 'screen', type: 'offer', sdp: pc.localDescription },
-        });
+      if (pc.signalingState !== 'stable') {
+        return;
       }
-    } catch (err) {
-      console.error(`Failed to create screen share offer for ${targetSocketId}:`, err);
-    }
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        if (socketRef.value) {
+          socketRef.value.emit('webrtc:signal', {
+            to: targetSocketId,
+            signal: { channel: 'screen', type: 'offer', sdp: pc.localDescription },
+          });
+        }
+      } catch (err) {
+        console.error(`Failed to create screen share offer for ${targetSocketId}:`, err);
+      }
+    });
   }
 
   // Start / stop sharing your screen with every currently connected peer
@@ -607,93 +663,112 @@ export function useWebRTCProximity(
   }
 
   // 3. Initiate Connection Offer
-  async function connectToUser(targetSocketId: string) {
-    try {
+  function connectToUser(targetSocketId: string) {
+    return enqueueNegotiation(targetSocketId, async () => {
       const pc = getOrCreatePeerConnection(targetSocketId);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      if (socketRef.value) {
-        socketRef.value.emit('webrtc:signal', {
-          to: targetSocketId,
-          signal: { type: 'offer', sdp: pc.localDescription },
-        });
+      if (pc.signalingState !== 'stable') {
+        // An offer is already outstanding (or we're mid-answer) for this pair - re-offering
+        // now would throw; whatever's already in flight will settle this on its own.
+        return;
       }
-    } catch (err) {
-      console.error(`Failed to create offer for ${targetSocketId}:`, err);
-    }
-  }
-
-  // 4. Handle Incoming WebRTC Signal
-  async function handleSignal(data: { from: string; signal: any }) {
-    const { from, signal } = data;
-    if (!from || !signal) return;
-
-    const isScreenChannel = signal.channel === 'screen';
-    const pc = isScreenChannel ? getOrCreateScreenPeerConnection(from) : getOrCreatePeerConnection(from);
-    const pendingMap = isScreenChannel ? screenPendingCandidates : pendingCandidates;
-
-    try {
-      if (signal.type === 'offer') {
-        // Glare: both sides can independently decide to renegotiate at the same moment
-        // (e.g. two peers both walking into range simultaneously each call
-        // updatePeerVideoConnections and send an offer), so our own offer can already be
-        // outstanding when the peer's offer arrives. Without handling this, whichever
-        // side's setRemoteDescription() lands second throws, is only console.error'd, and
-        // that connection is left stuck in 'have-local-offer' forever - this was a real
-        // source of "audio/video sometimes doesn't come back" reports.
-        //
-        // Fix: standard "perfect negotiation" polite/impolite split, using the same
-        // deterministic id comparison already used to decide who initiates in
-        // syncPeerConnections. The polite side rolls back its own offer and accepts the
-        // incoming one; the impolite side ignores the incoming offer and keeps its own.
-        const offerCollision = pc.signalingState !== 'stable';
-        if (offerCollision) {
-          const isPolite = currentUserRef.value.socketId > from;
-          if (!isPolite) {
-            return;
-          }
-          await pc.setLocalDescription({ type: 'rollback' } as any);
-        }
-
-        await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-
-        // Process buffered candidate signals
-        const pending = pendingMap.get(from);
-        if (pending) {
-          for (const cand of pending) {
-            await pc.addIceCandidate(new RTCIceCandidate(cand));
-          }
-          pendingMap.delete(from);
-        }
-
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
 
         if (socketRef.value) {
           socketRef.value.emit('webrtc:signal', {
-            to: from,
-            signal: isScreenChannel
-              ? { channel: 'screen', type: 'answer', sdp: pc.localDescription }
-              : { type: 'answer', sdp: pc.localDescription },
+            to: targetSocketId,
+            signal: { type: 'offer', sdp: pc.localDescription },
           });
         }
-      } else if (signal.type === 'answer') {
-        await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-      } else if (signal.type === 'candidate') {
-        if (pc.remoteDescription && pc.remoteDescription.type) {
-          await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-        } else {
-          // Buffer candidate until remote description is set
-          if (!pendingMap.has(from)) {
-            pendingMap.set(from, []);
-          }
-          pendingMap.get(from)!.push(signal.candidate);
-        }
+      } catch (err) {
+        console.error(`Failed to create offer for ${targetSocketId}:`, err);
       }
-    } catch (err) {
-      console.error('Error handling WebRTC signal:', err);
-    }
+    });
+  }
+
+  // 4. Handle Incoming WebRTC Signal
+  function handleSignal(data: { from: string; signal: any }): Promise<void> {
+    const { from, signal } = data;
+    if (!from || !signal) return Promise.resolve();
+
+    const isScreenChannel = signal.channel === 'screen';
+    // Same queue key as connectToUser/connectScreenToUser for this peer - that's what
+    // guarantees an incoming signal and a locally-initiated renegotiation for the same
+    // connection never execute interleaved with each other.
+    const queueKey = isScreenChannel ? `${from}:screen` : from;
+
+    return enqueueNegotiation(queueKey, async () => {
+      const pc = isScreenChannel ? getOrCreateScreenPeerConnection(from) : getOrCreatePeerConnection(from);
+      const pendingMap = isScreenChannel ? screenPendingCandidates : pendingCandidates;
+
+      try {
+        if (signal.type === 'offer') {
+          // Glare: both sides can independently decide to renegotiate at the same moment
+          // (e.g. two peers both walking into range simultaneously each call
+          // updatePeerVideoConnections and send an offer), so our own offer can already be
+          // outstanding when the peer's offer arrives. Without handling this, whichever
+          // side's setRemoteDescription() lands second throws, is only console.error'd, and
+          // that connection is left stuck in 'have-local-offer' forever - this was a real
+          // source of "audio/video sometimes doesn't come back" reports.
+          //
+          // Fix: standard "perfect negotiation" polite/impolite split, using the same
+          // deterministic id comparison already used to decide who initiates in
+          // syncPeerConnections. The polite side rolls back its own offer and accepts the
+          // incoming one; the impolite side ignores the incoming offer and keeps its own.
+          const offerCollision = pc.signalingState !== 'stable';
+          if (offerCollision) {
+            const isPolite = currentUserRef.value.socketId > from;
+            if (!isPolite) {
+              return;
+            }
+            await pc.setLocalDescription({ type: 'rollback' } as any);
+          }
+
+          await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+
+          // Process buffered candidate signals
+          const pending = pendingMap.get(from);
+          if (pending) {
+            for (const cand of pending) {
+              await pc.addIceCandidate(new RTCIceCandidate(cand));
+            }
+            pendingMap.delete(from);
+          }
+
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+
+          if (socketRef.value) {
+            socketRef.value.emit('webrtc:signal', {
+              to: from,
+              signal: isScreenChannel
+                ? { channel: 'screen', type: 'answer', sdp: pc.localDescription }
+                : { type: 'answer', sdp: pc.localDescription },
+            });
+          }
+        } else if (signal.type === 'answer') {
+          if (pc.signalingState !== 'have-local-offer') {
+            // No outstanding offer of ours for this to answer (e.g. we already rolled it
+            // back to accept their offer instead in a glare) - nothing to apply.
+            return;
+          }
+          await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+        } else if (signal.type === 'candidate') {
+          if (pc.remoteDescription && pc.remoteDescription.type) {
+            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+          } else {
+            // Buffer candidate until remote description is set
+            if (!pendingMap.has(from)) {
+              pendingMap.set(from, []);
+            }
+            pendingMap.get(from)!.push(signal.candidate);
+          }
+        }
+      } catch (err) {
+        console.error('Error handling WebRTC signal:', err);
+      }
+    });
   }
 
   // Shared distance/private-zone gate used by both audio volume and video connection proximity.

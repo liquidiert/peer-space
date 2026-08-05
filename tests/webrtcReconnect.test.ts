@@ -288,6 +288,42 @@ describe('proximity audio/video reconnection', () => {
     b.destroy();
   });
 
+  it('does not leave a stale video tile behind once a peer actually leaves', async () => {
+    // Regression test: removePeerConnection previously cleaned up peerConnections,
+    // remoteAudioElements and pendingCandidates, but never remoteVideoStreams - so once
+    // someone left (or their connection was torn down for any reason), their video tile
+    // stayed frozen in the dock forever, since nothing ever deleted that map entry.
+    const users = usersInRange();
+    const a = createPeerClient(bus, A, users);
+    const b = createPeerClient(bus, B, users);
+
+    await giveAudio(a);
+    await giveAudio(b);
+    a.api.syncPeerConnections();
+    b.api.syncPeerConnections();
+    await settle();
+
+    await giveCamera(a);
+    await giveCamera(b);
+    await settle();
+
+    expect(a.api.remoteVideoStreams.value.has(B), 'A should see B\'s video before B leaves').toBe(true);
+
+    // B actually leaves (not just an ICE hiccup) - A must not attempt to reconnect.
+    a.users.value = a.users.value.filter((u) => u.socketId !== B);
+    a.api.syncPeerConnections();
+    await settle();
+
+    expect(
+      a.api.remoteVideoStreams.value.has(B),
+      'video tile must be removed once the peer has actually left'
+    ).toBe(false);
+    expect(peerConnectionTo(a, B), 'the underlying connection should be gone too').toBeFalsy();
+
+    a.destroy();
+    b.destroy();
+  });
+
   it('sends audio even when the mic is captured after the peer connection is created', async () => {
     // Models a page refresh: init:state (and therefore syncPeerConnections) can arrive
     // before the getUserMedia permission promise resolves.
@@ -348,5 +384,129 @@ describe('proximity audio/video reconnection', () => {
 
     a.destroy();
     b.destroy();
+  });
+});
+
+describe('multi-participant streaming (3+ people)', () => {
+  const C = 'ccc-socket';
+
+  beforeEach(() => {
+    installWebRTCMocks();
+    bus = new SignalBus();
+  });
+
+  function usersAllInRange() {
+    return [
+      makeUser({ socketId: A, position: { x: 1, y: 1 } }),
+      makeUser({ socketId: B, position: { x: 1, y: 1 } }),
+      makeUser({ socketId: C, position: { x: 1, y: 1 } }),
+    ];
+  }
+
+  it('forms a full audio+video mesh between all three participants', async () => {
+    const users = usersAllInRange();
+    const a = createPeerClient(bus, A, users);
+    const b = createPeerClient(bus, B, users);
+    const c = createPeerClient(bus, C, users);
+
+    await giveAudio(a);
+    await giveAudio(b);
+    await giveAudio(c);
+    a.api.syncPeerConnections();
+    b.api.syncPeerConnections();
+    c.api.syncPeerConnections();
+    await settle();
+
+    await giveCamera(a);
+    await giveCamera(b);
+    await giveCamera(c);
+    await settle();
+
+    // Every participant should end up with a working connection - and therefore a video
+    // tile - for both of the other two, not just the one they happened to connect to first.
+    const pairs: [PeerClient, string][] = [
+      [a, B], [a, C],
+      [b, A], [b, C],
+      [c, A], [c, B],
+    ];
+    for (const [client, otherId] of pairs) {
+      expect(
+        client.api.remoteVideoStreams.value.has(otherId),
+        `${client.socketId} should see ${otherId}'s video`
+      ).toBe(true);
+    }
+
+    a.destroy();
+    b.destroy();
+    c.destroy();
+  });
+
+  it('keeps the other two working when one participant reloads (new socket id)', async () => {
+    const users = usersAllInRange();
+    const a = createPeerClient(bus, A, users);
+    const b = createPeerClient(bus, B, users);
+    const c = createPeerClient(bus, C, users);
+
+    await giveAudio(a);
+    await giveAudio(b);
+    await giveAudio(c);
+    a.api.syncPeerConnections();
+    b.api.syncPeerConnections();
+    c.api.syncPeerConnections();
+    await settle();
+
+    await giveCamera(a);
+    await giveCamera(b);
+    await giveCamera(c);
+    await settle();
+
+    // B "reloads": their old socket disappears entirely first (mirrors the server
+    // emitting user:left to everyone else, independent of any WebRTC-layer failure
+    // detection) - and only afterwards does a new socket for B rejoin and get
+    // broadcast as user:joined. Modeling these as two distinct phases (rather than
+    // syncing A/C against a user list containing B2 before B2's socket even exists)
+    // matters: in the real app, the server never announces a peer until its socket
+    // connection is already live, so there's no window to race against.
+    b.destroy();
+    const B2 = 'bbb-socket-reloaded';
+    const withoutB = [makeUser({ socketId: A, position: { x: 1, y: 1 } }), makeUser({ socketId: C, position: { x: 1, y: 1 } })];
+    a.users.value = withoutB;
+    c.users.value = withoutB;
+    a.api.syncPeerConnections();
+    c.api.syncPeerConnections();
+    await settle();
+
+    // A and C's connection to each other must be completely unaffected by B's reload.
+    expect(a.api.remoteVideoStreams.value.has(C), 'A-C video should survive B reloading').toBe(true);
+    expect(c.api.remoteVideoStreams.value.has(A), 'C-A video should survive B reloading').toBe(true);
+    // And the stale entry for B's old socket id must not linger as a ghost tile.
+    expect(a.api.remoteVideoStreams.value.has(B), 'no ghost tile for the old B socket').toBe(false);
+    expect(c.api.remoteVideoStreams.value.has(B), 'no ghost tile for the old B socket').toBe(false);
+
+    // Now B rejoins under a new socket id.
+    const afterReload = [
+      makeUser({ socketId: A, position: { x: 1, y: 1 } }),
+      makeUser({ socketId: B2, position: { x: 1, y: 1 } }),
+      makeUser({ socketId: C, position: { x: 1, y: 1 } }),
+    ];
+    const b2 = createPeerClient(bus, B2, afterReload);
+    await giveAudio(b2);
+    await giveCamera(b2);
+    a.users.value = afterReload;
+    c.users.value = afterReload;
+    a.api.syncPeerConnections();
+    c.api.syncPeerConnections();
+    b2.api.syncPeerConnections();
+    await settle();
+
+    // B rejoining under the new id should reconnect to both A and C.
+    expect(a.api.remoteVideoStreams.value.has(B2), 'A should see the rejoined B').toBe(true);
+    expect(c.api.remoteVideoStreams.value.has(B2), 'C should see the rejoined B').toBe(true);
+    expect(b2.api.remoteVideoStreams.value.has(A)).toBe(true);
+    expect(b2.api.remoteVideoStreams.value.has(C)).toBe(true);
+
+    a.destroy();
+    b2.destroy();
+    c.destroy();
   });
 });
