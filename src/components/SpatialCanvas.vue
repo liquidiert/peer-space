@@ -2,6 +2,8 @@
 import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { ChevronUp, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-vue-next';
 import type { User, GridMap, MapObject, TileType } from '../types';
+import { ACCENT, mixHex, type Ramp } from '../lib/pixelArt';
+import { AV_H, AV_INK as AVATAR_INK, AV_W, drawAvatarSprite } from '../lib/avatarSprite';
 
 const props = defineProps<{
   currentUser: User;
@@ -69,28 +71,118 @@ const ART = 16; // art pixels per tile edge
 const PX = CELL_SIZE / ART; // screen pixels per art pixel
 const OUTLINE = '#0f172a';
 
-interface Ramp {
-  dark: string;
-  base: string;
-  light: string;
-  hi: string;
+
+/**
+ * Terrain ramps.
+ *
+ * Two things separate these from a classic tileset palette. First, the ramps are
+ * *hue-shifted* rather than just darkened - shadows rotate toward blue, highlights
+ * toward warm yellow - which is what stops large flat areas reading as dead grey/brown.
+ * Second, every material carries a `tones` triplet within roughly one step of `base`:
+ * that variation is applied per plank / per slab so the surface has life without any
+ * single pixel standing out.
+ *
+ * Kept separate from PALETTE (which objects use) so retuning the ground doesn't silently
+ * restyle every desk and chair on the map.
+ */
+interface TileRamp extends Ramp {
+  /** Deeper than `dark` - seams, mortar and contact shadow only. */
+  shadow: string;
+  tones: [string, string, string];
 }
 
+const TILE: Record<string, TileRamp> = {
+  oak: {
+    shadow: '#5c452f',
+    dark: '#87603e',
+    base: '#ad8058',
+    light: '#c69a72',
+    hi: '#e2c096',
+    tones: ['#a87b54', '#ad8058', '#b3865e'],
+  },
+  carpet: {
+    shadow: '#3a4560',
+    dark: '#4e5b7a',
+    base: '#647293',
+    light: '#7986a8',
+    hi: '#9ba7c4',
+    tones: ['#616f90', '#647293', '#687598'],
+  },
+  // Warm off-white, not paper-white: a floor this bright pulls focus from everything
+  // standing on it, and the grout is a mid grey so the joints read as lines rather than
+  // as a black grid drawn over the room.
+  ceramic: {
+    shadow: '#a3acb9',
+    dark: '#bcc5cf',
+    base: '#d6dde4',
+    light: '#e8edf1',
+    hi: '#fbfdfe',
+    tones: ['#d1d8e0', '#d6dde4', '#dae1e8'],
+  },
+  grass: {
+    shadow: '#365a2c',
+    dark: '#4c7539',
+    base: '#639247',
+    light: '#7cad57',
+    hi: '#a1cd74',
+    tones: ['#608e45', '#639247', '#66964a'],
+  },
+  concrete: {
+    shadow: '#575d66',
+    dark: '#727882',
+    base: '#8d939c',
+    light: '#a3a9b2',
+    hi: '#c0c6ce',
+    tones: ['#8a9099', '#8d939c', '#90969f'],
+  },
+  // Terracotta rather than fire-engine red: the outer wall rings the whole map, so a
+  // saturated hue there fights everything inside it for attention.
+  brick: {
+    shadow: '#68372e',
+    dark: '#9b4f3e',
+    base: '#c06a51',
+    light: '#d78563',
+    hi: '#eaa985',
+    tones: ['#bb6650', '#c06a51', '#c67056'],
+  },
+  plank: {
+    shadow: '#3f2915',
+    dark: '#6a4222',
+    base: '#8d5a2e',
+    light: '#ac753f',
+    hi: '#cb9a5f',
+    tones: ['#885628', '#8d5a2e', '#925f33'],
+  },
+  water: {
+    shadow: '#16536e',
+    dark: '#1f7096',
+    base: '#2c9ac2',
+    light: '#4cbcd9',
+    hi: '#a5e7f3',
+    tones: ['#2a94bb', '#2c9ac2', '#2ea0c9'],
+  },
+};
+
+/**
+ * Object ramps - furniture, props and screens.
+ *
+ * Same hue-shifting rule as the terrain: shadows rotate cool, highlights rotate warm.
+ * Deliberately a step or two off full saturation, because objects sit *on* the floor and a
+ * pure hue at this size stops reading as a lit material and starts reading as a flat decal.
+ */
 const PALETTE: Record<string, Ramp> = {
-  oak: { dark: '#8a5a2b', base: '#b9834a', light: '#d3a068', hi: '#e8c48f' },
-  // Distinctly blue so carpeted areas never read as concrete at a glance.
-  carpet: { dark: '#28405e', base: '#39597f', light: '#4d75a3', hi: '#6b93c0' },
-  marble: { dark: '#94a3b8', base: '#e2e8f0', light: '#f1f5f9', hi: '#ffffff' },
-  grass: { dark: '#3f6212', base: '#4d7c0f', light: '#65a30d', hi: '#84cc16' },
-  // Neutral grey (deliberately desaturated) to stay clearly apart from the blue carpet.
-  concrete: { dark: '#4a4f57', base: '#61666e', light: '#7a8089', hi: '#99a0a9' },
-  brick: { dark: '#7f1d1d', base: '#b91c1c', light: '#dc2626', hi: '#f87171' },
-  darkwood: { dark: '#3b1a06', base: '#6b3410', light: '#8b4a18', hi: '#b06a2c' },
-  water: { dark: '#0c4a6e', base: '#0369a1', light: '#0ea5e9', hi: '#7dd3fc' },
-  steel: { dark: '#334155', base: '#64748b', light: '#94a3b8', hi: '#cbd5e1' },
-  indigo: { dark: '#312e81', base: '#4f46e5', light: '#6366f1', hi: '#a5b4fc' },
-  amber: { dark: '#b45309', base: '#f59e0b', light: '#fbbf24', hi: '#fde68a' },
-  leaf: { dark: '#14532d', base: '#15803d', light: '#22c55e', hi: '#86efac' },
+  oak: { dark: '#8a6340', base: '#b08258', light: '#c99c72', hi: '#e3c095' },
+  carpet: { dark: '#4e5b7a', base: '#647293', light: '#7986a8', hi: '#9ba7c4' },
+  marble: { dark: '#aeb8c4', base: '#e4e9ee', light: '#f2f5f8', hi: '#ffffff' },
+  grass: { dark: '#4c7539', base: '#639247', light: '#7cad57', hi: '#a1cd74' },
+  concrete: { dark: '#727882', base: '#8d939c', light: '#a3a9b2', hi: '#c0c6ce' },
+  brick: { dark: '#9b4f3e', base: '#c06a51', light: '#d78563', hi: '#eaa985' },
+  darkwood: { dark: '#5a3a20', base: '#7d532e', light: '#9c6c41', hi: '#bd8f60' },
+  water: { dark: '#245f80', base: '#3287ac', light: '#4fadcd', hi: '#96dcec' },
+  steel: { dark: '#4d5972', base: '#78849b', light: '#9ea9bd', hi: '#cfd6e2' },
+  indigo: { dark: '#4a4a86', base: '#6f6dae', light: '#8b8ac6', hi: '#b6b5e0' },
+  amber: { dark: '#a8712c', base: '#d29a45', light: '#e5b565', hi: '#f5d99a' },
+  leaf: { dark: '#3a7346', base: '#549a5f', light: '#71b878', hi: '#a5d9a5' },
 };
 
 /** Stable pseudo-random in [0,1) for a grid cell - deterministic so texture never flickers. */
@@ -177,188 +269,565 @@ function shadedBlock(
 // ============================================================================
 // Tiles
 // ============================================================================
+// Tile art is authored in *world* art-pixel space, not per-cell: plank runs, brick
+// courses and slab grids are all derived from (x * ART + i), so a pattern flows straight
+// across cell boundaries instead of restarting at each one. That is the single biggest
+// difference between this and a stamped tileset - without it the 48px grid reads as a
+// visible checkerboard no matter how good each individual cell looks, which is exactly
+// what made the old floor read as masonry.
+//
+// Contrast is spent on edges, not on surfaces. Floors cover most of the screen, so their
+// interiors stay deliberately quiet (low-contrast tones, sparse detail) and the strong
+// values go into contact shadows where walls meet the floor and into material
+// transitions - the cues that make a scene look lit rather than merely patterned.
 
-function renderTile(ctx: CanvasRenderingContext2D, type: TileType, x: number, y: number) {
+/** Deep neutral used for ambient occlusion, always applied translucently. */
+const AO = '#0b1220';
+
+function isWallTile(t?: TileType) {
+  return t === 'wall_brick' || t === 'wall_wood';
+}
+
+/** Translucent fill in art-pixel units - the soft-step counterpart to `fx`. */
+function fxa(
+  ctx: CanvasRenderingContext2D,
+  ox: number,
+  oy: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: string,
+  alpha: number
+) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  fx(ctx, ox, oy, x, y, w, h, color);
+  ctx.restore();
+}
+
+/** Pick a per-feature tone (per plank, per slab, ...) that stays within a step of base. */
+function tone(ramp: TileRamp, seed: number) {
+  return ramp.tones[Math.floor(seed * ramp.tones.length) % ramp.tones.length];
+}
+
+/**
+ * Contact shadow where a floor cell abuts a wall. Walls are drawn as solid blocks seen
+ * from above, so without this they look pasted onto the floor rather than standing on it.
+ * The light sits top-left, so the band below a wall is the widest and softest, and the
+ * other three sides get progressively tighter.
+ */
+function floorContactShadow(
+  ctx: CanvasRenderingContext2D,
+  ox: number,
+  oy: number,
+  x: number,
+  y: number,
+  tiles: TileType[][]
+) {
+  const at = (dx: number, dy: number) => tiles[y + dy]?.[x + dx];
+
+  if (isWallTile(at(0, -1))) {
+    fxa(ctx, ox, oy, 0, 0, ART, 2, AO, 0.3);
+    fxa(ctx, ox, oy, 0, 2, ART, 2, AO, 0.14);
+  }
+  if (isWallTile(at(-1, 0))) {
+    fxa(ctx, ox, oy, 0, 0, 2, ART, AO, 0.26);
+    fxa(ctx, ox, oy, 2, 0, 1, ART, AO, 0.12);
+  }
+  if (isWallTile(at(1, 0))) fxa(ctx, ox, oy, ART - 1, 0, 1, ART, AO, 0.16);
+  if (isWallTile(at(0, 1))) fxa(ctx, ox, oy, 0, ART - 1, ART, 1, AO, 0.16);
+
+  // Inner corners pool a little more darkness, the way real ambient occlusion does.
+  if (isWallTile(at(0, -1)) && isWallTile(at(-1, 0))) fxa(ctx, ox, oy, 0, 0, 4, 4, AO, 0.16);
+  if (isWallTile(at(0, -1)) && isWallTile(at(1, 0))) fxa(ctx, ox, oy, ART - 4, 0, 4, 4, AO, 0.12);
+}
+
+function renderTile(
+  ctx: CanvasRenderingContext2D,
+  type: TileType,
+  x: number,
+  y: number,
+  tiles: TileType[][]
+) {
   const ox = x * CELL_SIZE;
   const oy = y * CELL_SIZE;
 
   switch (type) {
     case 'floor_wood': {
-      const p = PALETTE.oak;
-      fx(ctx, ox, oy, 0, 0, 16, 16, p.base);
+      const p = TILE.oak;
+      // 5 art pixels per board - deliberately not a divisor of 16, so boards straddle
+      // cell edges and the seams never line up into a grid.
+      const PLANK_H = 5;
+      const firstPlank = Math.floor((y * ART) / PLANK_H);
+      const lastPlank = Math.floor((y * ART + ART - 1) / PLANK_H);
 
-      // Two horizontal planks per tile, with the end-joint staggered per row so the
-      // floor reads as continuous boards rather than a repeating stamp.
-      const jointA = (x * 7 + y * 3) % 16;
-      const jointB = (x * 5 + y * 11 + 8) % 16;
-
-      for (const [top, joint] of [
-        [0, jointA],
-        [8, jointB],
-      ] as const) {
-        fx(ctx, ox, oy, 0, top, 16, 1, p.light); // plank top catch-light
-        fx(ctx, ox, oy, 0, top + 7, 16, 1, p.dark); // plank bottom shadow / seam
-        fx(ctx, ox, oy, joint, top, 1, 7, p.dark); // butt joint between boards
-        // Grain: a couple of stable dashes per plank.
-        const g1 = Math.floor(tileHash(x, y, top) * 10);
-        const g2 = Math.floor(tileHash(x, y, top + 99) * 10) + 4;
-        fx(ctx, ox, oy, g1, top + 2, 4, 1, p.dark);
-        fx(ctx, ox, oy, g2, top + 5, 3, 1, p.hi);
+      for (let j = 0; j < ART; j++) {
+        const worldRow = y * ART + j;
+        const plank = Math.floor(worldRow / PLANK_H);
+        const rowInPlank = worldRow - plank * PLANK_H;
+        const board =
+          rowInPlank === 0 ? p.light : rowInPlank === PLANK_H - 1 ? p.dark : tone(p, tileHash(0, plank, 3));
+        fx(ctx, ox, oy, 0, j, ART, 1, board);
       }
+
+      for (let plank = firstPlank; plank <= lastPlank; plank++) {
+        const top = plank * PLANK_H - y * ART;
+
+        // Every board is cut to its own length and phase, so butt joints scatter instead
+        // of stacking into the brick-like courses the old per-cell joint produced. Boards
+        // are 4-8 cells long: short boards put a joint in view every couple of cells, which
+        // is exactly the regular speckle that reads as masonry rather than a timber floor.
+        const period = 64 + Math.floor(tileHash(0, plank, 7) * 64);
+        const phase = Math.floor(tileHash(0, plank, 8) * period);
+        for (let i = 0; i < ART; i++) {
+          const worldCol = x * ART + i;
+          if ((((worldCol - phase) % period) + period) % period !== 0) continue;
+          for (let k = 0; k < PLANK_H - 1; k++) {
+            const j = top + k;
+            if (j < 0 || j >= ART) continue;
+            // The cut itself plus the lit end-grain of the next board along, so a joint
+            // reads as two boards meeting rather than as a scratch on one.
+            fxa(ctx, ox, oy, i, j, 1, 1, p.shadow, 0.55);
+            if (i + 1 < ART) fxa(ctx, ox, oy, i + 1, j, 1, 1, p.hi, 0.16);
+          }
+        }
+
+        // Grain: two short dashes per board per cell, one darker one lighter. Short and
+        // low-contrast on purpose - grain that reads individually turns a floor into noise.
+        for (let g = 0; g < 2; g++) {
+          const gy = top + 1 + Math.floor(tileHash(x, plank, 50 + g) * (PLANK_H - 2));
+          if (gy < 0 || gy >= ART) continue;
+          const gx = Math.floor(tileHash(x, plank, 40 + g) * 11);
+          const gw = 3 + Math.floor(tileHash(x, plank, 60 + g) * 4);
+          fxa(ctx, ox, oy, gx, gy, gw, 1, g === 0 ? p.shadow : p.hi, 0.18);
+        }
+
+        // A knot every dozen boards or so - the rare detail the eye reads as "real wood".
+        if (tileHash(x, plank, 91) > 0.94) {
+          const ky = top + 1 + Math.floor(tileHash(x, plank, 92) * (PLANK_H - 3));
+          const kx = 2 + Math.floor(tileHash(x, plank, 93) * 11);
+          if (ky >= 0 && ky + 1 < ART) {
+            fxa(ctx, ox, oy, kx, ky, 3, 2, p.shadow, 0.5);
+            fxa(ctx, ox, oy, kx + 1, ky, 1, 1, p.dark, 0.8);
+          }
+        }
+      }
+
+      floorContactShadow(ctx, ox, oy, x, y, tiles);
       break;
     }
 
     case 'floor_carpet': {
-      const p = PALETTE.carpet;
-      // Plush pile: a light base with a soft dither. Kept deliberately low-contrast -
-      // carpet covers large areas, so heavy texture here turns the floor into visual noise.
-      fx(ctx, ox, oy, 0, 0, 16, 16, p.light);
-      dither(ctx, ox, oy, 0, 0, 16, 16, p.base, (x + y) % 2);
+      const p = TILE.carpet;
+      fx(ctx, ox, oy, 0, 0, ART, ART, p.base);
 
-      // Woven pile: short horizontal loops in offset rows. The directional weave is what
-      // distinguishes carpet from concrete's random speckle, independent of colour.
-      for (let row = 1; row < 16; row += 3) {
-        const shift = (row + x * 2 + y) % 4;
-        for (let i = shift; i < 16; i += 4) {
-          fx(ctx, ox, oy, i, row, 2, 1, p.hi);
+      // Broad, soft mottling on a 4px world grid: the low-frequency variation that makes a
+      // large carpeted room feel like fabric under uneven light rather than a flat fill.
+      for (let j = 0; j < ART; j += 4) {
+        for (let i = 0; i < ART; i += 4) {
+          const wx = (x * ART + i) >> 2;
+          const wy = (y * ART + j) >> 2;
+          const h = tileHash(wx, wy, 12);
+          fx(ctx, ox, oy, i, j, 4, 4, tone(p, h));
+          // Broad pressure marks, the way a real carpet shows where the pile has been
+          // walked flat - the low-frequency variation a flat fill can never have.
+          if (h > 0.92) fxa(ctx, ox, oy, i, j, 4, 4, p.light, 0.28);
+          else if (h < 0.08) fxa(ctx, ox, oy, i, j, 4, 4, p.shadow, 0.2);
         }
       }
-      fx(ctx, ox, oy, 0, 15, 16, 1, p.dark);
-      fx(ctx, ox, oy, 15, 0, 1, 16, p.dark);
+
+      // Loop pile, as a fine translucent rib rather than hard dither pixels - at 3 screen
+      // pixels per art pixel, hard dithering over an area this large buzzes. The paired
+      // light-over-shadow rows are what give the surface a nap; a single flat tone here
+      // was the difference between "carpet" and "blue rectangle".
+      for (let j = 0; j < ART; j++) {
+        const worldRow = y * ART + j;
+        const phase = worldRow % 3;
+        if (phase === 2) continue;
+        for (let i = (worldRow >> 1) % 2; i < ART; i += 2) {
+          fxa(ctx, ox, oy, i, j, 1, 1, phase === 0 ? p.hi : p.shadow, phase === 0 ? 0.22 : 0.14);
+        }
+      }
+
+      floorContactShadow(ctx, ox, oy, x, y, tiles);
       break;
     }
 
     case 'floor_tile': {
-      const p = PALETTE.marble;
-      fx(ctx, ox, oy, 0, 0, 16, 16, p.dark); // grout
-      // Four 7x7 ceramic tiles with a 1px grout gap, each with a corner specular.
-      for (const [tx, ty] of [
-        [0, 0],
-        [8, 0],
-        [0, 8],
-        [8, 8],
-      ] as const) {
-        fx(ctx, ox, oy, tx, ty, 7, 7, p.light);
-        fx(ctx, ox, oy, tx, ty, 7, 1, p.hi);
-        fx(ctx, ox, oy, tx, ty, 1, 7, p.hi);
-        fx(ctx, ox, oy, tx + 6, ty + 1, 1, 6, p.base);
-        fx(ctx, ox, oy, tx + 1, ty + 6, 6, 1, p.base);
-        fx(ctx, ox, oy, tx + 2, ty + 2, 2, 1, p.hi); // specular glint
+      const p = TILE.ceramic;
+      // Large-format slabs on a 12px world grid: bigger than a cell is wide (16 art px
+      // would re-align the pattern to the cell grid, 8 gave four fussy squares per cell),
+      // so grout lines run the length of a room and drift across cell boundaries.
+      const SLAB = 12;
+      fx(ctx, ox, oy, 0, 0, ART, ART, p.base);
+
+      for (let j = 0; j < ART; j++) {
+        const worldRow = y * ART + j;
+        const inY = worldRow % SLAB;
+        for (let i = 0; i < ART; i++) {
+          const worldCol = x * ART + i;
+          const inX = worldCol % SLAB;
+          const sx = Math.floor(worldCol / SLAB);
+          const sy = Math.floor(worldRow / SLAB);
+
+          if (inX === 0 || inY === 0) {
+            fx(ctx, ox, oy, i, j, 1, 1, p.shadow); // grout
+            continue;
+          }
+
+          fx(ctx, ox, oy, i, j, 1, 1, tone(p, tileHash(sx, sy, 21)));
+
+          // Bevels are translucent so the slab edge is a soft turn of the surface rather
+          // than an inked border - at full strength every slab wore a bright white L and
+          // the floor glared.
+          if (inX === 1 || inY === 1) fxa(ctx, ox, oy, i, j, 1, 1, p.light, 0.55);
+          else if (inX === SLAB - 1 || inY === SLAB - 1) fxa(ctx, ox, oy, i, j, 1, 1, p.dark, 0.45);
+          // Faint veining, so a big expanse of stone isn't a field of identical squares.
+          else if (((worldCol * 3 + worldRow * 5) % 29) === Math.floor(tileHash(sx, sy, 23) * 29)) {
+            fxa(ctx, ox, oy, i, j, 1, 1, p.dark, 0.3);
+          }
+        }
       }
+
+      // A specular streak on roughly one slab in six - polished stone reads by its
+      // highlights, but giving every slab one would look like a printed pattern.
+      for (let j = 0; j < ART; j++) {
+        const worldRow = y * ART + j;
+        if (worldRow % SLAB !== 4) continue;
+        for (let i = 0; i < ART; i++) {
+          const worldCol = x * ART + i;
+          if (worldCol % SLAB !== 3) continue;
+          const sx = Math.floor(worldCol / SLAB);
+          const sy = Math.floor(worldRow / SLAB);
+          if (tileHash(sx, sy, 22) < 0.8) continue;
+          fxa(ctx, ox, oy, i, j, Math.min(4, ART - i), 1, p.hi, 0.5);
+          if (j + 1 < ART) fxa(ctx, ox, oy, i + 1, j + 1, Math.min(2, ART - i - 1), 1, p.hi, 0.25);
+        }
+      }
+
+      floorContactShadow(ctx, ox, oy, x, y, tiles);
       break;
     }
 
     case 'floor_grass': {
-      const p = PALETTE.grass;
-      fx(ctx, ox, oy, 0, 0, 16, 16, p.base);
-      dither(ctx, ox, oy, 0, 0, 16, 16, p.dark, (x * 3 + y) % 2);
+      const p = TILE.grass;
+      fx(ctx, ox, oy, 0, 0, ART, ART, p.base);
 
-      // A few stable blades, plus an occasional flower for variation.
+      // Patchiness first, on a coarse world grid, so the lawn has large soft areas of
+      // lighter and darker growth instead of uniform green.
+      for (let j = 0; j < ART; j += 4) {
+        for (let i = 0; i < ART; i += 4) {
+          const wx = (x * ART + i) >> 2;
+          const wy = (y * ART + j) >> 2;
+          const h = tileHash(wx, wy, 31);
+          fx(ctx, ox, oy, i, j, 4, 4, tone(p, h));
+          // Occasional patch of thicker or thinner growth. Rare and translucent: at full
+          // strength every fourth block came out a different green and the lawn read as
+          // camouflage rather than grass.
+          if (h > 0.93) fxa(ctx, ox, oy, i, j, 4, 4, p.light, 0.5);
+          else if (h < 0.07) fxa(ctx, ox, oy, i, j, 4, 4, p.shadow, 0.3);
+        }
+      }
+
+      // Blades: a lit stroke over its own shadow, which is what gives each tuft volume
+      // instead of looking like scattered confetti.
       const blades = 3 + Math.floor(tileHash(x, y, 1) * 3);
       for (let i = 0; i < blades; i++) {
-        const bx = Math.floor(tileHash(x, y, 10 + i) * 14) + 1;
-        const by = Math.floor(tileHash(x, y, 20 + i) * 11) + 2;
-        fx(ctx, ox, oy, bx, by, 1, 3, p.light);
-        fx(ctx, ox, oy, bx + 1, by - 1, 1, 3, p.hi);
+        const bx = 1 + Math.floor(tileHash(x, y, 10 + i) * 13);
+        const by = 2 + Math.floor(tileHash(x, y, 20 + i) * 11);
+        fxa(ctx, ox, oy, bx, by, 1, 3, p.shadow, 0.45);
+        fxa(ctx, ox, oy, bx, by - 1, 1, 3, p.light, 0.85);
+        fxa(ctx, ox, oy, bx, by - 1, 1, 1, p.hi, 0.7);
       }
-      if (tileHash(x, y, 77) > 0.88) {
-        const fxp = Math.floor(tileHash(x, y, 78) * 12) + 2;
-        const fyp = Math.floor(tileHash(x, y, 79) * 12) + 2;
-        fx(ctx, ox, oy, fxp, fyp, 2, 2, '#fde68a');
-        fx(ctx, ox, oy, fxp, fyp, 1, 1, '#fbbf24');
+
+      // Wildflowers are punctuation - one every dozen or so cells. Any more often and the
+      // eye starts reading the speckle instead of the space.
+      if (tileHash(x, y, 77) > 0.94) {
+        const fxp = 2 + Math.floor(tileHash(x, y, 78) * 12);
+        const fyp = 2 + Math.floor(tileHash(x, y, 79) * 12);
+        fx(ctx, ox, oy, fxp, fyp, 2, 2, '#e8d18a');
+        fx(ctx, ox, oy, fxp, fyp, 1, 1, '#fbf0c8');
+        fx(ctx, ox, oy, fxp + 1, fyp + 1, 1, 1, '#c39a4a');
       }
+
+      floorContactShadow(ctx, ox, oy, x, y, tiles);
       break;
     }
 
     case 'floor_concrete': {
-      const p = PALETTE.concrete;
-      fx(ctx, ox, oy, 0, 0, 16, 16, p.base);
-      dither(ctx, ox, oy, 0, 0, 16, 16, p.light, (x + y * 2) % 2);
+      const p = TILE.concrete;
+      fx(ctx, ox, oy, 0, 0, ART, ART, p.base);
 
-      // Expansion joints on a 2-tile rhythm, so slabs read at map scale.
-      if (x % 2 === 0) fx(ctx, ox, oy, 0, 0, 1, 16, p.dark);
-      if (y % 2 === 0) fx(ctx, ox, oy, 0, 0, 16, 1, p.dark);
-
-      const specks = Math.floor(tileHash(x, y, 5) * 4);
-      for (let i = 0; i < specks; i++) {
-        const sx = Math.floor(tileHash(x, y, 30 + i) * 14) + 1;
-        const sy = Math.floor(tileHash(x, y, 40 + i) * 14) + 1;
-        fx(ctx, ox, oy, sx, sy, 1, 1, p.hi);
+      for (let j = 0; j < ART; j += 4) {
+        for (let i = 0; i < ART; i += 4) {
+          const wx = (x * ART + i) >> 2;
+          const wy = (y * ART + j) >> 2;
+          fx(ctx, ox, oy, i, j, 4, 4, tone(p, tileHash(wx, wy, 41)));
+        }
       }
+
+      // Expansion joints every 3 cells in world space - a scored line with a lit lower lip,
+      // so it reads as a cut into the slab rather than a drawn-on stripe.
+      for (let i = 0; i < ART; i++) {
+        if ((x * ART + i) % (ART * 3) !== 0) continue;
+        fx(ctx, ox, oy, i, 0, 1, ART, p.shadow);
+        if (i + 1 < ART) fxa(ctx, ox, oy, i + 1, 0, 1, ART, p.hi, 0.25);
+      }
+      for (let j = 0; j < ART; j++) {
+        if ((y * ART + j) % (ART * 3) !== 0) continue;
+        fx(ctx, ox, oy, 0, j, ART, 1, p.shadow);
+        if (j + 1 < ART) fxa(ctx, ox, oy, 0, j + 1, ART, 1, p.hi, 0.25);
+      }
+
+      const specks = Math.floor(tileHash(x, y, 5) * 5);
+      for (let i = 0; i < specks; i++) {
+        const sx = 1 + Math.floor(tileHash(x, y, 30 + i) * 14);
+        const sy = 1 + Math.floor(tileHash(x, y, 40 + i) * 14);
+        fxa(ctx, ox, oy, sx, sy, 1, 1, i % 2 ? p.hi : p.shadow, 0.35);
+      }
+
+      floorContactShadow(ctx, ox, oy, x, y, tiles);
       break;
     }
 
     case 'wall_brick': {
-      const p = PALETTE.brick;
-      fx(ctx, ox, oy, 0, 0, 16, 16, '#5b1414'); // mortar
+      const p = TILE.brick;
+      fx(ctx, ox, oy, 0, 0, ART, ART, p.shadow); // mortar
 
-      // Four courses of staggered bricks. Each brick gets its own top light /
-      // bottom shade so the wall reads as masonry rather than a flat red square.
-      for (let course = 0; course < 4; course++) {
-        const by = course * 4;
-        const offset = course % 2 === 0 ? 0 : -4;
-        for (let bx = offset; bx < 16; bx += 8) {
-          const left = Math.max(bx, 0);
-          const right = Math.min(bx + 7, 16);
-          const bw = right - left;
-          if (bw <= 0) continue;
-          fx(ctx, ox, oy, left, by, bw, 3, p.base);
-          fx(ctx, ox, oy, left, by, bw, 1, p.light);
-          fx(ctx, ox, oy, left, by + 2, bw, 1, p.dark);
+      // Courses run in world space: 4px high, half-brick stagger per course, so a wall
+      // reads as one continuous run of masonry however long it is.
+      for (let j = 0; j < ART; j++) {
+        const worldRow = y * ART + j;
+        const course = Math.floor(worldRow / 4);
+        const rowInCourse = worldRow - course * 4;
+        if (rowInCourse === 3) continue; // mortar bed between courses
+
+        for (let i = 0; i < ART; i++) {
+          const worldCol = x * ART + i;
+          const shifted = worldCol + (course % 2 ? 4 : 0);
+          if (shifted % 8 === 7) continue; // head joint between bricks
+          const brick = Math.floor(shifted / 8);
+          fx(
+            ctx,
+            ox,
+            oy,
+            i,
+            j,
+            1,
+            1,
+            rowInCourse === 0 ? p.light : rowInCourse === 2 ? p.dark : tone(p, tileHash(brick, course, 51))
+          );
         }
       }
 
-      // Top cap: reads as the lit top face of a solid block seen from above.
-      fx(ctx, ox, oy, 0, 0, 16, 2, p.hi);
-      fx(ctx, ox, oy, 0, 2, 16, 1, p.light);
-      ox1(ctx, ox, oy, 0, 0, 16, 16, OUTLINE);
+      // The lit top face only exists where the wall actually ends - capping every cell
+      // (as before) painted a bright stripe through the middle of every wall run.
+      if (!isWallTile(tiles[y - 1]?.[x])) {
+        fx(ctx, ox, oy, 0, 0, ART, 2, p.hi);
+        fx(ctx, ox, oy, 0, 2, ART, 1, p.light);
+      }
+      // Base line where the block meets whatever is below it.
+      if (!isWallTile(tiles[y + 1]?.[x])) fx(ctx, ox, oy, 0, ART - 1, ART, 1, p.shadow);
+      // Outline only along exposed edges, so long walls don't get sliced into cells.
+      if (!isWallTile(tiles[y - 1]?.[x])) fx(ctx, ox, oy, 0, 0, ART, 1, OUTLINE);
+      if (!isWallTile(tiles[y + 1]?.[x])) fx(ctx, ox, oy, 0, ART - 1, ART, 1, OUTLINE);
+      if (!isWallTile(tiles[y]?.[x - 1])) fx(ctx, ox, oy, 0, 0, 1, ART, OUTLINE);
+      if (!isWallTile(tiles[y]?.[x + 1])) fx(ctx, ox, oy, ART - 1, 0, 1, ART, OUTLINE);
       break;
     }
 
     case 'wall_wood': {
-      const p = PALETTE.darkwood;
-      fx(ctx, ox, oy, 0, 0, 16, 16, p.base);
+      const p = TILE.plank;
+      fx(ctx, ox, oy, 0, 0, ART, ART, p.base);
 
-      // Vertical planking with a lit left edge and shaded right edge per board.
-      for (let i = 0; i < 16; i += 4) {
-        fx(ctx, ox, oy, i, 0, 1, 16, p.light);
-        fx(ctx, ox, oy, i + 3, 0, 1, 16, p.dark);
+      // Vertical boarding, 5px wide in world space (again not a divisor of 16) with a lit
+      // left edge and a shaded right edge per board.
+      for (let i = 0; i < ART; i++) {
+        const worldCol = x * ART + i;
+        const board = Math.floor(worldCol / 5);
+        const colInBoard = worldCol - board * 5;
+        fx(
+          ctx,
+          ox,
+          oy,
+          i,
+          0,
+          1,
+          ART,
+          colInBoard === 0 ? p.light : colInBoard === 4 ? p.shadow : tone(p, tileHash(board, 0, 61))
+        );
       }
-      // Cross beam + nail heads.
-      fx(ctx, ox, oy, 0, 6, 16, 3, p.light);
-      fx(ctx, ox, oy, 0, 6, 16, 1, p.hi);
-      fx(ctx, ox, oy, 0, 8, 16, 1, p.dark);
-      fx(ctx, ox, oy, 2, 7, 1, 1, p.dark);
-      fx(ctx, ox, oy, 13, 7, 1, 1, p.dark);
 
-      fx(ctx, ox, oy, 0, 0, 16, 2, p.hi); // top cap
-      ox1(ctx, ox, oy, 0, 0, 16, 16, OUTLINE);
+      // Cross rail, aligned to the world so it runs unbroken along the whole partition.
+      for (let j = 0; j < ART; j++) {
+        const worldRow = y * ART + j;
+        const inRail = ((worldRow % ART) + ART) % ART;
+        if (inRail === 6) fx(ctx, ox, oy, 0, j, ART, 1, p.hi);
+        else if (inRail === 7) fx(ctx, ox, oy, 0, j, ART, 1, p.light);
+        else if (inRail === 8) fx(ctx, ox, oy, 0, j, ART, 1, p.shadow);
+      }
+      // Nail heads sit on the rail, one per board.
+      for (let i = 0; i < ART; i++) {
+        const worldCol = x * ART + i;
+        if (worldCol % 5 !== 2) continue;
+        const railRow = 7 - (y * ART) % ART;
+        if (railRow >= 0 && railRow < ART) fxa(ctx, ox, oy, i, railRow, 1, 1, p.shadow, 0.7);
+      }
+
+      if (!isWallTile(tiles[y - 1]?.[x])) {
+        fx(ctx, ox, oy, 0, 0, ART, 2, p.hi);
+        fx(ctx, ox, oy, 0, 0, ART, 1, OUTLINE);
+      }
+      if (!isWallTile(tiles[y + 1]?.[x])) {
+        fx(ctx, ox, oy, 0, ART - 1, ART, 1, OUTLINE);
+      }
+      if (!isWallTile(tiles[y]?.[x - 1])) fx(ctx, ox, oy, 0, 0, 1, ART, OUTLINE);
+      if (!isWallTile(tiles[y]?.[x + 1])) fx(ctx, ox, oy, ART - 1, 0, 1, ART, OUTLINE);
       break;
     }
 
     case 'water': {
-      const p = PALETTE.water;
-      fx(ctx, ox, oy, 0, 0, 16, 16, p.base);
-      dither(ctx, ox, oy, 0, 0, 16, 16, p.dark, (x + y) % 2);
+      const p = TILE.water;
+      // Depth: shallower (lighter) the closer a cell is to a non-water neighbour, which is
+      // what makes a body of water read as having a bottom instead of being a blue rectangle.
+      const nearShore =
+        tiles[y - 1]?.[x] !== 'water' ||
+        tiles[y + 1]?.[x] !== 'water' ||
+        tiles[y]?.[x - 1] !== 'water' ||
+        tiles[y]?.[x + 1] !== 'water';
+      fx(ctx, ox, oy, 0, 0, ART, ART, nearShore ? p.light : p.base);
 
-      // Gentle drift so water feels alive; quantised to art pixels so it stays
-      // chunky pixel art instead of sliding smoothly.
-      const t = Math.floor(Date.now() / 240);
-      for (let i = 0; i < 3; i++) {
-        const seed = tileHash(x, y, 60 + i);
-        const ry = Math.floor(seed * 14) + 1;
-        const drift = (Math.floor(seed * 7) + t) % 20;
-        const rx = drift - 4;
-        const rw = 4 + Math.floor(seed * 3);
-        if (rx + rw <= 0 || rx >= 16) continue;
-        const left = Math.max(rx, 0);
-        const right = Math.min(rx + rw, 16);
-        fx(ctx, ox, oy, left, ry, right - left, 1, p.light);
-        fx(ctx, ox, oy, left, ry - 1, Math.max(1, (right - left) - 2), 1, p.hi);
+      for (let j = 0; j < ART; j += 4) {
+        for (let i = 0; i < ART; i += 4) {
+          const wx = (x * ART + i) >> 2;
+          const wy = (y * ART + j) >> 2;
+          if (tileHash(wx, wy, 71) > 0.7) fxa(ctx, ox, oy, i, j, 4, 4, p.dark, 0.35);
+        }
+      }
+
+      // Foam where the water meets land, fading out over three pixels rather than stopping
+      // dead - a hard band of highlight along the shore reads as a drawing error.
+      if (tiles[y - 1]?.[x] !== undefined && tiles[y - 1]?.[x] !== 'water') {
+        fxa(ctx, ox, oy, 0, 0, ART, 1, p.hi, 0.55);
+        fxa(ctx, ox, oy, 0, 1, ART, 1, p.hi, 0.3);
+        dither(ctx, ox, oy, 0, 2, ART, 2, p.light, (x + y) % 2);
+      }
+      if (tiles[y + 1]?.[x] !== undefined && tiles[y + 1]?.[x] !== 'water') {
+        fxa(ctx, ox, oy, 0, ART - 1, ART, 1, p.hi, 0.35);
+      }
+      if (tiles[y]?.[x - 1] !== undefined && tiles[y]?.[x - 1] !== 'water') {
+        fxa(ctx, ox, oy, 0, 0, 1, ART, p.hi, 0.35);
+      }
+      if (tiles[y]?.[x + 1] !== undefined && tiles[y]?.[x + 1] !== 'water') {
+        fxa(ctx, ox, oy, ART - 1, 0, 1, ART, p.hi, 0.35);
       }
       break;
     }
   }
+}
+
+/**
+ * The moving part of water, drawn per frame on top of the cached terrain (see below).
+ * Kept separate from renderTile precisely so the expensive static art can be cached.
+ */
+function renderWaterAnimation(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  const ox = x * CELL_SIZE;
+  const oy = y * CELL_SIZE;
+  const p = TILE.water;
+
+  // Quantised to art pixels and to a ~4Hz step so the ripples stay chunky pixel art
+  // instead of sliding smoothly like a shader.
+  const t = Math.floor(Date.now() / 260);
+  for (let i = 0; i < 3; i++) {
+    const seed = tileHash(x, y, 60 + i);
+    const ry = 1 + Math.floor(seed * 13);
+    const rx = ((Math.floor(seed * 7) + t) % 22) - 5;
+    const rw = 4 + Math.floor(seed * 4);
+    if (rx + rw <= 0 || rx >= ART) continue;
+    const left = Math.max(rx, 0);
+    const right = Math.min(rx + rw, ART);
+    fxa(ctx, ox, oy, left, ry, right - left, 1, p.hi, 0.55);
+    fxa(ctx, ox, oy, left + 1, ry - 1, Math.max(1, right - left - 2), 1, p.hi, 0.28);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Terrain cache
+// ---------------------------------------------------------------------------
+// renderCanvas runs on every animation frame, but tiles only change when the map does -
+// and the art above is far too detailed (hundreds of fills per cell) to redraw 60 times a
+// second. So terrain is rasterised once into an offscreen canvas and blitted from then on,
+// rebuilt only when the tile grid actually changes. Water is the one animated material, so
+// its cells are remembered and their moving highlights drawn per frame on top.
+
+let terrainCanvas: HTMLCanvasElement | null = null;
+/** Copy of the tile grid the cache was drawn from, for diffing. */
+let terrainTiles: TileType[][] | null = null;
+let waterCells: Array<{ x: number; y: number }> = [];
+
+function drawTerrainCell(tctx: CanvasRenderingContext2D, map: GridMap, x: number, y: number) {
+  tctx.clearRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+  renderTile(tctx, map.tiles[y]?.[x] || 'floor_tile', x, y, map.tiles);
+}
+
+function getTerrain(map: GridMap): HTMLCanvasElement {
+  const w = map.width * CELL_SIZE;
+  const h = map.height * CELL_SIZE;
+  const canvas = terrainCanvas ?? document.createElement('canvas');
+  const needsFullRedraw =
+    !terrainCanvas ||
+    !terrainTiles ||
+    canvas.width !== w ||
+    canvas.height !== h ||
+    terrainTiles.length !== map.height;
+
+  if (needsFullRedraw) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+
+  const tctx = canvas.getContext('2d')!;
+  tctx.imageSmoothingEnabled = false;
+
+  if (needsFullRedraw) {
+    tctx.clearRect(0, 0, w, h);
+    for (let ty = 0; ty < map.height; ty++) {
+      for (let tx = 0; tx < map.width; tx++) drawTerrainCell(tctx, map, tx, ty);
+    }
+  } else {
+    // Incremental: the map builder edits one cell at a time, and a full rasterise of a
+    // 32x24 map runs into six figures of fills - enough to be felt as a hitch on every
+    // click. Only the edited cells and their neighbours are redrawn, because a cell's art
+    // depends on what surrounds it (wall caps, contact shadows, shoreline foam).
+    const dirty = new Set<number>();
+    for (let ty = 0; ty < map.height; ty++) {
+      for (let tx = 0; tx < map.width; tx++) {
+        if (map.tiles[ty]?.[tx] === terrainTiles![ty]?.[tx]) continue;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = tx + dx;
+            const ny = ty + dy;
+            if (nx < 0 || ny < 0 || nx >= map.width || ny >= map.height) continue;
+            dirty.add(ny * map.width + nx);
+          }
+        }
+      }
+    }
+    if (dirty.size === 0) return canvas;
+    dirty.forEach((idx) => drawTerrainCell(tctx, map, idx % map.width, Math.floor(idx / map.width)));
+  }
+
+  terrainTiles = map.tiles.map((row) => [...row]);
+  waterCells = [];
+  for (let ty = 0; ty < map.height; ty++) {
+    for (let tx = 0; tx < map.width; tx++) {
+      if (map.tiles[ty]?.[tx] === 'water') waterCells.push({ x: tx, y: ty });
+    }
+  }
+
+  terrainCanvas = canvas;
+  return canvas;
 }
 
 // ============================================================================
@@ -373,9 +842,12 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
 
   ctx.save();
 
-  // Contact shadow - offset flat block, the cel-shaded way to ground a sprite.
-  fx(ctx, ox, oy, 1, H - 2, W - 1, 2, 'rgba(15, 23, 42, 0.35)');
-  fx(ctx, ox, oy, W - 2, 2, 2, H - 2, 'rgba(15, 23, 42, 0.25)');
+  // Contact shadow. Two bands rather than one flat block: a tight, darker core right under
+  // the object and a wider soft skirt, which is what sits a sprite *on* the floor instead of
+  // hovering it over a grey rectangle. Matches the light direction used everywhere else.
+  fx(ctx, ox, oy, 1, H - 2, W - 1, 2, 'rgba(20, 26, 44, 0.38)');
+  fx(ctx, ox, oy, 2, H, W - 1, 1, 'rgba(20, 26, 44, 0.16)');
+  fx(ctx, ox, oy, W - 2, 2, 2, H - 2, 'rgba(20, 26, 44, 0.22)');
 
   switch (obj.type) {
     case 'desk': {
@@ -396,9 +868,9 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
       const matW = Math.max(8, Math.floor(W * 0.5));
       const matX = cx - Math.floor(matW / 2);
       const matY = H - 9;
-      fx(ctx, ox, oy, matX, matY, matW, 5, isClaimed ? PALETTE.indigo.dark : '#1e293b');
+      fx(ctx, ox, oy, matX, matY, matW, 5, isClaimed ? PALETTE.indigo.dark : ACCENT.ink);
       ox1(ctx, ox, oy, matX, matY, matW, 5, OUTLINE);
-      fx(ctx, ox, oy, matX + 1, matY + 1, matW - 2, 1, isClaimed ? PALETTE.indigo.light : '#38bdf8');
+      fx(ctx, ox, oy, matX + 1, matY + 1, matW - 2, 1, isClaimed ? PALETTE.indigo.light : ACCENT.sky);
 
       // Keyboard + mouse on the mat
       const kbW = Math.max(5, matW - 5);
@@ -424,47 +896,47 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
       if (equipment === 'dual_monitors') {
         drawScreen(cx - 11, 10, 7, PALETTE.water, () => {
           fx(ctx, ox, oy, cx - 9, scrY + 2, 6, 1, PALETTE.water.hi);
-          fx(ctx, ox, oy, cx - 9, scrY + 4, 4, 1, '#f472b6');
+          fx(ctx, ox, oy, cx - 9, scrY + 4, 4, 1, ACCENT.pink);
         });
         drawScreen(cx + 1, 10, 7, PALETTE.indigo, () => {
           fx(ctx, ox, oy, cx + 3, scrY + 2, 6, 1, PALETTE.indigo.hi);
-          fx(ctx, ox, oy, cx + 3, scrY + 4, 3, 1, '#86efac');
+          fx(ctx, ox, oy, cx + 3, scrY + 4, 3, 1, ACCENT.lime);
         });
         fx(ctx, ox, oy, cx - 1, scrY + 7, 2, 2, PALETTE.steel.dark); // shared stand
       } else if (equipment === 'designer_tablet') {
         drawScreen(cx - 10, 20, 8, PALETTE.leaf, () => {
-          fx(ctx, ox, oy, cx - 8, scrY + 2, 4, 4, '#f43f5e');
-          fx(ctx, ox, oy, cx - 3, scrY + 2, 4, 4, '#eab308');
-          fx(ctx, ox, oy, cx + 2, scrY + 2, 4, 4, '#06b6d4');
+          fx(ctx, ox, oy, cx - 8, scrY + 2, 4, 4, ACCENT.red);
+          fx(ctx, ox, oy, cx - 3, scrY + 2, 4, 4, ACCENT.yellow);
+          fx(ctx, ox, oy, cx + 2, scrY + 2, 4, 4, ACCENT.teal);
         });
       } else if (equipment === 'gaming_rig') {
         // RGB spill behind the screen
         fx(ctx, ox, oy, cx - 10, scrY - 1, 20, 10, 'rgba(236, 72, 153, 0.35)');
-        drawScreen(cx - 9, 18, 8, { ...PALETTE.indigo, dark: '#4c1d95' }, () => {
-          fx(ctx, ox, oy, cx - 7, scrY + 2, 14, 1, '#ec4899');
-          fx(ctx, ox, oy, cx - 7, scrY + 4, 9, 1, '#22d3ee');
-          fx(ctx, ox, oy, cx - 7, scrY + 5, 5, 1, '#a3e635');
+        drawScreen(cx - 9, 18, 8, { ...PALETTE.indigo, dark: '#3f3663' }, () => {
+          fx(ctx, ox, oy, cx - 7, scrY + 2, 14, 1, ACCENT.pink);
+          fx(ctx, ox, oy, cx - 7, scrY + 4, 9, 1, ACCENT.teal);
+          fx(ctx, ox, oy, cx - 7, scrY + 5, 5, 1, ACCENT.lime);
         });
       } else {
         // Laptop: lid + hinge + deck
         drawScreen(cx - 7, 14, 7, PALETTE.water, () => {
           fx(ctx, ox, oy, cx - 5, scrY + 2, 8, 1, PALETTE.water.hi);
-          fx(ctx, ox, oy, cx - 5, scrY + 4, 5, 1, '#e0f2fe');
+          fx(ctx, ox, oy, cx - 5, scrY + 4, 5, 1, ACCENT.cream);
         });
         fx(ctx, ox, oy, cx - 8, scrY + 7, 16, 2, PALETTE.steel.base);
         ox1(ctx, ox, oy, cx - 8, scrY + 7, 16, 2, OUTLINE);
       }
 
       // Coffee mug (top-right) and sticky note (top-left)
-      fx(ctx, ox, oy, W - 6, 3, 4, 4, '#ef4444');
+      fx(ctx, ox, oy, W - 6, 3, 4, 4, ACCENT.red);
       ox1(ctx, ox, oy, W - 6, 3, 4, 4, OUTLINE);
-      fx(ctx, ox, oy, W - 5, 4, 2, 1, '#78350f'); // coffee surface
-      fx(ctx, ox, oy, W - 2, 4, 1, 2, '#b91c1c'); // handle
+      fx(ctx, ox, oy, W - 5, 4, 2, 1, '#6b4526'); // coffee surface
+      fx(ctx, ox, oy, W - 2, 4, 1, 2, ACCENT.red); // handle
 
-      fx(ctx, ox, oy, 2, 3, 4, 4, '#fde68a');
+      fx(ctx, ox, oy, 2, 3, 4, 4, ACCENT.yellow);
       ox1(ctx, ox, oy, 2, 3, 4, 4, OUTLINE);
-      fx(ctx, ox, oy, 3, 4, 2, 1, '#ca8a04');
-      fx(ctx, ox, oy, 3, 5, 2, 1, '#ca8a04');
+      fx(ctx, ox, oy, 3, 4, 2, 1, ACCENT.orange);
+      fx(ctx, ox, oy, 3, 5, 2, 1, ACCENT.orange);
 
       // Nameplate / label along the bottom edge
       const centerScreenX = ox + (W * PX) / 2;
@@ -477,7 +949,7 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
         const plateY = oy + (H - 3) * PX;
         ctx.fillStyle = OUTLINE;
         ctx.fillRect(plateX - PX, plateY - PX, plateW + PX * 2, 11 + PX);
-        ctx.fillStyle = '#fbbf24';
+        ctx.fillStyle = ACCENT.yellow;
         ctx.fillRect(plateX, plateY, plateW, 11);
         ctx.fillStyle = OUTLINE;
         ctx.textAlign = 'center';
@@ -498,7 +970,7 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
         ctx.beginPath();
         ctx.rect(plateX, plateY, plateW, 11);
         ctx.clip();
-        ctx.fillStyle = '#e2e8f0';
+        ctx.fillStyle = PALETTE.marble.base;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(label, centerScreenX, plateY + 6);
@@ -578,7 +1050,7 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
 
       // Terracotta pot: wide rim over a tapered body.
       shadedBlock(ctx, ox, oy, 3, 9, 10, 3, { ...pot, base: pot.light, light: pot.hi });
-      fx(ctx, ox, oy, 4, 10, 8, 1, '#3f2410'); // soil in the rim
+      fx(ctx, ox, oy, 4, 10, 8, 1, '#4a3020'); // soil in the rim
       shadedBlock(ctx, ox, oy, 4, 12, 8, 4, pot);
       fx(ctx, ox, oy, 5, 13, 1, 2, pot.hi); // pot highlight
       break;
@@ -593,11 +1065,11 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
 
       // Screen content: a couple of "code" lines plus a cursor block.
       fx(ctx, ox, oy, 4, 4, 6, 1, PALETTE.water.hi);
-      fx(ctx, ox, oy, 4, 6, 4, 1, '#86efac');
-      fx(ctx, ox, oy, 9, 6, 1, 1, '#fbbf24');
-      fx(ctx, ox, oy, 3, 3, 10, 1, '#7dd3fc'); // glare band
+      fx(ctx, ox, oy, 4, 6, 4, 1, ACCENT.lime);
+      fx(ctx, ox, oy, 9, 6, 1, 1, ACCENT.yellow);
+      fx(ctx, ox, oy, 3, 3, 10, 1, ACCENT.sky); // glare band
 
-      fx(ctx, ox, oy, 13, 8, 1, 1, '#22c55e'); // power LED
+      fx(ctx, ox, oy, 13, 8, 1, 1, ACCENT.green); // power LED
 
       shadedBlock(ctx, ox, oy, 7, 10, 2, 2, p); // neck
       shadedBlock(ctx, ox, oy, 4, 12, 8, 2, p); // foot
@@ -607,28 +1079,28 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
     case 'whiteboard': {
       // Frame + board + marker tray
       shadedBlock(ctx, ox, oy, 0, 0, W, H - 3, PALETTE.steel);
-      fx(ctx, ox, oy, 2, 2, W - 4, H - 8, '#ffffff');
-      fx(ctx, ox, oy, 2, 2, W - 4, 1, '#f8fafc');
+      fx(ctx, ox, oy, 2, 2, W - 4, H - 8, ACCENT.cream);
+      fx(ctx, ox, oy, 2, 2, W - 4, 1, ACCENT.cream);
       // Doodles
-      fx(ctx, ox, oy, 4, 5, Math.max(4, W - 12), 1, '#ef4444');
-      fx(ctx, ox, oy, 4, 7, Math.max(3, W - 9), 1, '#10b981');
-      fx(ctx, ox, oy, 4, 9, Math.max(3, W - 14), 1, '#3b82f6');
+      fx(ctx, ox, oy, 4, 5, Math.max(4, W - 12), 1, ACCENT.red);
+      fx(ctx, ox, oy, 4, 7, Math.max(3, W - 9), 1, ACCENT.green);
+      fx(ctx, ox, oy, 4, 9, Math.max(3, W - 14), 1, ACCENT.blue);
       // Marker tray with three markers
       shadedBlock(ctx, ox, oy, 1, H - 4, W - 2, 2, PALETTE.steel);
-      fx(ctx, ox, oy, 3, H - 4, 3, 1, '#ef4444');
-      fx(ctx, ox, oy, 7, H - 4, 3, 1, '#3b82f6');
-      fx(ctx, ox, oy, 11, H - 4, 3, 1, '#10b981');
+      fx(ctx, ox, oy, 3, H - 4, 3, 1, ACCENT.red);
+      fx(ctx, ox, oy, 7, H - 4, 3, 1, ACCENT.blue);
+      fx(ctx, ox, oy, 11, H - 4, 3, 1, ACCENT.green);
       break;
     }
 
     case 'sticky_notes': {
       // Cork board with pinned notes at slight offsets
-      shadedBlock(ctx, ox, oy, 0, 0, W, H - 1, { dark: '#78350f', base: '#b45309', light: '#d97706', hi: '#f59e0b' });
+      shadedBlock(ctx, ox, oy, 0, 0, W, H - 1, { dark: '#8a6440', base: '#ab8055', light: '#c39a6d', hi: ACCENT.orange });
       const notes: Array<[number, number, string]> = [
-        [2, 2, '#fde68a'],
-        [8, 3, '#fca5a5'],
-        [3, 8, '#a7f3d0'],
-        [9, 9, '#bfdbfe'],
+        [2, 2, ACCENT.yellow],
+        [8, 3, ACCENT.red],
+        [3, 8, ACCENT.green],
+        [9, 9, ACCENT.sky],
       ];
       notes.forEach(([nx, ny, color]) => {
         if (nx + 5 > W || ny + 5 > H) return;
@@ -636,7 +1108,7 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
         ox1(ctx, ox, oy, nx, ny, 5, 5, OUTLINE);
         fx(ctx, ox, oy, nx + 1, ny + 2, 3, 1, 'rgba(15,23,42,0.35)');
         fx(ctx, ox, oy, nx + 1, ny + 3, 2, 1, 'rgba(15,23,42,0.35)');
-        fx(ctx, ox, oy, nx + 2, ny, 1, 1, '#ef4444'); // pin
+        fx(ctx, ox, oy, nx + 2, ny, 1, 1, ACCENT.red); // pin
       });
       break;
     }
@@ -650,48 +1122,48 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
       const cs = Math.max(1, Math.floor((Math.min(W, H) - 6) / cells));
       for (let j = 0; j < cells; j++) {
         for (let i = 0; i < cells; i++) {
-          fx(ctx, ox, oy, boardX + i * cs, boardY + j * cs, cs, cs, (i + j) % 2 ? '#e0e7ff' : '#4338ca');
+          fx(ctx, ox, oy, boardX + i * cs, boardY + j * cs, cs, cs, (i + j) % 2 ? '#e6ddc8' : '#6e6390');
         }
       }
       ox1(ctx, ox, oy, boardX, boardY, cells * cs, cells * cs, OUTLINE);
       // A couple of pieces
-      fx(ctx, ox, oy, boardX + cs, boardY + cs, cs, cs, '#f43f5e');
-      fx(ctx, ox, oy, boardX + cs * 4, boardY + cs * 3, cs, cs, '#fbbf24');
+      fx(ctx, ox, oy, boardX + cs, boardY + cs, cs, cs, ACCENT.red);
+      fx(ctx, ox, oy, boardX + cs * 4, boardY + cs * 3, cs, cs, ACCENT.yellow);
       break;
     }
 
     case 'jukebox': {
-      const body: Ramp = { dark: '#9d174d', base: '#db2777', light: '#ec4899', hi: '#f9a8d4' };
+      const body: Ramp = { dark: '#8e4256', base: '#b85f76', light: ACCENT.pink, hi: '#e9a9c0' };
       // Arched top
       fx(ctx, ox, oy, 2, 1, W - 4, 2, body.light);
       fx(ctx, ox, oy, 1, 3, W - 2, H - 5, body.base);
       ox1(ctx, ox, oy, 1, 3, W - 2, H - 5, OUTLINE);
       ox1(ctx, ox, oy, 2, 1, W - 4, 3, OUTLINE);
       // Glowing arch light
-      fx(ctx, ox, oy, 3, 2, W - 6, 1, '#fde68a');
+      fx(ctx, ox, oy, 3, 2, W - 6, 1, ACCENT.yellow);
       // Speaker grille
       fx(ctx, ox, oy, 3, 5, W - 6, 5, body.dark);
       for (let i = 4; i < W - 4; i += 2) {
-        fx(ctx, ox, oy, i, 5, 1, 5, '#4c0519');
+        fx(ctx, ox, oy, i, 5, 1, 5, '#4a2733');
       }
       // Control buttons
-      fx(ctx, ox, oy, 4, 11, 2, 2, '#22d3ee');
-      fx(ctx, ox, oy, 7, 11, 2, 2, '#fbbf24');
-      fx(ctx, ox, oy, 10, 11, 2, 2, '#a3e635');
+      fx(ctx, ox, oy, 4, 11, 2, 2, ACCENT.teal);
+      fx(ctx, ox, oy, 7, 11, 2, 2, ACCENT.yellow);
+      fx(ctx, ox, oy, 10, 11, 2, 2, ACCENT.lime);
       break;
     }
 
     case 'tv': {
       // Wall-mounted flat screen
       shadedBlock(ctx, ox, oy, 0, 1, W, H - 4, PALETTE.steel);
-      fx(ctx, ox, oy, 2, 3, W - 4, H - 8, '#0c4a6e');
+      fx(ctx, ox, oy, 2, 3, W - 4, H - 8, PALETTE.water.dark);
       // Screen content + scanlines
-      fx(ctx, ox, oy, 3, 4, W - 6, 2, '#0ea5e9');
-      fx(ctx, ox, oy, 3, 7, Math.max(2, W - 10), 2, '#38bdf8');
+      fx(ctx, ox, oy, 3, 4, W - 6, 2, ACCENT.sky);
+      fx(ctx, ox, oy, 3, 7, Math.max(2, W - 10), 2, ACCENT.sky);
       for (let j = 4; j < H - 5; j += 2) {
         fx(ctx, ox, oy, 2, j, W - 4, 1, 'rgba(12, 74, 110, 0.35)');
       }
-      fx(ctx, ox, oy, 2, 3, W - 4, 1, '#7dd3fc'); // glare
+      fx(ctx, ox, oy, 2, 3, W - 4, 1, ACCENT.sky); // glare
       // Stand
       shadedBlock(ctx, ox, oy, Math.floor(W / 2) - 2, H - 3, 4, 1, PALETTE.steel);
       shadedBlock(ctx, ox, oy, Math.floor(W / 2) - 4, H - 2, 8, 1, PALETTE.steel);
@@ -699,23 +1171,23 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
     }
 
     case 'coffee_machine': {
-      const body: Ramp = { dark: '#4c1d0a', base: '#92400e', light: '#c2410c', hi: '#fb923c' };
+      const body: Ramp = { dark: '#4a3122', base: '#6d4a33', light: '#8d6446', hi: '#b28a64' };
       const steel = PALETTE.steel;
 
       // Tall body with a chrome upper deck, so the machine silhouette is obvious.
       shadedBlock(ctx, ox, oy, 1, 0, 14, 12, body);
       shadedBlock(ctx, ox, oy, 2, 1, 12, 3, steel); // chrome top / bean hopper
-      fx(ctx, ox, oy, 3, 2, 4, 1, '#22c55e'); // ready lamp
-      fx(ctx, ox, oy, 11, 2, 2, 1, '#ef4444'); // power lamp
+      fx(ctx, ox, oy, 3, 2, 4, 1, ACCENT.green); // ready lamp
+      fx(ctx, ox, oy, 11, 2, 2, 1, ACCENT.red); // power lamp
 
       // Group head with the portafilter below it.
       shadedBlock(ctx, ox, oy, 5, 5, 6, 2, steel);
-      fx(ctx, ox, oy, 7, 7, 2, 1, '#3f2410'); // espresso stream
+      fx(ctx, ox, oy, 7, 7, 2, 1, '#4a3020'); // espresso stream
 
       // Cup sitting on the drip tray.
-      shadedBlock(ctx, ox, oy, 6, 8, 4, 3, { dark: '#94a3b8', base: '#f1f5f9', light: '#ffffff', hi: '#ffffff' });
-      fx(ctx, ox, oy, 7, 9, 2, 1, '#78350f'); // coffee surface
-      fx(ctx, ox, oy, 10, 9, 1, 1, '#e2e8f0'); // handle
+      shadedBlock(ctx, ox, oy, 6, 8, 4, 3, PALETTE.marble);
+      fx(ctx, ox, oy, 7, 9, 2, 1, '#6b4526'); // coffee surface
+      fx(ctx, ox, oy, 10, 9, 1, 1, PALETTE.marble.dark); // handle
 
       shadedBlock(ctx, ox, oy, 3, 12, 10, 2, steel); // drip tray
       for (let i = 4; i < 12; i += 2) fx(ctx, ox, oy, i, 12, 1, 1, steel.dark); // tray grate
@@ -733,11 +1205,16 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
         while (bx < W - 3) {
           const bw = 1 + ((i + si) % 3);
           const bh = 4 - ((i + si) % 2);
-          const colors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+          const colors = [ACCENT.red, ACCENT.blue, ACCENT.green, ACCENT.yellow, ACCENT.violet, ACCENT.teal];
           const color = colors[(i * 2 + si * 3) % colors.length];
           if (bx + bw > W - 2) break;
-          fx(ctx, ox, oy, bx, sy + 5 - bh, bw, bh, color);
-          ox1(ctx, ox, oy, bx, sy + 5 - bh, bw, bh, OUTLINE);
+          const by2 = sy + 5 - bh;
+          fx(ctx, ox, oy, bx, by2, bw, bh, color);
+          // Spines are 1-3 art pixels wide, so a full outline around each one consumed the
+          // entire book and the shelf came out as a row of dark slots. A shadow down the
+          // right edge and a lit top separates them while leaving the colour visible.
+          fx(ctx, ox, oy, bx + bw - 1, by2, 1, bh, mixHex(color, OUTLINE, 0.45));
+          fx(ctx, ox, oy, bx, by2, bw, 1, mixHex(color, '#ffffff', 0.3));
           bx += bw + 1;
           i++;
         }
@@ -774,27 +1251,14 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
 const displayPosMap = new Map<string, { x: number; y: number; isMoving: boolean }>();
 let animFrameId: number | null = null;
 
-// Render Cel-Shaded User Character Avatar
-// Draws a rectangle with independently-toggleable rounded corners, falling back to a
-// plain rect if the browser lacks native roundRect support.
-function roundedRect(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  radii: number | [number, number, number, number]
-) {
-  ctx.beginPath();
-  if (typeof (ctx as any).roundRect === 'function') {
-    (ctx as any).roundRect(x, y, w, h, radii);
-  } else {
-    ctx.rect(x, y, w, h);
-  }
-}
+// ============================================================================
+// Character avatars
+// ============================================================================
+// The sprite itself lives in lib/avatarSprite.ts so the world canvas and the Avatar Studio
+// preview draw the exact same character. What stays here is only the world-specific chrome
+// around it: proximity rings, the walk cycle driven by interpolated movement, and the name
+// tag - none of which belong in a preview.
 
-// Character avatar, drawn as flat-colored rounded blocks to match the Avatar Studio
-// preview (see AvatarBuilder.vue) instead of the previous circular/blob rendering.
 function renderUser(
   ctx: CanvasRenderingContext2D,
   user: User,
@@ -802,13 +1266,12 @@ function renderUser(
   displayPos: { x: number; y: number; isMoving: boolean },
   isGhost = false
 ) {
-  let px = displayPos.x * CELL_SIZE + CELL_SIZE / 2;
+  const px = displayPos.x * CELL_SIZE + CELL_SIZE / 2;
   let py = displayPos.y * CELL_SIZE + CELL_SIZE / 2;
 
-  // Add rhythmic walking bounce animation when moving
+  // Rhythmic walking bounce
   if (displayPos.isMoving) {
-    const walkingBounce = Math.abs(Math.sin(Date.now() / 90)) * 2;
-    py -= walkingBounce;
+    py -= Math.abs(Math.sin(Date.now() / 90)) * 2;
   }
 
   ctx.save();
@@ -820,17 +1283,17 @@ function renderUser(
 
   // Proximity Voice Halo Ring (If speaking)
   if (user.isSpeaking) {
-    ctx.strokeStyle = '#22c55e';
+    ctx.strokeStyle = ACCENT.green;
     ctx.lineWidth = 4;
     ctx.beginPath();
-    ctx.arc(px, py - 2, 26, 0, Math.PI * 2);
+    ctx.arc(px, py - 8, 28, 0, Math.PI * 2);
     ctx.stroke();
   }
 
   if (isSelf) {
     // Proximity 4-tile spatial voice radius visual circle
-    ctx.strokeStyle = '#6366f1';
-    ctx.fillStyle = 'rgba(99, 102, 241, 0.08)';
+    ctx.strokeStyle = '#7d8ae0';
+    ctx.fillStyle = 'rgba(125, 138, 224, 0.07)';
     ctx.lineWidth = 2;
     ctx.setLineDash([8, 8]);
     ctx.beginPath();
@@ -840,202 +1303,43 @@ function renderUser(
     ctx.setLineDash([]);
   }
 
-  const hairColor = user.avatar.hairColor || '#1e293b';
-  const hairStyle = user.avatar.hairStyle || 'short';
-  const hatStyle = user.avatar.hatStyle || 'none';
-  const BORDER = '#0f172a';
+  // While an avatar lerps between tiles its centre lands on a fractional pixel; snapping the
+  // sprite origin to whole screen pixels is what stops a pixel character shimmering as it
+  // walks.
+  const oxp = Math.round(px - (AV_W / 2) * PX);
+  const oyp = Math.round(py + 13 - AV_H * PX);
 
-  const HEAD_W = 20;
-  const HEAD_H = 18;
-  const headX = px - HEAD_W / 2;
-  const headY = py - HEAD_H - 2;
+  drawAvatarSprite(ctx, oxp, oyp, PX, user.avatar, {
+    direction: user.direction,
+    walkPhase: displayPos.isMoving ? Math.floor(Date.now() / 120) % 4 : -1,
+    presence: user.presenceStatus,
+    showEmoji: true,
+  });
 
-  const BODY_W = 28;
-  const BODY_H = 17;
-  const bodyX = px - BODY_W / 2;
-  const bodyY = py - 2;
-
-  // Hair Back Layer (Long hair locks / Afro halo behind head)
-  if (hatStyle === 'none') {
-    if (hairStyle === 'long') {
-      ctx.fillStyle = hairColor;
-      ctx.strokeStyle = BORDER;
-      ctx.lineWidth = 1.5;
-
-      roundedRect(ctx, headX - 3, headY + 3, 4, 13, [0, 0, 3, 3]);
-      ctx.fill();
-      ctx.stroke();
-
-      roundedRect(ctx, headX + HEAD_W - 1, headY + 3, 4, 13, [0, 0, 3, 3]);
-      ctx.fill();
-      ctx.stroke();
-    } else if (hairStyle === 'afro') {
-      ctx.fillStyle = hairColor;
-      ctx.strokeStyle = BORDER;
-      ctx.lineWidth = 2;
-      roundedRect(ctx, px - 15, headY - 6, 30, 26, 13);
-      ctx.fill();
-      ctx.stroke();
-    }
-  }
-
-  // Body (drawn before the head so the head's border cleanly overlaps the seam)
-  ctx.fillStyle = user.avatar.outfitColor || '#3b82f6';
-  roundedRect(ctx, bodyX, bodyY, BODY_W, BODY_H, [5, 5, 0, 0]);
-  ctx.fill();
-  ctx.strokeStyle = BORDER;
-  ctx.lineWidth = 2;
-  roundedRect(ctx, bodyX, bodyY, BODY_W, BODY_H, [5, 5, 0, 0]);
-  ctx.stroke();
-
-  // Head / Face
-  ctx.fillStyle = user.avatar.skinColor || '#f87171';
-  roundedRect(ctx, headX, headY, HEAD_W, HEAD_H, 6);
-  ctx.fill();
-  ctx.strokeStyle = BORDER;
-  ctx.lineWidth = 2;
-  roundedRect(ctx, headX, headY, HEAD_W, HEAD_H, 6);
-  ctx.stroke();
-
-  // Hair Top Layer (Short cap, Long top cap, Curly locks)
-  if (hatStyle === 'none' && hairStyle !== 'bald') {
-    if (hairStyle === 'short' || hairStyle === 'long') {
-      ctx.fillStyle = hairColor;
-      roundedRect(ctx, headX - 1, headY - 4, HEAD_W + 2, 7, [4, 4, 0, 0]);
-      ctx.fill();
-      ctx.strokeStyle = BORDER;
-      ctx.lineWidth = 1.5;
-      roundedRect(ctx, headX - 1, headY - 4, HEAD_W + 2, 7, [4, 4, 0, 0]);
-      ctx.stroke();
-    } else if (hairStyle === 'curly') {
-      ctx.fillStyle = hairColor;
-      roundedRect(ctx, headX - 1, headY - 5, HEAD_W + 2, 8, [5, 5, 0, 0]);
-      ctx.fill();
-      ctx.strokeStyle = BORDER;
-      ctx.lineWidth = 1.5;
-      roundedRect(ctx, headX - 1, headY - 5, HEAD_W + 2, 8, [5, 5, 0, 0]);
-      ctx.stroke();
-
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
-      [headX + 3, headX + HEAD_W / 2 - 1, headX + HEAD_W - 5].forEach((cx) => {
-        ctx.beginPath();
-        ctx.arc(cx, headY - 1, 2, 0, Math.PI * 2);
-        ctx.fill();
-      });
-    }
-  }
-
-  // Face Eyewear / Glasses or plain Eyes
-  const eyeY = headY + 7;
-  if (user.avatar.glasses) {
-    ctx.fillStyle = BORDER;
-    ctx.fillRect(px - 8, eyeY, 6, 5);
-    ctx.fillRect(px + 2, eyeY, 6, 5);
-    ctx.fillRect(px - 2, eyeY + 2, 4, 1.5);
-    ctx.fillStyle = '#38bdf8';
-    ctx.fillRect(px - 7, eyeY + 1, 4, 3);
-    ctx.fillRect(px + 3, eyeY + 1, 4, 3);
-  } else {
-    ctx.fillStyle = BORDER;
-    ctx.fillRect(px - 6, eyeY, 3, 3);
-    ctx.fillRect(px + 3, eyeY, 3, 3);
-  }
-
-  // Mouth (flat line, matching the Avatar Studio preview)
-  ctx.strokeStyle = BORDER;
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(px - 4, headY + 14);
-  ctx.lineTo(px + 4, headY + 14);
-  ctx.stroke();
-
-  // Headwear / Hat
-  if (user.avatar.hatStyle === 'cap') {
-    ctx.fillStyle = '#dc2626';
-    roundedRect(ctx, headX, headY - 6, HEAD_W, 6, [4, 4, 0, 0]);
-    ctx.fill();
-    ctx.strokeStyle = BORDER;
-    ctx.lineWidth = 1.5;
-    roundedRect(ctx, headX, headY - 6, HEAD_W, 6, [4, 4, 0, 0]);
-    ctx.stroke();
-
-    ctx.fillStyle = '#991b1b';
-    ctx.fillRect(headX - 2, headY - 1, HEAD_W + 4, 3);
-  } else if (user.avatar.hatStyle === 'beanie') {
-    ctx.fillStyle = '#059669';
-    roundedRect(ctx, headX, headY - 8, HEAD_W, 9, [6, 6, 0, 0]);
-    ctx.fill();
-    ctx.strokeStyle = BORDER;
-    ctx.lineWidth = 1.5;
-    roundedRect(ctx, headX, headY - 8, HEAD_W, 9, [6, 6, 0, 0]);
-    ctx.stroke();
-
-    ctx.fillStyle = '#f59e0b';
-    ctx.fillRect(px - 3, headY - 12, 6, 6);
-    ctx.strokeRect(px - 3, headY - 12, 6, 6);
-  }
-
-  // Presence Status Dot (top-right corner of the head, Discord-style)
-  const presenceColors: Record<string, string> = {
-    available: '#22c55e',
-    busy: '#f59e0b',
-    dnd: '#ef4444',
-  };
-  const presenceColor = presenceColors[user.presenceStatus] || presenceColors.available;
-  const dotX = headX + HEAD_W - 1;
-  const dotY = headY + 1;
-  ctx.fillStyle = BORDER;
-  ctx.beginPath();
-  ctx.arc(dotX, dotY, 4.5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = presenceColor;
-  ctx.beginPath();
-  ctx.arc(dotX, dotY, 3, 0, Math.PI * 2);
-  ctx.fill();
-  if (user.presenceStatus === 'dnd') {
-    // A short bar reads as "do not disturb" even at a glance, matching common chat apps.
-    ctx.fillStyle = BORDER;
-    ctx.fillRect(dotX - 1.5, dotY - 0.75, 3, 1.5);
-  }
-
-  // Status Emoji Badge (bottom-right corner, overlapping the head/body seam)
-  const badgeX = px + BODY_W / 2 - 10;
-  const badgeY = bodyY + 3;
-  ctx.fillStyle = BORDER;
-  roundedRect(ctx, badgeX - 1, badgeY - 1, 16, 16, 4);
-  ctx.fill();
-  ctx.fillStyle = '#fbbf24';
-  roundedRect(ctx, badgeX, badgeY, 14, 14, 4);
-  ctx.fill();
-  ctx.font = '11px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(user.avatar.statusEmoji || '👋', badgeX + 7, badgeY + 8);
-
-  // Cel-Shaded Pixel Name Tag Banner Above Head
+  // --- Name tag ---------------------------------------------------------------
   const nameText = isSelf ? `${user.name} (YOU)` : user.name;
   ctx.font = 'bold 12px "Pixelify Sans", cursive, sans-serif';
   const textWidth = ctx.measureText(nameText).width;
 
-  const tagX = px - textWidth / 2 - 8;
-  const tagY = py - 42;
+  const tagW = textWidth + 14;
+  const tagH = 20;
+  const tagX = Math.round(px - tagW / 2);
+  const tagY = oyp - tagH - 6;
 
-  // Dark shadow offset
-  ctx.fillStyle = '#0f172a';
-  ctx.fillRect(tagX + 3, tagY + 3, textWidth + 16, 22);
+  ctx.fillStyle = 'rgba(20, 26, 44, 0.45)';
+  ctx.fillRect(tagX + 3, tagY + 3, tagW, tagH);
+  ctx.fillStyle = isSelf ? '#f6e7bd' : ACCENT.cream;
+  ctx.fillRect(tagX, tagY, tagW, tagH);
+  ctx.fillStyle = AVATAR_INK;
+  ctx.fillRect(tagX, tagY, tagW, 2);
+  ctx.fillRect(tagX, tagY + tagH - 2, tagW, 2);
+  ctx.fillRect(tagX, tagY, 2, tagH);
+  ctx.fillRect(tagX + tagW - 2, tagY, 2, tagH);
 
-  // Banner Box
-  ctx.fillStyle = isSelf ? '#fef3c7' : '#ffffff';
-  ctx.fillRect(tagX, tagY, textWidth + 16, 22);
-
-  ctx.strokeStyle = '#0f172a';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(tagX, tagY, textWidth + 16, 22);
-
-  ctx.fillStyle = '#0f172a';
+  ctx.fillStyle = AVATAR_INK;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(nameText, px, tagY + 11);
+  ctx.fillText(nameText, tagX + tagW / 2, tagY + tagH / 2 + 1);
 
   ctx.restore();
 }
@@ -1047,22 +1351,21 @@ function renderCanvas() {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  // Enable crisp nearest-neighbor pixel rendering
-  ctx.imageSmoothingEnabled = false;
-
   const map = props.currentMap;
-  canvas.width = map.width * CELL_SIZE;
-  canvas.height = map.height * CELL_SIZE;
+  // Assigning width/height resets the whole 2D context - including imageSmoothingEnabled -
+  // so only resize when the map actually changed, and set the smoothing flag afterwards.
+  // Smoothing has to stay off or the terrain blit below would come out blurred.
+  if (canvas.width !== map.width * CELL_SIZE || canvas.height !== map.height * CELL_SIZE) {
+    canvas.width = map.width * CELL_SIZE;
+    canvas.height = map.height * CELL_SIZE;
+  }
+  ctx.imageSmoothingEnabled = false;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // 1. Draw Tiles
-  for (let y = 0; y < map.height; y++) {
-    for (let x = 0; x < map.width; x++) {
-      const tileType = map.tiles[y]?.[x] || 'floor_tile';
-      renderTile(ctx, tileType, x, y);
-    }
-  }
+  // 1. Draw Tiles (cached; only the animated water highlights are per-frame work)
+  ctx.drawImage(getTerrain(map), 0, 0);
+  waterCells.forEach(({ x, y }) => renderWaterAnimation(ctx, x, y));
 
   // 2. Draw Private Zones Overlays (Explicit & Desk Automatic Private Zones)
   const allZones: Array<{ id: string; name: string; color?: string; x: number; y: number; width: number; height: number; isDeskZone?: boolean }> = [

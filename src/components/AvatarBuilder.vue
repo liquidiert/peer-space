@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { Sparkles, X, Check, User, Shirt, Smile, Wand2, HardDrive } from 'lucide-vue-next';
-import type { AvatarCustomization } from '../types';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { Sparkles, X, Check, User, Shirt, Smile, Wand2, HardDrive, Footprints } from 'lucide-vue-next';
+import type { AvatarCustomization, Direction } from '../types';
+import { AV_H, AV_W, drawAvatarSprite } from '../lib/avatarSprite';
 
 const props = defineProps<{
   avatar: AvatarCustomization;
@@ -22,12 +23,73 @@ function update<K extends keyof AvatarCustomization>(key: K, value: AvatarCustom
   });
 }
 
-const SKIN_TONES = ['#f87171', '#fbbf24', '#fca5a5', '#d97706', '#881337', '#78350f', '#fed7aa', '#451a03'];
+// The sprite derives its own shadows and highlights from whatever is picked here (see
+// rampFrom in lib/pixelArt), so these are chosen as *base* tones. The previous set was raw
+// Tailwind - a red and a wine as "skin", a pure magenta as "hair" - which produced
+// characters that could not sit in the same room as each other.
+const SKIN_TONES = ['#f8d9bd', '#f0c19b', '#e0a678', '#c8875a', '#a66a41', '#7d4b2e', '#5a3520', '#3d2317'];
 const HAIR_STYLES = ['short', 'long', 'curly', 'afro', 'bald'];
-const HAIR_COLORS = ['#1e293b', '#b45309', '#eab308', '#dc2626', '#6b7280', '#0284c7', '#ec4899'];
-const OUTFIT_COLORS = ['#3b82f6', '#10b981', '#8b5cf6', '#ec4899', '#f97316', '#64748b', '#0f172a', '#e11d48'];
+const HAIR_COLORS = ['#2b1a10', '#5a3a20', '#9c6c41', '#d8b26a', '#b5533a', '#6b7280', '#4a6fa5', '#a05a8a'];
+const OUTFIT_COLORS = ['#5b86cf', '#54b8b4', '#68b877', '#e8c268', '#e79355', '#e0705f', '#9585d6', '#d67fa4', '#48506b', '#2f3545'];
 const HATS = ['none', 'cap', 'beanie'];
 const EMOJIS = ['👋', '💻', '☕', '🎧', '🚀', '🔥', '🤫', '🌴', '🧠', '⚡', '✨', '🎯'];
+
+// --- Live preview -----------------------------------------------------------------
+// Drawn with drawAvatarSprite, the same function the world canvas uses, rather than being
+// re-created in HTML/CSS. The two used to be separate implementations, so every change to
+// the character had to be made twice and the Studio drifted into showing something the map
+// never actually rendered.
+const PREVIEW_SCALE = 5;
+const PREVIEW_PAD_X = 14; // room for the emoji chip, which sits outside the sprite box
+const PREVIEW_PAD_Y = 8;
+const previewCanvas = ref<HTMLCanvasElement | null>(null);
+const previewDirection = ref<Direction>('down');
+const isWalking = ref(false);
+const DIRECTIONS: Array<{ value: Direction; label: string }> = [
+  { value: 'down', label: 'Front' },
+  { value: 'left', label: 'Left' },
+  { value: 'right', label: 'Right' },
+  { value: 'up', label: 'Back' },
+];
+
+let previewFrame: number | null = null;
+
+function drawPreview() {
+  const canvas = previewCanvas.value;
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawAvatarSprite(ctx, PREVIEW_PAD_X, PREVIEW_PAD_Y, PREVIEW_SCALE, props.avatar, {
+    direction: previewDirection.value,
+    walkPhase: isWalking.value ? Math.floor(Date.now() / 150) % 4 : -1,
+    showEmoji: true,
+  });
+}
+
+function animatePreview() {
+  drawPreview();
+  previewFrame = isWalking.value ? requestAnimationFrame(animatePreview) : null;
+}
+
+function toggleWalk() {
+  isWalking.value = !isWalking.value;
+  if (isWalking.value && previewFrame === null) animatePreview();
+  else drawPreview();
+}
+
+watch(() => [props.avatar, previewDirection.value], drawPreview, { deep: true });
+onMounted(() => {
+  // Driven off the initial state rather than assuming it starts stopped, so the loop can
+  // never be left un-started if that default ever changes.
+  if (isWalking.value) animatePreview();
+  else drawPreview();
+});
+onUnmounted(() => {
+  if (previewFrame !== null) cancelAnimationFrame(previewFrame);
+});
 
 function randomize() {
   const randomSkin = SKIN_TONES[Math.floor(Math.random() * SKIN_TONES.length)];
@@ -94,100 +156,44 @@ function randomize() {
       <!-- Background Grid Accent -->
       <div class="absolute inset-0 bg-[radial-gradient(#0f172a_1px,transparent_1px)] [background-size:12px_12px] opacity-20" />
 
-      <div class="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl bg-white border-3 border-slate-900 flex items-center justify-center relative shadow-[4px_4px_0px_0px_#0f172a] overflow-hidden z-10 transition-all pixel-rendering">
-        <div class="relative flex flex-col items-center justify-center">
-          <!-- Hat -->
-          <div
-            v-if="avatar.hatStyle === 'cap'"
-            class="w-10 h-3 bg-red-600 border-2 border-slate-900 rounded-t-sm relative -mb-1 z-30"
-          >
-            <div class="w-12 h-1 bg-red-800 border-b border-slate-900 -ml-1 mt-2" />
-          </div>
-          <div
-            v-else-if="avatar.hatStyle === 'beanie'"
-            class="w-10 h-6 bg-emerald-600 border-2 border-slate-900 rounded-t-md relative -mb-2 z-30"
-          >
-            <div class="w-3 h-3 bg-amber-400 border border-slate-900 rounded-full mx-auto -mt-1.5" />
-          </div>
-
-          <!-- Hair (Distinct Styles when hat is none) -->
-          <template v-if="avatar.hatStyle === 'none'">
-            <!-- Short Hair -->
-            <div
-              v-if="avatar.hairStyle === 'short'"
-              class="w-11 h-4 border-t-2 border-x-2 border-slate-900 rounded-t-lg relative -mb-1.5 z-10 transition-colors"
-              :style="{ backgroundColor: avatar.hairColor }"
-            />
-
-            <!-- Long Hair -->
-            <div v-else-if="avatar.hairStyle === 'long'" class="relative -mb-1.5 z-10">
-              <div
-                class="w-11 h-4 border-t-2 border-x-2 border-slate-900 rounded-t-lg transition-colors"
-                :style="{ backgroundColor: avatar.hairColor }"
-              />
-              <div
-                class="w-3 h-8 border-2 border-slate-900 rounded-b-md absolute -left-1.5 top-2 z-10 transition-colors"
-                :style="{ backgroundColor: avatar.hairColor }"
-              />
-              <div
-                class="w-3 h-8 border-2 border-slate-900 rounded-b-md absolute -right-1.5 top-2 z-10 transition-colors"
-                :style="{ backgroundColor: avatar.hairColor }"
-              />
-            </div>
-
-            <!-- Curly Hair -->
-            <div v-else-if="avatar.hairStyle === 'curly'" class="relative -mb-2 z-10">
-              <div
-                class="w-13 h-5 border-2 border-slate-900 rounded-t-full transition-colors flex justify-between px-0.5 pt-0.5"
-                :style="{ backgroundColor: avatar.hairColor }"
-              >
-                <div class="w-2.5 h-2.5 rounded-full border border-slate-900/40 bg-white/20" />
-                <div class="w-2.5 h-2.5 rounded-full border border-slate-900/40 bg-white/20" />
-                <div class="w-2.5 h-2.5 rounded-full border border-slate-900/40 bg-white/20" />
-              </div>
-            </div>
-
-            <!-- Afro Hair -->
-            <div v-else-if="avatar.hairStyle === 'afro'" class="relative -mb-7 z-0">
-              <div
-                class="w-16 h-14 border-2 border-slate-900 rounded-full transition-colors flex items-center justify-center shadow-inner"
-                :style="{ backgroundColor: avatar.hairColor }"
-              >
-                <div class="w-11 h-9 rounded-full border border-slate-900/20 bg-white/10" />
-              </div>
-            </div>
-          </template>
-
-          <!-- Head / Face -->
-          <div
-            class="w-12 h-12 rounded-xl flex flex-col items-center justify-center relative border-2 border-slate-900 transition-colors z-20"
-            :style="{ backgroundColor: avatar.skinColor }"
-          >
-            <!-- Glasses -->
-            <div v-if="avatar.glasses" class="flex items-center gap-1 z-20">
-              <div class="w-3.5 h-3.5 border-2 border-slate-900 bg-cyan-200" />
-              <div class="w-1 h-0.5 bg-slate-900" />
-              <div class="w-3.5 h-3.5 border-2 border-slate-900 bg-cyan-200" />
-            </div>
-            <!-- Eyes -->
-            <div v-else class="flex items-center gap-2.5 z-20 my-0.5">
-              <div class="w-2 h-2 bg-slate-900" />
-              <div class="w-2 h-2 bg-slate-900" />
-            </div>
-            <!-- Smile -->
-            <div class="w-4 h-1 border-b-2 border-slate-900 mt-0.5" />
-          </div>
-
-          <!-- Body / Outfit -->
-          <div
-            class="w-14 h-8 border-2 border-slate-900 rounded-t-lg mt-0.5 transition-colors z-20"
-            :style="{ backgroundColor: avatar.outfitColor }"
+      <div class="flex items-center gap-3 z-10">
+        <!-- The character, drawn by the same sprite code the world canvas uses. -->
+        <div class="rounded-2xl bg-white border-3 border-slate-900 flex items-center justify-center relative shadow-[4px_4px_0px_0px_#0f172a] overflow-hidden transition-all p-1">
+          <canvas
+            ref="previewCanvas"
+            :width="AV_W * PREVIEW_SCALE + PREVIEW_PAD_X * 2"
+            :height="AV_H * PREVIEW_SCALE + PREVIEW_PAD_Y * 2"
+            class="pixel-rendering block"
           />
+        </div>
 
-          <!-- Status Emoji Badge -->
-          <div class="absolute -bottom-1 -right-2 bg-amber-300 border-2 border-slate-900 rounded-md w-7 h-7 flex items-center justify-center text-sm shadow-[2px_2px_0px_0px_#0f172a] z-30">
-            {{ avatar.statusEmoji }}
+        <!-- Facing + walk preview: the sprite is drawn per-direction and animated, so the
+             Studio should let you actually see both. -->
+        <div class="flex flex-col gap-1.5">
+          <span class="text-[9px] font-bold uppercase tracking-wider text-slate-600 font-heading">Facing</span>
+          <div class="grid grid-cols-2 gap-1">
+            <button
+              v-for="d in DIRECTIONS"
+              :key="d.value"
+              type="button"
+              @click="previewDirection = d.value"
+              :class="`px-2 py-1 text-[10px] font-bold rounded-md border-2 border-slate-900 transition-all pixel-btn font-heading ${
+                previewDirection === d.value ? 'bg-indigo-500 text-white' : 'bg-white text-slate-900 hover:bg-slate-100'
+              }`"
+            >
+              {{ d.label }}
+            </button>
           </div>
+          <button
+            type="button"
+            @click="toggleWalk"
+            :class="`mt-0.5 px-2 py-1 text-[10px] font-bold rounded-md border-2 border-slate-900 transition-all pixel-btn font-heading flex items-center justify-center gap-1 ${
+              isWalking ? 'bg-amber-300 text-slate-950' : 'bg-white text-slate-900 hover:bg-slate-100'
+            }`"
+          >
+            <Footprints class="w-3 h-3" />
+            {{ isWalking ? 'Stop' : 'Walk' }}
+          </button>
         </div>
       </div>
     </div>
