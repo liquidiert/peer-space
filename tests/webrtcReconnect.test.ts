@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nextTick } from 'vue';
 import {
   installWebRTCMocks,
@@ -381,6 +381,119 @@ describe('proximity audio/video reconnection', () => {
     a.api.unlockBlockedAudioPlayback();
     await settle();
     expect(a.api.isAudioPlaybackBlocked.value).toBe(false);
+
+    a.destroy();
+    b.destroy();
+  });
+
+  it('drops a screen tile once the sharer is no longer flagged as sharing', async () => {
+    // A sharer whose share ends without a clean track-ended event - suspended/discarded tab,
+    // crashed renderer - used to leave the last frame frozen in every viewer's dock. The
+    // broadcast isScreenSharing flag is the reliable signal that it's over.
+    const users = usersInRange();
+    const a = createPeerClient(bus, A, users);
+    const b = createPeerClient(bus, B, users);
+
+    await giveAudio(a);
+    await giveAudio(b);
+    a.api.syncPeerConnections();
+    b.api.syncPeerConnections();
+    await settle();
+
+    await a.api.toggleScreenShare();
+    await settle();
+
+    expect(b.api.remoteScreenStreams.value.has(A), 'B should see A\'s shared screen').toBe(true);
+
+    // The server broadcasts A's profile update; everyone's user list now says A is sharing.
+    const sharing = (flag: boolean) => (u: any) => (u.socketId === A ? { ...u, isScreenSharing: flag } : u);
+    b.users.value = b.users.value.map(sharing(true));
+    await settle();
+    expect(b.api.remoteScreenStreams.value.has(A), 'tile must survive routine user updates').toBe(true);
+
+    // A's share stops without the track ever ending on B's side.
+    b.users.value = b.users.value.map(sharing(false));
+    await settle();
+
+    expect(
+      b.api.remoteScreenStreams.value.has(A),
+      'stale screen tile must be dropped once the sharer stops sharing'
+    ).toBe(false);
+
+    a.destroy();
+    b.destroy();
+  });
+
+  it('warns the user when a peer connection stays broken', async () => {
+    const users = usersInRange();
+    const a = createPeerClient(bus, A, users);
+    const b = createPeerClient(bus, B, users);
+
+    await giveAudio(a);
+    await giveAudio(b);
+    a.api.syncPeerConnections();
+    b.api.syncPeerConnections();
+    await settle();
+
+    expect(a.api.hasConnectionTrouble.value).toBe(false);
+
+    // shouldAdvanceTime keeps the harness's real setTimeout(0) plumbing working while still
+    // letting the test jump the clock past the grace period.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      peerConnectionTo(a, B).emitConnectionState('failed');
+      await settle();
+
+      // A single failure is just a routine rebuild - warning the user here would fire on
+      // every transient blip.
+      expect(a.api.hasConnectionTrouble.value).toBe(false);
+
+      // The rebuilt connection never comes up either.
+      vi.advanceTimersByTime(9000);
+      expect(a.api.hasConnectionTrouble.value).toBe(true);
+      expect(a.api.troubledPeerIds.value).toContain(B);
+
+      // ...and the warning clears as soon as it recovers.
+      peerConnectionTo(a, B).emitConnectionState('connected');
+      expect(a.api.hasConnectionTrouble.value).toBe(false);
+      expect(a.api.troubledPeerIds.value).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    a.destroy();
+    b.destroy();
+  });
+
+  it('stops warning about a peer that has left rather than one that is broken', async () => {
+    const users = usersInRange();
+    const a = createPeerClient(bus, A, users);
+    const b = createPeerClient(bus, B, users);
+
+    await giveAudio(a);
+    await giveAudio(b);
+    a.api.syncPeerConnections();
+    b.api.syncPeerConnections();
+    await settle();
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      // B leaves, then their connection reports the failure that leaving caused.
+      const pc = peerConnectionTo(a, B);
+      a.users.value = a.users.value.filter((u) => u.socketId !== B);
+      a.api.syncPeerConnections();
+      await settle();
+
+      pc.emitConnectionState('failed');
+      vi.advanceTimersByTime(9000);
+
+      expect(
+        a.api.hasConnectionTrouble.value,
+        'someone leaving is not a connection problem to warn about'
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
 
     a.destroy();
     b.destroy();

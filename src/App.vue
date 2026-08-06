@@ -300,7 +300,17 @@ const {
   availableVideoDevices,
   isAudioPlaybackBlocked,
   unlockBlockedAudioPlayback,
+  hasConnectionTrouble,
+  troubledPeerIds,
 } = useWebRTCProximity(socket, currentUser, users, isMuted, isDeafened);
+
+// Names of the peers whose connection has been failing long enough to be worth telling the
+// user about, so the warning can say who they've lost rather than just "something is wrong".
+const troubledPeerNames = computed(() =>
+  troubledPeerIds.value
+    .map((socketId) => users.value.find((u) => u.socketId === socketId)?.name)
+    .filter((name): name is string => Boolean(name))
+);
 
 // Map Builder State
 const builderMode = ref(false);
@@ -1110,6 +1120,20 @@ function handleToggleBuilderMode() {
         >
           Tap to Enable
         </button>
+      </div>
+
+      <!-- Connection Trouble Warning: a peer connection has been down long enough that this
+           is not just a routine reconnect. Without this the call simply goes quiet and the
+           user has no way to tell the difference between "nobody is talking" and "broken". -->
+      <div
+        v-if="hasConnectionTrouble"
+        class="absolute z-50 bg-orange-400 text-slate-950 border-3 border-slate-900 px-4 py-2.5 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] font-heading font-extrabold text-xs flex items-center gap-2 max-w-md text-center"
+        :class="isAudioPlaybackBlocked ? 'top-20 left-1/2 -translate-x-1/2' : 'top-4 left-1/2 -translate-x-1/2'"
+      >
+        <span v-if="troubledPeerNames.length">
+          ⚠️ Trouble connecting to {{ troubledPeerNames.join(', ') }} — retrying…
+        </span>
+        <span v-else>⚠️ Trouble connecting to a nearby peer — retrying…</span>
       </div>
 
       <!-- Chime Toast: another user rang you (via the bell button in Chat & People) -->

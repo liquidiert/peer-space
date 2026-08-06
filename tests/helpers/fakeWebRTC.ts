@@ -16,6 +16,7 @@ export class FakeMediaStreamTrack {
   onmute: (() => void) | null = null;
   onunmute: (() => void) | null = null;
   private settings: Record<string, unknown>;
+  private listeners = new Map<string, Set<() => void>>();
 
   constructor(kind: 'audio' | 'video', settings: Record<string, unknown> = {}) {
     this.kind = kind;
@@ -27,8 +28,26 @@ export class FakeMediaStreamTrack {
     return this.settings;
   }
 
+  // Screen share listens for the browser's native "Stop sharing" via addEventListener('ended')
+  // rather than the onended property, so the fake has to support both.
+  addEventListener(type: string, fn: () => void) {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    this.listeners.get(type)!.add(fn);
+  }
+
+  removeEventListener(type: string, fn: () => void) {
+    this.listeners.get(type)?.delete(fn);
+  }
+
   stop() {
     this.readyState = 'ended';
+  }
+
+  /** Simulate the track ending on its own (user hit the browser's stop-sharing control). */
+  endTrack() {
+    this.readyState = 'ended';
+    this.onended?.();
+    [...(this.listeners.get('ended') ?? [])].forEach((fn) => fn());
   }
 }
 

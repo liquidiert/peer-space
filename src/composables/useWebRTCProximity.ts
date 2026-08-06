@@ -2,11 +2,55 @@ import { ref, watch, onUnmounted } from 'vue';
 import type { Socket } from 'socket.io-client';
 import type { User } from '../types';
 
-const ICE_SERVERS = [
+// Public STUN is enough to punch through a typical home router, but it cannot help behind
+// symmetric NAT or a restrictive corporate firewall - those need a TURN relay, and a relay
+// needs credentials, so it can't be hardcoded here. Deployments configure their own via env:
+//
+//   VITE_ICE_SERVERS='[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'
+//     Full RTCIceServer[] as JSON - replaces the defaults entirely.
+//   VITE_TURN_URLS='turn:turn.example.com:3478,turns:turn.example.com:5349'
+//   VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL
+//     Shorthand for the common case - appends a TURN entry to the default STUN servers.
+//
+// Anything malformed falls back to the STUN defaults rather than leaving the app with no ICE
+// configuration at all (which would break every connection instead of just the hard ones).
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
 ];
+
+function resolveIceServers(): RTCIceServer[] {
+  const env = (import.meta as any).env ?? {};
+
+  const raw = (env.VITE_ICE_SERVERS ?? '').trim();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed as RTCIceServer[];
+      console.warn('VITE_ICE_SERVERS must be a non-empty JSON array; using default STUN servers.');
+    } catch (err) {
+      console.warn('VITE_ICE_SERVERS is not valid JSON; using default STUN servers:', err);
+    }
+  }
+
+  const turnUrls = (env.VITE_TURN_URLS ?? '')
+    .split(',')
+    .map((u: string) => u.trim())
+    .filter(Boolean);
+  if (turnUrls.length === 0) return DEFAULT_ICE_SERVERS;
+
+  return [
+    ...DEFAULT_ICE_SERVERS,
+    {
+      urls: turnUrls,
+      username: env.VITE_TURN_USERNAME || undefined,
+      credential: env.VITE_TURN_CREDENTIAL || undefined,
+    },
+  ];
+}
+
+const ICE_SERVERS = resolveIceServers();
 
 export function useWebRTCProximity(
   socketRef: { value: Socket | null },
@@ -65,6 +109,73 @@ export function useWebRTCProximity(
     return next;
   }
 
+  // Connection health, surfaced so the UI can actually tell the user their call is broken.
+  // Previously a connection that failed and kept failing was only ever console.error'd, so
+  // from the user's side it just looked like everyone had gone quiet for no reason.
+  //
+  // A raw "not connected" state is far too noisy to show directly - every renegotiation and
+  // every post-failure rebuild passes through 'connecting', and 'disconnected' is usually a
+  // blip the ICE agent recovers from on its own. So a peer only counts as troubled once it
+  // has been continuously unhealthy for longer than the grace period below, which is what
+  // distinguishes "reconnecting, as designed" from "this call is actually broken".
+  const CONNECTION_TROUBLE_GRACE_MS = 8000;
+  const peerConnectionStates = ref<Map<string, RTCPeerConnectionState>>(new Map());
+  const troubledPeerIds = ref<string[]>([]);
+  const hasConnectionTrouble = ref(false);
+  const unhealthySince = new Map<string, number>();
+  let troubleInterval: number | null = null;
+
+  function evaluateConnectionTrouble() {
+    const now = Date.now();
+    const troubled: string[] = [];
+    unhealthySince.forEach((since, socketId) => {
+      if (now - since >= CONNECTION_TROUBLE_GRACE_MS) troubled.push(socketId);
+    });
+
+    // Only touch the refs on an actual change so this poll doesn't invalidate anything
+    // downstream every couple of seconds.
+    const changed =
+      troubled.length !== troubledPeerIds.value.length ||
+      troubled.some((id) => !troubledPeerIds.value.includes(id));
+    if (changed) {
+      troubledPeerIds.value = troubled;
+      hasConnectionTrouble.value = troubled.length > 0;
+    }
+
+    // The poll only exists to let a peer cross the grace threshold while nothing else is
+    // happening; with nothing pending there's nothing left for it to discover.
+    if (unhealthySince.size === 0 && troubleInterval !== null) {
+      clearInterval(troubleInterval);
+      troubleInterval = null;
+    }
+  }
+
+  function setPeerConnectionState(targetSocketId: string, state: RTCPeerConnectionState) {
+    const next = new Map(peerConnectionStates.value);
+    next.set(targetSocketId, state);
+    peerConnectionStates.value = next;
+
+    if (state === 'connected') {
+      unhealthySince.delete(targetSocketId);
+    } else if (!unhealthySince.has(targetSocketId)) {
+      unhealthySince.set(targetSocketId, Date.now());
+      if (troubleInterval === null && typeof window !== 'undefined') {
+        troubleInterval = window.setInterval(evaluateConnectionTrouble, 2000);
+      }
+    }
+    evaluateConnectionTrouble();
+  }
+
+  function forgetPeerConnectionState(targetSocketId: string) {
+    unhealthySince.delete(targetSocketId);
+    if (peerConnectionStates.value.has(targetSocketId)) {
+      const next = new Map(peerConnectionStates.value);
+      next.delete(targetSocketId);
+      peerConnectionStates.value = next;
+    }
+    evaluateConnectionTrouble();
+  }
+
   // Whether any remote peer's audio element is currently blocked by the browser's autoplay
   // policy (play() rejected) - surfaced so the UI can prompt for a tap to unblock sound.
   const isAudioPlaybackBlocked = ref(false);
@@ -107,6 +218,8 @@ export function useWebRTCProximity(
   const remoteScreenStreams = ref<Map<string, MediaStream>>(new Map());
   const screenPeerConnections = new Map<string, RTCPeerConnection>();
   const screenPendingCandidates = new Map<string, RTCIceCandidateInit[]>();
+  // Peers we have actually observed flagged as screen sharing (see pruneStaleScreenShares).
+  const seenSharing = new Set<string>();
 
   // Audio Context for Voice Activity Detection (VAD)
   let audioCtx: AudioContext | null = null;
@@ -227,6 +340,7 @@ export function useWebRTCProximity(
     () => {
       updateAllRemoteVolumes();
       updatePeerVideoConnections();
+      pruneStaleScreenShares();
     },
     { deep: true }
   );
@@ -438,6 +552,11 @@ export function useWebRTCProximity(
     };
 
     pc.onconnectionstatechange = () => {
+      // A connection we've already torn down (or replaced) can still emit a trailing state
+      // change; letting that through would report health for a connection nobody is using.
+      if (peerConnections.get(targetSocketId) !== pc) return;
+      setPeerConnectionState(targetSocketId, pc.connectionState);
+
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         // Terminal - rebuild immediately rather than leaving the peer silent until some
         // unrelated event (someone else joining/leaving) happens to call
@@ -466,7 +585,13 @@ export function useWebRTCProximity(
   function reconnectToPeerIfInitiator(targetSocketId: string) {
     const myId = currentUserRef.value.socketId;
     const stillPresent = usersRef.value.some((u) => u.socketId === targetSocketId);
-    if (stillPresent && myId < targetSocketId) {
+    if (!stillPresent) {
+      // They're gone, so there is nothing to reconnect to and nothing to warn about - drop
+      // the health entry instead of leaving it stuck as permanently "troubled".
+      forgetPeerConnectionState(targetSocketId);
+      return;
+    }
+    if (myId < targetSocketId) {
       connectToUser(targetSocketId);
     }
   }
@@ -491,8 +616,10 @@ export function useWebRTCProximity(
   function removePeerConnection(targetSocketId: string) {
     const pc = peerConnections.get(targetSocketId);
     if (pc) {
-      pc.close();
+      // Unregister before closing so any state change close() emits is recognised as coming
+      // from a connection we've already abandoned (see onconnectionstatechange).
       peerConnections.delete(targetSocketId);
+      pc.close();
     }
     const audio = remoteAudioElements.get(targetSocketId);
     if (audio) {
@@ -545,11 +672,16 @@ export function useWebRTCProximity(
       newMap.set(targetSocketId, remoteStream);
       remoteScreenStreams.value = newMap;
 
-      event.track.onended = () => {
+      const dropScreenTile = () => {
         const m = new Map(remoteScreenStreams.value);
         m.delete(targetSocketId);
         remoteScreenStreams.value = m;
       };
+      event.track.onended = dropScreenTile;
+      // A share that stops without the transceiver being torn down (the sharer removed the
+      // track and renegotiated) mutes the remote track rather than ending it - without this
+      // the tile would keep showing the last frame it received.
+      event.track.onmute = dropScreenTile;
     };
 
     // Unlike the main audio/video connection, screen share only ever has one possible
@@ -592,6 +724,53 @@ export function useWebRTCProximity(
     newMap.delete(targetSocketId);
     remoteScreenStreams.value = newMap;
     screenPendingCandidates.delete(targetSocketId);
+  }
+
+  // A sharer whose share ends without a clean signal - tab discarded/suspended by the OS,
+  // browser crash, or simply a stop whose track-ended event never reaches us - would leave a
+  // frozen screen tile up for every viewer until ICE eventually gives up, or forever if the
+  // connection stays nominally alive. The server already broadcasts isScreenSharing on every
+  // user, so treat that flag as the source of truth and drop any screen tile whose owner is
+  // no longer sharing.
+  function pruneStaleScreenShares() {
+    const myId = currentUserRef.value.socketId;
+
+    // Only a true -> false transition counts. A peer's screen track and their profile update
+    // are independent socket messages with no ordering guarantee, so if the track happened to
+    // arrive first, treating the not-yet-updated flag as authoritative would tear the tile
+    // down again the moment any unrelated user update (somebody moving, say) ran this.
+    usersRef.value.forEach((u) => {
+      if (u.isScreenSharing && u.socketId !== myId) seenSharing.add(u.socketId);
+    });
+
+    const stale: string[] = [];
+    remoteScreenStreams.value.forEach((_, socketId) => {
+      const sharer = usersRef.value.find((u) => u.socketId === socketId);
+      if (!sharer || (!sharer.isScreenSharing && seenSharing.has(socketId))) {
+        stale.push(socketId);
+      }
+    });
+    if (stale.length === 0) return;
+
+    const next = new Map(remoteScreenStreams.value);
+    stale.forEach((socketId) => {
+      next.delete(socketId);
+      seenSharing.delete(socketId);
+
+      // Both directions of a pair share one screen connection, so it can only be torn down
+      // if it isn't still carrying our own outgoing share to that peer.
+      const stillCarryingOurShare =
+        isScreenSharing.value && usersRef.value.some((u) => u.socketId === socketId);
+      if (!stillCarryingOurShare) {
+        const pc = screenPeerConnections.get(socketId);
+        if (pc) {
+          screenPeerConnections.delete(socketId);
+          pc.close();
+        }
+        screenPendingCandidates.delete(socketId);
+      }
+    });
+    remoteScreenStreams.value = next;
   }
 
   function connectScreenToUser(targetSocketId: string) {
@@ -863,6 +1042,7 @@ export function useWebRTCProximity(
     peerConnections.forEach((_, socketId) => {
       if (!currentSocketIds.has(socketId)) {
         removePeerConnection(socketId);
+        forgetPeerConnectionState(socketId);
       }
     });
     screenPeerConnections.forEach((_, socketId) => {
@@ -870,6 +1050,9 @@ export function useWebRTCProximity(
         removeScreenPeerConnection(socketId);
       }
     });
+
+    // Someone who left while sharing, or who stopped sharing, must not keep a tile in the dock.
+    pruneStaleScreenShares();
   }
 
   onUnmounted(() => {
@@ -881,6 +1064,7 @@ export function useWebRTCProximity(
       window.removeEventListener('keydown', unlockBlockedAudioPlayback);
     }
     if (vadInterval) clearInterval(vadInterval);
+    if (troubleInterval !== null) clearInterval(troubleInterval);
     if (audioCtx) audioCtx.close();
     if (localAudioStream.value) {
       localAudioStream.value.getTracks().forEach((track) => track.stop());
@@ -924,6 +1108,9 @@ export function useWebRTCProximity(
     currentVideoDeviceId,
     isAudioPlaybackBlocked,
     unlockBlockedAudioPlayback,
+    hasConnectionTrouble,
+    troubledPeerIds,
+    peerConnectionStates,
     // Read-only escape hatch for integration tests to inspect actual RTCPeerConnection state
     // (signaling state, senders/tracks) instead of re-deriving it from reactive refs alone.
     // Not used by any UI component.
