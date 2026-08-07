@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { Hammer, Trash2, Layers, Box, X, Shield, Plus, Lock } from 'lucide-vue-next';
-import type { TileType, MapObject, ObjectType, PrivateZone } from '../types';
+import { ref } from "vue";
+import { Hammer, Trash2, Layers, Box, X, Shield, Plus, Lock, Move } from "lucide-vue-next";
+import type { TileType, MapObject, ObjectType, PrivateZone } from "../types";
 
 const props = defineProps<{
   isOpen: boolean;
-  builderAction: 'place' | 'erase';
+  builderAction: "place" | "erase" | "move";
   selectedTile: TileType;
   selectedObject: MapObject | null;
   currentMapId: string;
@@ -13,13 +13,13 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'close'): void;
-  (e: 'setBuilderAction', action: 'place' | 'erase'): void;
-  (e: 'setSelectedTile', tile: TileType): void;
-  (e: 'setSelectedObject', obj: MapObject | null): void;
-  (e: 'switchMapPreset', presetId: string): void;
-  (e: 'addZone', zone: PrivateZone): void;
-  (e: 'removeZone', zoneId: string): void;
+  (e: "close"): void;
+  (e: "setBuilderAction", action: "place" | "erase" | "move"): void;
+  (e: "setSelectedTile", tile: TileType): void;
+  (e: "setSelectedObject", obj: MapObject | null): void;
+  (e: "switchMapPreset", presetId: string): void;
+  (e: "addZone", zone: PrivateZone): void;
+  (e: "removeZone", zoneId: string): void;
 }>();
 
 const activeCategory = ref<'build' | 'zones'>('build');
@@ -167,7 +167,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
       </div>
 
       <!-- Mode Action Selector -->
-      <div class="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl border-2 border-slate-900">
+      <div class="grid grid-cols-3 gap-1.5 bg-slate-100 p-1 rounded-xl border-2 border-slate-900">
         <button
           type="button"
           @click="emit('setBuilderAction', 'place')"
@@ -176,6 +176,15 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
           }`"
         >
           <Hammer class="w-3.5 h-3.5" /> Place
+        </button>
+        <button
+          type="button"
+          @click="emit('setBuilderAction', 'move')"
+          :class="`py-1.5 text-xs font-bold rounded-lg flex items-center justify-center gap-1 transition-all pixel-btn ${
+            builderAction === 'move' ? 'bg-indigo-300 text-slate-950 font-heading border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]' : 'text-slate-700 hover:text-slate-950'
+          }`"
+        >
+          <Move class="w-3.5 h-3.5" /> Move
         </button>
         <button
           type="button"
@@ -363,7 +372,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
     </template>
 
     <p class="text-[11px] text-slate-900 bg-amber-100 p-2.5 rounded-lg border-2 border-slate-900 font-bold leading-relaxed shadow-[2px_2px_0px_0px_#0f172a]">
-      💡 Click grid cells on the map to paint tiles or place furniture objects in real time!
+      💡 Drag objects directly on the map to relocate them! Click grid cells to paint tiles or place furniture objects in real time.
     </p>
   </div>
 </template>

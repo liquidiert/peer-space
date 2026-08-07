@@ -644,26 +644,42 @@ async function startServer() {
     });
 
     // Map Builder - Add or Place Object
-    socket.on('map:place_object', (newObj: MapObject) => {
+    socket.on("map:place_object", (newObj: MapObject) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
       const map = maps.get(currentMapId);
       if (!map) return;
 
       map.objects.push(newObj);
-      io.emit('map:object_placed', newObj);
+      io.emit("map:object_placed", newObj);
       persistCurrentMap();
     });
 
+    // Map Builder - Move Object
+    socket.on("map:move_object", (payload: { objectId: string; x: number; y: number }) => {
+      const sender = users.get(socket.id);
+      if (!sender?.isAdmin) return;
+      const map = maps.get(currentMapId);
+      if (!map) return;
+
+      const obj = map.objects.find((o) => o.id === payload.objectId);
+      if (obj) {
+        obj.x = payload.x;
+        obj.y = payload.y;
+        io.emit("map:object_updated", { objectId: payload.objectId, object: obj });
+        persistCurrentMap();
+      }
+    });
+
     // Map Builder - Remove Object
-    socket.on('map:remove_object', (objectId: string) => {
+    socket.on("map:remove_object", (objectId: string) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
       const map = maps.get(currentMapId);
       if (!map) return;
 
       map.objects = map.objects.filter((o) => o.id !== objectId);
-      io.emit('map:object_removed', objectId);
+      io.emit("map:object_removed", objectId);
       persistCurrentMap();
     });
 

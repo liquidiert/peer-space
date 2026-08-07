@@ -317,8 +317,8 @@ const troubledPeerNames = computed(() =>
 
 // Map Builder State
 const builderMode = ref(false);
-const builderAction = ref<'place' | 'erase'>('place');
-const selectedTile = ref<TileType>('floor_wood');
+const builderAction = ref<"place" | "erase" | "move">("place");
+const selectedTile = ref<TileType>("floor_wood");
 const selectedObject = ref<MapObject | null>(null);
 
 // Modal UI State
@@ -909,7 +909,22 @@ function handleUpdateDesk(payload: { objectId: string; deskState: any }) {
 
 function handlePlaceObject(newObj: MapObject) {
   if (socket.value) {
-    socket.value.emit('map:place_object', newObj);
+    socket.value.emit("map:place_object", newObj);
+  }
+}
+
+function handleMoveObject(payload: { objectId: string; x: number; y: number }) {
+  if (currentMap.value) {
+    const updatedObjects = currentMap.value.objects.map((o) =>
+      o.id === payload.objectId ? { ...o, x: payload.x, y: payload.y } : o
+    );
+    currentMap.value = {
+      ...currentMap.value,
+      objects: updatedObjects,
+    };
+  }
+  if (socket.value) {
+    socket.value.emit("map:move_object", payload);
   }
 }
 
@@ -1189,6 +1204,7 @@ function handleToggleBuilderMode() {
         @navigateTile="handleNavigateTile"
         @interactObject="(obj) => activeObjectModal = obj"
         @placeObject="handlePlaceObject"
+        @moveObject="handleMoveObject"
         @removeObject="handleRemoveObject"
         @changeTile="handleChangeTile"
       />

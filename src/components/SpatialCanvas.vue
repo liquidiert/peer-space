@@ -1,32 +1,54 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue';
-import { ChevronUp, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-vue-next';
-import type { User, GridMap, MapObject, TileType } from '../types';
-import { ACCENT, mixHex, type Ramp } from '../lib/pixelArt';
-import { AV_H, AV_INK as AVATAR_INK, AV_W, drawAvatarSprite } from '../lib/avatarSprite';
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ChevronUp, ChevronDown, ChevronLeft, ChevronRight } from "lucide-vue-next";
+import type { User, GridMap, MapObject, TileType } from "../types";
+import { ACCENT, mixHex, type Ramp } from "../lib/pixelArt";
+import { AV_H, AV_INK as AVATAR_INK, AV_W, drawAvatarSprite } from "../lib/avatarSprite";
 
 const props = defineProps<{
   currentUser: User;
   users: User[];
   currentMap: GridMap;
   builderMode: boolean;
-  builderAction: 'place' | 'erase';
+  builderAction: "place" | "erase" | "move";
   selectedTile: TileType;
   selectedObject: MapObject | null;
 }>();
 
 const emit = defineEmits<{
-  (e: 'move', payload: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right'; ghost?: boolean }): void;
-  (e: 'navigateTile', payload: { x: number; y: number }): void;
-  (e: 'interactObject', object: MapObject): void;
-  (e: 'placeObject', newObj: MapObject): void;
-  (e: 'removeObject', objectId: string): void;
-  (e: 'changeTile', payload: { x: number; y: number; tileType: TileType }): void;
+  (e: "move", payload: { x: number; y: number; direction: "up" | "down" | "left" | "right"; ghost?: boolean }): void;
+  (e: "navigateTile", payload: { x: number; y: number }): void;
+  (e: "interactObject", object: MapObject): void;
+  (e: "placeObject", newObj: MapObject): void;
+  (e: "removeObject", objectId: string): void;
+  (e: "moveObject", payload: { objectId: string; x: number; y: number }): void;
+  (e: "changeTile", payload: { x: number; y: number; tileType: TileType }): void;
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const scrollContainerRef = ref<HTMLDivElement | null>(null);
 const CELL_SIZE = 48; // Each spatial tile is 48x48px
+
+// Object Drag & Drop State in Builder Mode
+const isDraggingObject = ref(false);
+const draggedObject = ref<MapObject | null>(null);
+const dragOffsetGrid = ref<{ x: number; y: number }>({ x: 0, y: 0 });
+const currentDragTile = ref<{ x: number; y: number } | null>(null);
+const hoveredObject = ref<MapObject | null>(null);
+const isMouseDown = ref(false);
+const mouseDownPos = ref<{ x: number; y: number } | null>(null);
+const hasDragged = ref(false);
+
+const canvasCursor = computed(() => {
+  if (props.builderMode) {
+    if (isDraggingObject.value) return "grabbing";
+    if (hoveredObject.value) return "grab";
+    if (props.builderAction === "erase") return "crosshair";
+    if (props.builderAction === "move") return "grab";
+    return "pointer";
+  }
+  return "pointer";
+});
 
 // Ghost Mode: holding "g" lets you walk through other users. The server is still the
 // authority on collision (see server.ts user:move), this just flags the request.
@@ -1439,8 +1461,110 @@ function renderCanvas() {
 
   // 3. Draw Objects
   map.objects.forEach((obj) => {
-    renderObject(ctx, obj);
+    if (isDraggingObject.value && draggedObject.value && obj.id === draggedObject.value.id) {
+      // Draw ghost at original position
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      renderObject(ctx, obj);
+      ctx.restore();
+
+      // Draw dashed outline at original position
+      const ox = obj.x * CELL_SIZE;
+      const oy = obj.y * CELL_SIZE;
+      const ow = obj.width * CELL_SIZE;
+      const oh = obj.height * CELL_SIZE;
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.7)";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.strokeRect(ox + 1, oy + 1, ow - 2, oh - 2);
+      ctx.setLineDash([]);
+    } else {
+      renderObject(ctx, obj);
+
+      // If hovered in builder mode (and not dragging another object), draw hover outline
+      if (
+        props.builderMode &&
+        hoveredObject.value &&
+        hoveredObject.value.id === obj.id &&
+        !isDraggingObject.value
+      ) {
+        const ox = obj.x * CELL_SIZE;
+        const oy = obj.y * CELL_SIZE;
+        const ow = obj.width * CELL_SIZE;
+        const oh = obj.height * CELL_SIZE;
+
+        ctx.save();
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 3;
+        ctx.shadowColor = "rgba(56, 189, 248, 0.8)";
+        ctx.shadowBlur = 8;
+        ctx.strokeRect(ox, oy, ow, oh);
+
+        ctx.fillStyle = "#38bdf8";
+        ctx.fillRect(ox - 3, oy - 3, 6, 6);
+        ctx.fillRect(ox + ow - 3, oy - 3, 6, 6);
+        ctx.fillRect(ox - 3, oy + oh - 3, 6, 6);
+        ctx.fillRect(ox + ow - 3, oy + oh - 3, 6, 6);
+        ctx.restore();
+      }
+    }
   });
+
+  // 3.5 Draw Active Dragged Object & Snap Box Overlay
+  if (isDraggingObject.value && draggedObject.value && currentDragTile.value) {
+    const dragX = currentDragTile.value.x;
+    const dragY = currentDragTile.value.y;
+    const dragW = draggedObject.value.width;
+    const dragH = draggedObject.value.height;
+
+    const pxX = dragX * CELL_SIZE;
+    const pxY = dragY * CELL_SIZE;
+    const pxW = dragW * CELL_SIZE;
+    const pxH = dragH * CELL_SIZE;
+
+    // Draw active object preview at drag target
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    const tempObj: MapObject = {
+      ...draggedObject.value,
+      x: dragX,
+      y: dragY,
+    };
+    renderObject(ctx, tempObj);
+    ctx.restore();
+
+    // Draw snap grid box & drag indicator glow
+    ctx.save();
+    ctx.fillStyle = "rgba(251, 191, 36, 0.15)";
+    ctx.fillRect(pxX, pxY, pxW, pxH);
+
+    ctx.strokeStyle = "#f59e0b";
+    ctx.lineWidth = 3;
+    ctx.shadowColor = "#f59e0b";
+    ctx.shadowBlur = 10;
+    ctx.strokeRect(pxX + 1, pxY + 1, pxW - 2, pxH - 2);
+
+    // Draw coordinates badge tag
+    const badgeText = `Move: (${dragX}, ${dragY})`;
+    ctx.font = 'bold 11px "Pixelify Sans", cursive, sans-serif';
+    const textWidth = ctx.measureText(badgeText).width;
+    const badgeW = textWidth + 12;
+    const badgeH = 18;
+    const badgeX = pxX + pxW / 2 - badgeW / 2;
+    const badgeY = Math.max(4, pxY - 22);
+
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
+    ctx.strokeStyle = "#f59e0b";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(badgeX, badgeY, badgeW, badgeH);
+
+    ctx.fillStyle = "#fef08a";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(badgeText, pxX + pxW / 2, badgeY + badgeH / 2 + 1);
+    ctx.restore();
+  }
 
   // 4. Draw Users with lerp position interpolation and walking animation
   props.users.forEach((user) => {
@@ -1575,8 +1699,128 @@ function stopDpadMove() {
   }
 }
 
+// Pointer Drag & Hover Event Handlers for Object Movement
+function handlePointerDown(e: PointerEvent) {
+  if (!props.builderMode || !props.currentMap) return;
+
+  const canvas = canvasRef.value;
+  if (!canvas) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const mouseX = e.clientX - rect.left;
+  const mouseY = e.clientY - rect.top;
+
+  const tileX = Math.floor(mouseX / CELL_SIZE);
+  const tileY = Math.floor(mouseY / CELL_SIZE);
+
+  const existingObj = props.currentMap.objects.find(
+    (o) => tileX >= o.x && tileX < o.x + o.width && tileY >= o.y && tileY < o.y + o.height
+  );
+
+  isMouseDown.value = true;
+  mouseDownPos.value = { x: e.clientX, y: e.clientY };
+  hasDragged.value = false;
+
+  if (existingObj) {
+    draggedObject.value = existingObj;
+    dragOffsetGrid.value = { x: tileX - existingObj.x, y: tileY - existingObj.y };
+    currentDragTile.value = { x: existingObj.x, y: existingObj.y };
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch (_) {}
+  } else {
+    draggedObject.value = null;
+    currentDragTile.value = null;
+  }
+}
+
+function handlePointerMove(e: PointerEvent) {
+  const canvas = canvasRef.value;
+  if (!canvas || !props.currentMap) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const mouseX = e.clientX - rect.left;
+  const mouseY = e.clientY - rect.top;
+
+  const tileX = Math.floor(mouseX / CELL_SIZE);
+  const tileY = Math.floor(mouseY / CELL_SIZE);
+
+  if (props.builderMode) {
+    const objUnderMouse = props.currentMap.objects.find(
+      (o) => tileX >= o.x && tileX < o.x + o.width && tileY >= o.y && tileY < o.y + o.height
+    );
+    hoveredObject.value = objUnderMouse || null;
+
+    if (isMouseDown.value && draggedObject.value && mouseDownPos.value) {
+      const dist = Math.hypot(e.clientX - mouseDownPos.value.x, e.clientY - mouseDownPos.value.y);
+      if (dist > 4) {
+        isDraggingObject.value = true;
+        hasDragged.value = true;
+      }
+
+      if (isDraggingObject.value) {
+        let targetX = tileX - dragOffsetGrid.value.x;
+        let targetY = tileY - dragOffsetGrid.value.y;
+
+        targetX = Math.max(0, Math.min(props.currentMap.width - draggedObject.value.width, targetX));
+        targetY = Math.max(0, Math.min(props.currentMap.height - draggedObject.value.height, targetY));
+
+        currentDragTile.value = { x: targetX, y: targetY };
+      }
+    }
+  } else {
+    hoveredObject.value = null;
+  }
+}
+
+function handlePointerUp(e: PointerEvent) {
+  const canvas = canvasRef.value;
+  if (canvas && e.pointerId !== undefined) {
+    try {
+      if (canvas.hasPointerCapture(e.pointerId)) {
+        canvas.releasePointerCapture(e.pointerId);
+      }
+    } catch (_) {}
+  }
+
+  if (isDraggingObject.value && draggedObject.value && currentDragTile.value) {
+    if (
+      currentDragTile.value.x !== draggedObject.value.x ||
+      currentDragTile.value.y !== draggedObject.value.y
+    ) {
+      emit("moveObject", {
+        objectId: draggedObject.value.id,
+        x: currentDragTile.value.x,
+        y: currentDragTile.value.y,
+      });
+    }
+  }
+
+  isMouseDown.value = false;
+  isDraggingObject.value = false;
+  draggedObject.value = null;
+  currentDragTile.value = null;
+}
+
+function handlePointerLeave(e: PointerEvent) {
+  if (!isDraggingObject.value) {
+    hoveredObject.value = null;
+  }
+}
+
+function handleGlobalPointerUp(e: PointerEvent) {
+  if (isMouseDown.value || isDraggingObject.value) {
+    handlePointerUp(e);
+  }
+}
+
 // Canvas Click Event Handler
 function handleCanvasClick(e: MouseEvent) {
+  if (hasDragged.value) {
+    hasDragged.value = false;
+    return;
+  }
+
   const canvas = canvasRef.value;
   if (!canvas || !props.currentMap) return;
 
@@ -1588,16 +1832,18 @@ function handleCanvasClick(e: MouseEvent) {
   const tileY = Math.floor(clickY / CELL_SIZE);
 
   if (props.builderMode) {
-    if (props.builderAction === 'erase') {
+    if (props.builderAction === "erase") {
       const existingObj = props.currentMap.objects.find(
         (o) => tileX >= o.x && tileX < o.x + o.width && tileY >= o.y && tileY < o.y + o.height
       );
       if (existingObj) {
-        emit('removeObject', existingObj.id);
+        emit("removeObject", existingObj.id);
       }
+    } else if (props.builderAction === "move") {
+      return;
     } else {
       if (props.selectedObject) {
-        const isDesk = props.selectedObject.type === 'desk';
+        const isDesk = props.selectedObject.type === "desk";
         const newObj: MapObject = {
           ...props.selectedObject,
           id: `obj_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -1606,8 +1852,8 @@ function handleCanvasClick(e: MouseEvent) {
           data: isDesk
             ? {
                 deskState: {
-                  deskLabel: 'Workstation Desk',
-                  equipment: 'laptop',
+                  deskLabel: "Workstation Desk",
+                  equipment: "laptop",
                   stickyNotes: [],
                   ...(props.selectedObject.data?.deskState || {}),
                 },
@@ -1615,9 +1861,9 @@ function handleCanvasClick(e: MouseEvent) {
               }
             : props.selectedObject.data,
         };
-        emit('placeObject', newObj);
+        emit("placeObject", newObj);
       } else if (props.selectedTile) {
-        emit('changeTile', { x: tileX, y: tileY, tileType: props.selectedTile });
+        emit("changeTile", { x: tileX, y: tileY, tileType: props.selectedTile });
       }
     }
   } else {
@@ -1626,27 +1872,29 @@ function handleCanvasClick(e: MouseEvent) {
     );
 
     if (clickedObj) {
-      emit('interactObject', clickedObj);
+      emit("interactObject", clickedObj);
     } else {
-      emit('navigateTile', { x: tileX, y: tileY });
+      emit("navigateTile", { x: tileX, y: tileY });
     }
   }
 }
 
 onMounted(() => {
-  window.addEventListener('keydown', handleKeyDown);
-  window.addEventListener('keyup', handleKeyUp);
-  window.addEventListener('blur', endGhostMode);
+  window.addEventListener("keydown", handleKeyDown);
+  window.addEventListener("keyup", handleKeyUp);
+  window.addEventListener("blur", endGhostMode);
+  window.addEventListener("pointerup", handleGlobalPointerUp);
   updateIsMobile();
-  window.addEventListener('resize', updateIsMobile);
+  window.addEventListener("resize", updateIsMobile);
   startAnimLoop();
 });
 
 onUnmounted(() => {
-  window.removeEventListener('keydown', handleKeyDown);
-  window.removeEventListener('keyup', handleKeyUp);
-  window.removeEventListener('blur', endGhostMode);
-  window.removeEventListener('resize', updateIsMobile);
+  window.removeEventListener("keydown", handleKeyDown);
+  window.removeEventListener("keyup", handleKeyUp);
+  window.removeEventListener("blur", endGhostMode);
+  window.removeEventListener("pointerup", handleGlobalPointerUp);
+  window.removeEventListener("resize", updateIsMobile);
   stopDpadMove();
   if (animFrameId !== null) {
     cancelAnimationFrame(animFrameId);
@@ -1670,7 +1918,13 @@ watch([() => props.currentUser, () => props.users, () => props.currentMap, () =>
       <canvas
         ref="canvasRef"
         @click="handleCanvasClick"
-        class="cursor-pointer block touch-none pixel-rendering"
+        @pointerdown="handlePointerDown"
+        @pointermove="handlePointerMove"
+        @pointerup="handlePointerUp"
+        @pointerleave="handlePointerLeave"
+        @pointercancel="handlePointerUp"
+        :style="{ cursor: canvasCursor }"
+        class="block touch-none pixel-rendering"
       />
     </div>
   </div>
