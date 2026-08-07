@@ -12,11 +12,24 @@ import { User, GridMap, ChatMessage, MapObject, WhiteboardStroke, StickyNote, Pr
 import { createDefaultOfficeMap, createBeachRetreatMap } from './src/mapsData';
 import { initWorkspaceDatabase } from './src/db';
 import { createSessionToken, verifySessionToken } from './src/lib/session';
+import { canDeleteNote } from './src/lib/notePermissions';
+import { canClaimDesk, canManageDesk, isDeskEquipment } from './src/lib/deskPermissions';
+import {
+  createGameState,
+  findWinner,
+  GAME_SPECS,
+  normalizeGameState,
+  resolveMove,
+  specFor,
+  type GameTableGame,
+} from './src/lib/gameTable';
 import { isTileWalkable } from './src/lib/pathfinding';
 
 async function startServer() {
   const app = new Hono();
-  const PORT = 3000;
+  // Configurable so a second instance can be run alongside the main one (paired with
+  // DATA_DIR, which already points the SQLite file elsewhere) without fighting over the port.
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Initialize SQLite persistence driver
   const db = await initWorkspaceDatabase();
@@ -33,9 +46,32 @@ async function startServer() {
   const defaultOffice = createDefaultOfficeMap();
   const beachRetreat = createBeachRetreatMap();
 
+  /**
+   * Drops objects whose type no longer exists.
+   *
+   * Maps are persisted, so a saved map still contains every jukebox, TV and coffee machine
+   * that was placed before those types were removed. Left in, they would render through
+   * renderObject's fallback as anonymous grey blocks that still block movement, and clicking
+   * one would open an empty modal. Stripping on load is a one-way migration: the next save
+   * writes the cleaned map back.
+   */
+  const RETIRED_OBJECT_TYPES = new Set(['jukebox', 'tv', 'coffee_machine']);
+  function stripRetiredObjects(map: GridMap): GridMap {
+    const kept = (map.objects || []).filter((o) => !RETIRED_OBJECT_TYPES.has(o.type as string));
+    const removed = (map.objects || []).length - kept.length;
+    if (removed > 0) {
+      console.log(`[maps] Removed ${removed} retired object(s) from "${map.name}".`);
+    }
+    return { ...map, objects: kept };
+  }
+
   const savedMaps = db.loadMaps();
   if (savedMaps.length > 0) {
-    savedMaps.forEach((m) => maps.set(m.id, m));
+    savedMaps.forEach((m) => {
+      const cleaned = stripRetiredObjects(m);
+      maps.set(cleaned.id, cleaned);
+      if (cleaned.objects.length !== (m.objects || []).length) db.saveMap(cleaned);
+    });
   } else {
     maps.set(defaultOffice.id, defaultOffice);
     maps.set(beachRetreat.id, beachRetreat);
@@ -493,17 +529,47 @@ async function startServer() {
       const map = maps.get(currentMapId);
       if (!map) return;
 
+      const author = users.get(socket.id);
+      if (!author || !payload?.note) return;
+
       const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (obj && obj.type === 'sticky_notes') {
+      if (!obj) return;
+
+      // Authorship is stamped from the connection, not taken from the payload: a client
+      // could otherwise post under someone else's name, and authorId is what deletion is
+      // authorised against, so it has to mean something.
+      const note: StickyNote = {
+        id: typeof payload.note.id === 'string' ? payload.note.id : `note_${Date.now()}`,
+        text: String(payload.note.text ?? '').slice(0, 500),
+        color: typeof payload.note.color === 'string' ? payload.note.color : '#fef08a',
+        createdAt: Date.now(),
+        author: author.name,
+        authorId: author.id,
+      };
+      if (!note.text.trim()) return;
+
+      if (obj.type === 'sticky_notes') {
         if (!obj.data) obj.data = {};
         if (!obj.data.notes) obj.data.notes = [];
-        obj.data.notes.push(payload.note);
+        obj.data.notes.push(note);
 
         io.emit('object:notes_updated', {
           objectId: payload.objectId,
           notes: obj.data.notes,
         });
 
+        persistCurrentMap();
+        return;
+      }
+
+      // Desk notes go through this path too, so that leaving a note is the *only* way to
+      // change someone else's desk - it can append, and nothing else.
+      if (obj.type === 'desk' || obj.type === 'computer') {
+        obj.data = obj.data || {};
+        const state = obj.data.deskState || {};
+        obj.data.deskState = { ...state, stickyNotes: [note, ...(state.stickyNotes || [])] };
+
+        io.emit('map:object_updated', { objectId: payload.objectId, object: obj });
         persistCurrentMap();
       }
     });
@@ -514,83 +580,194 @@ async function startServer() {
       if (!map) return;
 
       const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (obj && obj.type === 'game_table' && obj.data?.gameState) {
-        const state = obj.data.gameState;
-        if (state.board[payload.index] === null && !state.winner) {
-          state.board[payload.index] = payload.symbol;
-          state.turn = payload.symbol === 'X' ? 'O' : 'X';
+      if (!obj || obj.type !== 'game_table' || !obj.data?.gameState) return;
 
-          // Check winning lines
-          const lines = [
-            [0, 1, 2], [3, 4, 5], [6, 7, 8],
-            [0, 3, 6], [1, 4, 7], [2, 5, 8],
-            [0, 4, 8], [2, 4, 6]
-          ];
+      const state = normalizeGameState(obj.data.gameState);
+      obj.data.gameState = state;
 
-          for (const line of lines) {
-            const [a, b, c] = line;
-            if (state.board[a] && state.board[a] === state.board[b] && state.board[a] === state.board[c]) {
-              state.winner = state.board[a];
-              break;
-            }
-          }
+      // Turn order is enforced here rather than only in the modal. Without it a client could
+      // play both colours and simply drop four of its own discs in a row.
+      if (payload.symbol !== state.turn) return;
 
-          if (!state.winner && state.board.every((cell) => cell !== null)) {
-            state.winner = 'Draw';
-          }
+      // The client sends the cell it clicked; for 4-to-Win the server decides where that disc
+      // actually lands, so a hand-crafted payload cannot float one in mid-air.
+      const target = resolveMove(state, payload.index);
+      if (target === null) return;
 
-          io.emit('object:game_updated', {
-            objectId: payload.objectId,
-            gameState: state,
-          });
+      state.board[target] = payload.symbol;
+      state.turn = payload.symbol === 'X' ? 'O' : 'X';
+      state.winner = findWinner(state.board, specFor(state.game));
 
-          persistCurrentMap();
-        }
-      }
+      io.emit('object:game_updated', {
+        objectId: payload.objectId,
+        gameState: state,
+      });
+
+      persistCurrentMap();
     });
 
-    // Reset Game
-    socket.on('object:game_reset', (payload: { objectId: string }) => {
+    // Reset Game (also how the table is switched between games)
+    socket.on('object:game_reset', (payload: { objectId: string; game?: GameTableGame }) => {
       const map = maps.get(currentMapId);
       if (!map) return;
 
       const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (obj && obj.type === 'game_table' && obj.data?.gameState) {
-        obj.data.gameState = {
-          board: Array(9).fill(null),
-          turn: 'X',
-          winner: null,
-          players: {},
+      if (!obj || obj.type !== 'game_table' || !obj.data?.gameState) return;
+
+      const current = normalizeGameState(obj.data.gameState);
+      const nextGame = payload.game && GAME_SPECS[payload.game] ? payload.game : current.game;
+      obj.data.gameState = createGameState(nextGame);
+
+      io.emit('object:game_updated', {
+        objectId: payload.objectId,
+        gameState: obj.data.gameState,
+      });
+
+      persistCurrentMap();
+    });
+
+    /**
+     * Deleting a sticky note, from either the bulletin board or a desk.
+     *
+     * Its own event rather than part of any bulk update: object:add_note only ever appends,
+     * and nothing else is allowed to write a note list at all, so removal is the one path
+     * that can take a note away and it authorises every removal itself.
+     *
+     * Notes carry a display name and (since this change) an authorId. Only the id is used to
+     * authorise - a name is chosen by the user and is neither unique nor verified, so two
+     * people called Alex could otherwise delete each other's notes. Notes written before
+     * authorId existed have none and can only be cleared by an admin.
+     */
+    socket.on(
+      'object:delete_note',
+      (payload: { objectId: string; noteId: string }, ack?: (r: { ok: boolean; reason?: string }) => void) => {
+      // Acknowledged so a refused or unhandled delete is visible. Every failure path here is
+      // a silent `return`, which is what made a stale server (one started before this handler
+      // existed) look identical to a working one that simply declined.
+      const reply = (ok: boolean, reason?: string) => {
+        if (typeof ack === 'function') ack({ ok, reason });
+      };
+
+      const map = maps.get(currentMapId);
+      if (!map) return reply(false, 'no_map');
+
+      const user = users.get(socket.id);
+      if (!user || !payload?.objectId || !payload?.noteId) return reply(false, 'bad_request');
+
+      const obj = map.objects.find((o) => o.id === payload.objectId);
+      if (!obj) return reply(false, 'no_object');
+
+      if (obj.type === 'sticky_notes') {
+        const notes = obj.data?.notes;
+        const note = notes?.find((n) => n.id === payload.noteId);
+        if (!notes || !note) return reply(false, 'no_note');
+        if (!canDeleteNote(user, note)) return reply(false, 'not_allowed');
+
+        obj.data!.notes = notes.filter((n) => n.id !== payload.noteId);
+        io.emit('object:notes_updated', { objectId: payload.objectId, notes: obj.data!.notes });
+        persistCurrentMap();
+        return reply(true);
+      }
+
+      if (obj.type === 'desk' || obj.type === 'computer') {
+        const deskState = obj.data?.deskState;
+        const notes = deskState?.stickyNotes;
+        const note = notes?.find((n) => n.id === payload.noteId);
+        if (!deskState || !notes || !note) return reply(false, 'no_note');
+        if (!canDeleteNote(user, note, deskState)) return reply(false, 'not_allowed');
+
+        deskState.stickyNotes = notes.filter((n) => n.id !== payload.noteId);
+        io.emit('map:object_updated', { objectId: payload.objectId, object: obj });
+        persistCurrentMap();
+        return reply(true);
+      }
+
+      return reply(false, 'unsupported_object');
+    }
+  );
+
+    /**
+     * Desks used to be updated by a single object:desk_updated event that took a whole
+     * deskState and wrote it straight in, with no authorisation at all - so any client could
+     * unclaim someone else's desk, reassign it to themselves under any name, rewrite its
+     * status, or wipe its notes.
+     *
+     * These replace it with one handler per intent. None of them accept state from the
+     * client: the claimant is taken from the connection, equipment is checked against the
+     * allowed set, and notes are only ever touched through object:add_note and
+     * object:delete_note, which do their own authorisation.
+     */
+    function findDesk(objectId: string): MapObject | null {
+      const map = maps.get(currentMapId);
+      if (!map) return null;
+      const obj = map.objects.find((o) => o.id === objectId);
+      return obj && (obj.type === 'desk' || obj.type === 'computer') ? obj : null;
+    }
+
+    function broadcastDesk(desk: MapObject) {
+      io.emit('map:object_updated', { objectId: desk.id, object: desk });
+      persistCurrentMap();
+    }
+
+    socket.on('object:desk_claim', (payload: { objectId: string }) => {
+      const user = users.get(socket.id);
+      const desk = payload?.objectId ? findDesk(payload.objectId) : null;
+      if (!user || !desk) return;
+
+      desk.data = desk.data || {};
+      const state = desk.data.deskState || {};
+      if (!canClaimDesk(user, state)) return;
+
+      desk.data.deskState = {
+        ...state,
+        claimedByUserId: user.id,
+        claimedByUserName: user.name,
+        deskLabel: `${user.name}'s Desk`,
+        statusNote: state.statusNote || '💻 Working at my desk',
+      };
+      broadcastDesk(desk);
+    });
+
+    socket.on('object:desk_release', (payload: { objectId: string }) => {
+      const user = users.get(socket.id);
+      const desk = payload?.objectId ? findDesk(payload.objectId) : null;
+      if (!user || !desk) return;
+
+      const state = desk.data?.deskState;
+      if (!canManageDesk(user, state)) return;
+
+      // deskLabel is cleared rather than set to a placeholder so the object's original map
+      // name ("Workstation 1") shows through again - the canvas already prefers the label
+      // when there is one, which is why obj.name no longer gets overwritten on claim.
+      desk.data!.deskState = {
+        ...state,
+        claimedByUserId: undefined,
+        claimedByUserName: undefined,
+        deskLabel: undefined,
+        statusNote: '',
+      };
+      broadcastDesk(desk);
+    });
+
+    socket.on(
+      'object:desk_settings',
+      (payload: { objectId: string; statusNote?: string; equipment?: string }) => {
+        const user = users.get(socket.id);
+        const desk = payload?.objectId ? findDesk(payload.objectId) : null;
+        if (!user || !desk) return;
+
+        const state = desk.data?.deskState;
+        if (!canManageDesk(user, state)) return;
+
+        desk.data!.deskState = {
+          ...state,
+          statusNote:
+            typeof payload.statusNote === 'string' ? payload.statusNote.slice(0, 140) : state!.statusNote,
+          equipment: isDeskEquipment(payload.equipment) ? payload.equipment : state!.equipment,
         };
-        io.emit('object:game_updated', {
-          objectId: payload.objectId,
-          gameState: obj.data.gameState,
-        });
-
-        persistCurrentMap();
+        broadcastDesk(desk);
       }
-    });
-
-    // Desk State Updates
-    socket.on('object:desk_updated', (payload: { objectId: string; deskState: any }) => {
-      const map = maps.get(currentMapId);
-      if (!map) return;
-
-      const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (obj && (obj.type === 'desk' || obj.type === 'computer')) {
-        obj.data = obj.data || {};
-        obj.data.deskState = payload.deskState;
-        if (payload.deskState?.claimedByUserName) {
-          obj.name = `${payload.deskState.claimedByUserName}'s Desk`;
-        }
-        io.emit('map:object_updated', {
-          objectId: payload.objectId,
-          object: obj,
-        });
-
-        persistCurrentMap();
-      }
-    });
+    );
 
     // Map Builder - Add or Update Private Zone
     socket.on('map:add_zone', (zone: PrivateZone) => {

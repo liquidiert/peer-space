@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue';
+import { computed, ref, onMounted, watch } from 'vue';
 import {
   Sparkles,
   X,
@@ -7,15 +7,21 @@ import {
   Trash2,
   Plus,
   RotateCcw,
-  Music,
-  Pause,
-  Play,
   Monitor,
   UserCheck,
   UserX,
   StickyNote as StickyIcon,
 } from 'lucide-vue-next';
 import type { MapObject, User, WhiteboardStroke, StickyNote, DeskState } from '../types';
+import { canDeleteNote } from '../lib/notePermissions';
+import { canManageDesk, type DeskEquipment } from '../lib/deskPermissions';
+import {
+  GAME_SPECS,
+  normalizeGameState,
+  resolveMove,
+  specFor,
+  type GameTableGame,
+} from '../lib/gameTable';
 
 const props = defineProps<{
   object: MapObject | null;
@@ -27,9 +33,12 @@ const emit = defineEmits<{
   (e: 'sendWhiteboardStroke', payload: { objectId: string; stroke: WhiteboardStroke }): void;
   (e: 'clearWhiteboard', payload: { objectId: string }): void;
   (e: 'addNote', payload: { objectId: string; note: StickyNote }): void;
+  (e: 'deleteNote', payload: { objectId: string; noteId: string }): void;
   (e: 'makeGameMove', payload: { objectId: string; index: number; symbol: 'X' | 'O' }): void;
-  (e: 'resetGame', payload: { objectId: string }): void;
-  (e: 'updateDesk', payload: { objectId: string; deskState: DeskState }): void;
+  (e: 'resetGame', payload: { objectId: string; game?: GameTableGame }): void;
+  (e: 'deskClaim', payload: { objectId: string }): void;
+  (e: 'deskRelease', payload: { objectId: string }): void;
+  (e: 'deskSettings', payload: { objectId: string; statusNote: string; equipment: DeskEquipment }): void;
 }>();
 
 // Whiteboard State
@@ -79,21 +88,41 @@ watch(
   { deep: true }
 );
 
-function handleMouseDown(e: MouseEvent) {
-  const canvas = canvasRef.value;
-  if (!canvas) return;
+/**
+ * Pointer position in *canvas* pixels.
+ *
+ * The board has a fixed 600x350 backing store but is laid out responsively, so CSS pixels
+ * and canvas pixels are only the same unit when the modal happens to be exactly 600 wide -
+ * which it never is. Without this scale every stroke lands progressively further from the
+ * cursor the further right and further down you draw, and strokes are shared with everyone
+ * else, so the offset is baked into what they see too.
+ */
+function pointerPos(e: PointerEvent) {
+  const canvas = canvasRef.value!;
   const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
-  isDrawing.value = true;
-  currentPoints.value = [{ x, y }];
+  return {
+    x: (e.clientX - rect.left) * (canvas.width / rect.width),
+    y: (e.clientY - rect.top) * (canvas.height / rect.height),
+  };
 }
 
-function handleMouseMove(e: MouseEvent) {
+function handleMouseDown(e: PointerEvent) {
+  const canvas = canvasRef.value;
+  if (!canvas) return;
+  // Pointer events rather than mouse events so the board also works by touch and stylus -
+  // the canvas already sets touch-none for exactly that, but nothing was listening.
+  // Capture keeps a stroke tracking if the cursor leaves the board mid-drag; it throws for a
+  // pointer the browser is not tracking, which must not take the whole stroke down with it.
+  try {
+    canvas.setPointerCapture?.(e.pointerId);
+  } catch {}
+  isDrawing.value = true;
+  currentPoints.value = [pointerPos(e)];
+}
+
+function handleMouseMove(e: PointerEvent) {
   if (!isDrawing.value || !canvasRef.value) return;
-  const rect = canvasRef.value.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
+  const { x, y } = pointerPos(e);
   currentPoints.value.push({ x, y });
 
   const ctx = canvasRef.value.getContext('2d');
@@ -134,6 +163,7 @@ function handleAddNote() {
   const note: StickyNote = {
     id: `note_${Date.now()}_${Math.random()}`,
     author: props.currentUser.name,
+    authorId: props.currentUser.id,
     text: newNoteText.value.trim(),
     color: noteColor.value,
     createdAt: Date.now(),
@@ -142,34 +172,38 @@ function handleAddNote() {
   newNoteText.value = '';
 }
 
-// Tic-Tac-Toe Game State
+function handleDeleteNote(noteId: string) {
+  if (!props.object) return;
+  emit('deleteNote', { objectId: props.object.id, noteId });
+}
+
+// --- Arcade table ------------------------------------------------------------------
+// Board geometry and legality come from lib/gameTable, the same module the server decides
+// moves with, so the grid drawn here can never disagree with the rules being enforced.
+const gameState = computed(() => normalizeGameState(props.object?.data?.gameState));
+const gameSpec = computed(() => specFor(gameState.value.game));
+
+/** For 4-to-Win: the cell a click on this column would actually fill, for the hover preview. */
+const previewIndex = ref<number | null>(null);
+
 function handleCellClick(index: number) {
-  if (!props.object?.data?.gameState) return;
-  const state = props.object.data.gameState;
-  if (state.board[index] !== null || state.winner) return;
+  if (!props.object) return;
+  const target = resolveMove(gameState.value, index);
+  if (target === null) return;
   emit('makeGameMove', {
     objectId: props.object.id,
     index,
-    symbol: state.turn,
+    symbol: gameState.value.turn,
   });
 }
 
-// Jukebox State
-const isPlaying = ref(false);
-const currentTrack = ref(0);
-const TRACKS = [
-  { title: 'Chill Lo-Fi Beats', duration: '2:45' },
-  { title: 'Ambient Office Lounge', duration: '3:10' },
-  { title: 'Focus Deep Flow', duration: '4:15' },
-];
+function handleCellHover(index: number | null) {
+  previewIndex.value = index === null ? null : resolveMove(gameState.value, index);
+}
 
-// Espresso Coffee State
-const brewing = ref(false);
-function handleBrew() {
-  brewing.value = true;
-  setTimeout(() => {
-    brewing.value = false;
-  }, 2000);
+function switchGame(game: GameTableGame) {
+  if (!props.object || gameState.value.game === game) return;
+  emit('resetGame', { objectId: props.object.id, game });
 }
 
 // User Desk State Helpers
@@ -192,59 +226,38 @@ watch(
 
 function handleClaimDesk() {
   if (!props.object) return;
-  const currentDeskState = props.object.data?.deskState || {};
-  const updatedState: DeskState = {
-    ...currentDeskState,
-    claimedByUserId: props.currentUser.id,
-    claimedByUserName: props.currentUser.name,
-    deskLabel: `${props.currentUser.name}'s Desk`,
-    statusNote: currentDeskState.statusNote || '💻 Working at my desk',
-    equipment: editingEquipment.value,
-  };
-  emit('updateDesk', { objectId: props.object.id, deskState: updatedState });
+  // The server derives the claimant from the connection - it will not take a name or id
+  // from us - so there is nothing to send but which desk.
+  emit('deskClaim', { objectId: props.object.id });
 }
 
 function handleUnclaimDesk() {
   if (!props.object) return;
-  const currentDeskState = props.object.data?.deskState || {};
-  const updatedState: DeskState = {
-    ...currentDeskState,
-    claimedByUserId: undefined,
-    claimedByUserName: undefined,
-    deskLabel: 'Unassigned Desk',
-    statusNote: '',
-  };
-  emit('updateDesk', { objectId: props.object.id, deskState: updatedState });
+  emit('deskRelease', { objectId: props.object.id });
 }
 
 function handleSaveDeskSettings() {
   if (!props.object) return;
-  const currentDeskState = props.object.data?.deskState || {};
-  const updatedState: DeskState = {
-    ...currentDeskState,
+  emit('deskSettings', {
+    objectId: props.object.id,
     statusNote: editingStatusNote.value,
     equipment: editingEquipment.value,
-  };
-  emit('updateDesk', { objectId: props.object.id, deskState: updatedState });
+  });
 }
 
 function handleAddDeskStickyNote() {
   if (!editingDeskNote.value.trim() || !props.object) return;
-  const currentDeskState = props.object.data?.deskState || {};
-  const existingNotes = currentDeskState.stickyNotes || [];
+  // Routed through the same addNote path as the bulletin board: appending is the only way to
+  // change a desk you do not own, and the server stamps the author.
   const note: StickyNote = {
     id: `desk_note_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
     author: props.currentUser.name,
+    authorId: props.currentUser.id,
     text: editingDeskNote.value.trim(),
     color: deskNoteColor.value,
     createdAt: Date.now(),
   };
-
-  const updatedState: DeskState = {
-    ...currentDeskState,
-    stickyNotes: [note, ...existingNotes],
-  };
-  emit('updateDesk', { objectId: props.object.id, deskState: updatedState });
+  emit('addNote', { objectId: props.object.id, note });
   editingDeskNote.value = '';
 }
 </script>
@@ -277,14 +290,18 @@ function handleAddDeskStickyNote() {
         <!-- Whiteboard -->
         <template v-if="object.type === 'whiteboard'">
           <div class="flex flex-col gap-4">
-            <div class="flex items-center justify-between bg-amber-50 p-3 rounded-xl border-2 border-slate-900">
-              <div class="flex items-center gap-2">
+            <!-- Wraps rather than overflowing: the two groups are close to the modal's width
+                 on their own, so with no wrapping the Eraser ran straight over the "Brush:"
+                 label. Buttons are shrink-0 so they reflow to a second line intact instead
+                 of being squashed. -->
+            <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 bg-amber-50 p-3 rounded-xl border-2 border-slate-900">
+              <div class="flex items-center flex-wrap gap-2">
                 <button
                   v-for="c in ['#ffffff', '#ef4444', '#3b82f6', '#22c55e', '#eab308', '#ec4899']"
                   :key="c"
                   type="button"
                   @click="color = c"
-                  :class="`w-7 h-7 rounded-lg border-2 border-slate-900 transition-all ${
+                  :class="`w-7 h-7 shrink-0 rounded-lg border-2 border-slate-900 transition-all ${
                     color === c ? 'scale-110 shadow-[2px_2px_0px_0px_#0f172a] ring-2 ring-amber-400' : ''
                   }`"
                   :style="{ backgroundColor: c }"
@@ -292,7 +309,7 @@ function handleAddDeskStickyNote() {
                 <button
                   type="button"
                   @click="color = '#f8fafc'"
-                  :class="`p-1.5 rounded-lg border-2 border-slate-900 text-xs font-bold flex items-center gap-1 pixel-btn ${
+                  :class="`p-1.5 shrink-0 whitespace-nowrap rounded-lg border-2 border-slate-900 text-xs font-bold flex items-center gap-1 pixel-btn ${
                     color === '#f8fafc' ? 'bg-indigo-500 text-white' : 'bg-white text-slate-900'
                   }`"
                 >
@@ -300,14 +317,14 @@ function handleAddDeskStickyNote() {
                 </button>
               </div>
 
-              <div class="flex items-center gap-3">
-                <span class="text-xs font-bold text-slate-900 font-heading">Brush:</span>
+              <div class="flex items-center flex-wrap gap-2">
+                <span class="text-xs font-bold text-slate-900 font-heading shrink-0">Brush:</span>
                 <button
                   v-for="w in [2, 5, 10]"
                   :key="w"
                   type="button"
                   @click="brushWidth = w"
-                  :class="`px-2 py-1 text-xs font-bold rounded-lg border-2 border-slate-900 pixel-btn ${
+                  :class="`px-2 py-1 shrink-0 text-xs font-bold rounded-lg border-2 border-slate-900 pixel-btn ${
                     brushWidth === w ? 'bg-amber-300 text-slate-950 font-heading shadow-[2px_2px_0px_0px_#0f172a]' : 'bg-white text-slate-900'
                   }`"
                 >
@@ -317,7 +334,7 @@ function handleAddDeskStickyNote() {
                 <button
                   type="button"
                   @click="emit('clearWhiteboard', { objectId: object.id })"
-                  class="p-1.5 bg-rose-400 hover:bg-rose-500 text-slate-950 border-2 border-slate-900 rounded-lg text-xs font-bold flex items-center gap-1 transition-all pixel-btn"
+                  class="p-1.5 shrink-0 whitespace-nowrap bg-rose-400 hover:bg-rose-500 text-slate-950 border-2 border-slate-900 rounded-lg text-xs font-bold flex items-center gap-1 transition-all pixel-btn"
                 >
                   <Trash2 class="w-4 h-4" /> Clear
                 </button>
@@ -329,10 +346,10 @@ function handleAddDeskStickyNote() {
                 ref="canvasRef"
                 :width="600"
                 :height="350"
-                @mousedown="handleMouseDown"
-                @mousemove="handleMouseMove"
-                @mouseup="handleMouseUp"
-                @mouseleave="handleMouseUp"
+                @pointerdown="handleMouseDown"
+                @pointermove="handleMouseMove"
+                @pointerup="handleMouseUp"
+                @pointercancel="handleMouseUp"
                 class="w-full h-auto cursor-crosshair touch-none"
               />
             </div>
@@ -382,9 +399,20 @@ function handleAddDeskStickyNote() {
                   :style="{ backgroundColor: note.color }"
                 >
                   <p class="text-xs font-extrabold leading-snug whitespace-pre-wrap text-slate-900 font-heading">{{ note.text }}</p>
-                  <div class="mt-3 pt-2 border-t-2 border-slate-900 flex items-center justify-between text-[10px] font-bold text-slate-900">
-                    <span>— {{ note.author }}</span>
-                    <span>{{ new Date(note.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</span>
+                  <div class="mt-3 pt-2 border-t-2 border-slate-900 flex items-center justify-between gap-1 text-[10px] font-bold text-slate-900">
+                    <span class="truncate">— {{ note.author }}</span>
+                    <div class="flex items-center gap-1 shrink-0">
+                      <span>{{ new Date(note.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</span>
+                      <button
+                        v-if="canDeleteNote(currentUser, note)"
+                        type="button"
+                        @click="handleDeleteNote(note.id)"
+                        :title="`Delete this note`"
+                        class="p-0.5 rounded border-2 border-slate-900 bg-white/70 hover:bg-rose-400 text-slate-900 transition-colors"
+                      >
+                        <Trash2 class="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </template>
@@ -394,15 +422,39 @@ function handleAddDeskStickyNote() {
 
         <!-- Tic-Tac-Toe Game Table -->
         <template v-else-if="object.type === 'game_table'">
-          <div v-if="object.data?.gameState" class="flex flex-col items-center gap-6 py-2">
-            <div class="flex items-center justify-between w-full max-w-xs bg-amber-50 px-4 py-2.5 rounded-xl border-2 border-slate-900 shadow-[3px_3px_0px_0px_#0f172a]">
-              <div class="text-xs font-extrabold font-heading">
-                <span v-if="object.data.gameState.winner" class="text-emerald-700">
-                  {{ object.data.gameState.winner === 'Draw' ? "It's a Draw!" : `Winner: ${object.data.gameState.winner}! 🎉` }}
-                </span>
-                <span v-else class="text-slate-900">
-                  Turn: <strong class="text-indigo-600 font-heading">{{ object.data.gameState.turn }}</strong>
-                </span>
+          <div v-if="object.data?.gameState" class="flex flex-col items-center gap-4 py-2">
+            <!-- Game picker. Switching restarts the table, so it doubles as the reset. -->
+            <div class="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border-2 border-slate-900 w-full max-w-sm">
+              <button
+                v-for="(spec, key) in GAME_SPECS"
+                :key="key"
+                type="button"
+                @click="switchGame(key as GameTableGame)"
+                :class="`flex-1 py-1.5 px-2 text-[11px] font-bold rounded-lg transition-all font-heading ${
+                  gameState.game === key
+                    ? 'bg-amber-300 text-slate-950 border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]'
+                    : 'text-slate-700 hover:text-slate-950'
+                }`"
+              >
+                {{ spec.label }}
+              </button>
+            </div>
+
+            <div class="flex items-center justify-between w-full max-w-sm bg-amber-50 px-4 py-2.5 rounded-xl border-2 border-slate-900 shadow-[3px_3px_0px_0px_#0f172a]">
+              <div class="text-xs font-extrabold font-heading flex items-center gap-2">
+                <span v-if="gameState.winner === 'Draw'" class="text-slate-700">It's a Draw!</span>
+                <template v-else-if="gameState.winner">
+                  <span
+                    :class="`w-4 h-4 rounded-full border-2 border-slate-900 ${gameState.winner === 'X' ? 'bg-indigo-500' : 'bg-emerald-400'}`"
+                  />
+                  <span class="text-emerald-700">Winner! 🎉</span>
+                </template>
+                <template v-else>
+                  <span class="text-slate-900">Turn:</span>
+                  <span
+                    :class="`w-4 h-4 rounded-full border-2 border-slate-900 ${gameState.turn === 'X' ? 'bg-indigo-500' : 'bg-emerald-400'}`"
+                  />
+                </template>
               </div>
               <button
                 type="button"
@@ -413,108 +465,47 @@ function handleAddDeskStickyNote() {
               </button>
             </div>
 
-            <div class="grid grid-cols-3 gap-3 bg-amber-100 p-4 rounded-2xl border-3 border-slate-900 shadow-[6px_6px_0px_0px_#0f172a]">
+            <!-- One grid drives both games; only the column count and cell size differ. -->
+            <div
+              class="grid gap-1.5 sm:gap-2 bg-amber-100 p-3 rounded-2xl border-3 border-slate-900 shadow-[6px_6px_0px_0px_#0f172a]"
+              :style="{ gridTemplateColumns: `repeat(${gameSpec.cols}, minmax(0, 1fr))` }"
+              @mouseleave="handleCellHover(null)"
+            >
               <button
-                v-for="(cell, idx) in object.data.gameState.board"
+                v-for="(cell, idx) in gameState.board"
                 :key="idx"
                 type="button"
                 @click="handleCellClick(idx)"
-                :class="`w-20 h-20 rounded-xl border-2 border-slate-900 font-black text-3xl flex items-center justify-center transition-all pixel-btn font-press-start ${
+                @mouseenter="handleCellHover(idx)"
+                :class="`border-2 border-slate-900 font-black flex items-center justify-center transition-all font-press-start ${
+                  gameSpec.gravity
+                    ? 'w-9 h-9 sm:w-11 sm:h-11 rounded-full'
+                    : 'w-20 h-20 text-3xl rounded-xl pixel-btn'
+                } ${
                   cell === 'X'
-                    ? 'bg-indigo-500 text-white shadow-[2px_2px_0px_0px_#0f172a]'
+                    ? 'bg-indigo-500 text-white'
                     : cell === 'O'
-                    ? 'bg-emerald-400 text-slate-950 shadow-[2px_2px_0px_0px_#0f172a]'
+                    ? 'bg-emerald-400 text-slate-950'
+                    : previewIndex === idx
+                    ? gameState.turn === 'X'
+                      ? 'bg-indigo-200'
+                      : 'bg-emerald-200'
                     : 'bg-white text-slate-900 hover:bg-slate-100'
                 }`"
               >
-                {{ cell }}
-              </button>
-            </div>
-          </div>
-        </template>
-
-        <!-- Jukebox Radio -->
-        <template v-else-if="object.type === 'jukebox'">
-          <div class="flex flex-col items-center gap-6 py-4">
-            <div class="w-24 h-24 rounded-2xl bg-indigo-500 border-3 border-slate-900 flex items-center justify-center shadow-[6px_6px_0px_0px_#0f172a] animate-bounce">
-              <Music class="w-10 h-10 text-white" />
-            </div>
-
-            <div class="text-center">
-              <h4 class="text-lg font-extrabold text-slate-900 font-heading">{{ TRACKS[currentTrack].title }}</h4>
-              <p class="text-xs text-indigo-700 font-bold mt-1">Retro Pixel Jukebox</p>
-            </div>
-
-            <div class="flex items-center gap-4">
-              <button
-                type="button"
-                @click="isPlaying = !isPlaying"
-                class="w-12 h-12 rounded-xl bg-amber-300 hover:bg-amber-400 border-2 border-slate-900 text-slate-950 flex items-center justify-center transition-all pixel-btn shadow-[3px_3px_0px_0px_#0f172a]"
-              >
-                <Pause v-if="isPlaying" class="w-6 h-6 text-slate-900" />
-                <Play v-else class="w-6 h-6 text-slate-900 ml-0.5" />
+                <!-- 4-to-Win reads as discs dropped into holes, so the cell *is* the disc.
+                     Noughts and crosses keep their glyphs. -->
+                <template v-if="!gameSpec.gravity">{{ cell }}</template>
               </button>
             </div>
 
-            <div class="w-full bg-amber-50 rounded-xl p-4 border-2 border-slate-900 flex flex-col gap-2 shadow-[3px_3px_0px_0px_#0f172a]">
-              <span class="text-xs font-bold text-slate-900 uppercase tracking-wider font-heading">Playlist</span>
-              <button
-                v-for="(track, idx) in TRACKS"
-                :key="idx"
-                type="button"
-                @click="() => {
-                  currentTrack = idx;
-                  isPlaying = true;
-                }"
-                :class="`w-full p-3 rounded-lg text-left text-xs flex items-center justify-between border-2 border-slate-900 transition-all pixel-btn font-bold ${
-                  currentTrack === idx
-                    ? 'bg-amber-300 text-slate-950 font-heading shadow-[2px_2px_0px_0px_#0f172a]'
-                    : 'bg-white text-slate-900 hover:bg-slate-100'
-                }`"
-              >
-                <span>{{ track.title }}</span>
-                <span class="font-heading">{{ track.duration }}</span>
-              </button>
-            </div>
-          </div>
-        </template>
-
-        <!-- TV Presentation Screen -->
-        <template v-else-if="object.type === 'tv'">
-          <div class="flex flex-col gap-4">
-            <div class="aspect-video w-full rounded-xl overflow-hidden bg-black border-3 border-slate-900 shadow-[6px_6px_0px_0px_#0f172a]">
-              <iframe
-                :src="object.data?.videoUrl || 'https://www.youtube.com/embed/jfKfPfyJRdk'"
-                title="Presentation Screen"
-                class="w-full h-full"
-                allowFullScreen
-              />
-            </div>
-            <p class="text-xs text-slate-700 font-bold text-center">
-              Everyone standing near the Presentation Screen sees this media broadcast.
+            <p v-if="gameSpec.gravity" class="text-[11px] text-slate-600 font-bold text-center">
+              Drop four in a row - across, down or diagonally.
             </p>
           </div>
         </template>
 
-        <!-- Coffee Espresso Machine -->
-        <template v-else-if="object.type === 'coffee_machine'">
-          <div class="flex flex-col items-center gap-5 py-6 text-center">
-            <div class="w-20 h-20 bg-amber-200 rounded-2xl flex items-center justify-center text-4xl border-3 border-slate-900 shadow-[4px_4px_0px_0px_#0f172a]">☕</div>
-            <h4 class="text-lg font-extrabold text-slate-900 font-heading">Fresh Espresso Station</h4>
-            <p class="text-xs text-slate-700 font-bold max-w-sm leading-relaxed">
-              Take a break from work and grab a hot espresso before your next team meeting.
-            </p>
-            <button
-              type="button"
-              @click="handleBrew"
-              class="bg-amber-300 hover:bg-amber-400 border-2 border-slate-900 text-slate-950 px-6 py-3 rounded-xl font-bold text-xs transition-all pixel-btn font-heading"
-            >
-              {{ brewing ? 'Brewing Espresso... ☕' : 'Brew Hot Coffee' }}
-            </button>
-          </div>
-        </template>
-
-        <!-- Personal User Desk / Workstation Modal -->
+                                <!-- Personal User Desk / Workstation Modal -->
         <template v-else-if="object.type === 'desk' || object.type === 'computer'">
           <div class="flex flex-col gap-5 py-2">
             <!-- Desk Ownership Status Banner -->
@@ -553,7 +544,7 @@ function handleAddDeskStickyNote() {
                   <UserCheck class="w-4 h-4" /> Claim Desk
                 </button>
                 <button
-                  v-else-if="object.data?.deskState?.claimedByUserId === currentUser.id"
+                  v-else-if="canManageDesk(currentUser, object.data?.deskState)"
                   type="button"
                   @click="handleUnclaimDesk"
                   class="w-full sm:w-auto bg-rose-200 hover:bg-rose-300 text-rose-950 border-2 border-slate-900 px-3.5 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 pixel-btn font-heading"
@@ -570,7 +561,7 @@ function handleAddDeskStickyNote() {
             </div>
 
             <!-- Desk Customization Options (if owned by current user or unclaimed) -->
-            <div v-if="!object.data?.deskState?.claimedByUserId || object.data?.deskState?.claimedByUserId === currentUser.id" class="p-4 bg-slate-50 border-2 border-slate-900 rounded-2xl flex flex-col gap-3">
+            <div v-if="canManageDesk(currentUser, object.data?.deskState)" class="p-4 bg-slate-50 border-2 border-slate-900 rounded-2xl flex flex-col gap-3">
               <span class="text-xs font-black text-slate-900 font-heading uppercase tracking-wider">
                 ⚙️ Customize Workstation
               </span>
@@ -661,9 +652,20 @@ function handleAddDeskStickyNote() {
                   class="p-3 bg-amber-100 border-2 border-slate-900 rounded-xl flex flex-col justify-between shadow-[2px_2px_0px_0px_#0f172a]"
                 >
                   <p class="text-xs font-extrabold text-slate-950 font-heading whitespace-pre-wrap">{{ note.text }}</p>
-                  <div class="mt-2 pt-1 border-t border-slate-900/30 flex items-center justify-between text-[10px] font-bold text-slate-700">
-                    <span>— {{ note.author }}</span>
-                    <span>{{ new Date(note.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</span>
+                  <div class="mt-2 pt-1 border-t border-slate-900/30 flex items-center justify-between gap-1 text-[10px] font-bold text-slate-700">
+                    <span class="truncate">— {{ note.author }}</span>
+                    <div class="flex items-center gap-1 shrink-0">
+                      <span>{{ new Date(note.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</span>
+                      <button
+                        v-if="canDeleteNote(currentUser, note, object.data?.deskState)"
+                        type="button"
+                        @click="handleDeleteNote(note.id)"
+                        title="Delete this note"
+                        class="p-0.5 rounded border-2 border-slate-900 bg-white/70 hover:bg-rose-400 text-slate-900 transition-colors"
+                      >
+                        <Trash2 class="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

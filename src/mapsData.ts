@@ -1,4 +1,5 @@
 import { GridMap, TileType, MapObject, PrivateZone } from './types';
+import { createGameState } from './lib/gameTable';
 
 export function createDefaultOfficeMap(): GridMap {
   const width = 32;
@@ -207,60 +208,18 @@ export function createDefaultOfficeMap(): GridMap {
     { id: 'plant_2', type: 'plant', name: 'Fiddle Leaf Fig', x: 21, y: 1, width: 1, height: 1, isBlocking: true },
     { id: 'plant_3', type: 'plant', name: 'Terrace Palm', x: 22, y: 12, width: 1, height: 1, isBlocking: true },
 
-    // Coffee Machine in Lounge
-    { id: 'coffee_1', type: 'coffee_machine', name: 'Espresso Bar', x: 2, y: 12, width: 2, height: 1, isBlocking: true },
-
-    // Jukebox / Lofi Radio
-    { 
-      id: 'jukebox_1', 
-      type: 'jukebox', 
-      name: 'Lofi Audio Player', 
-      x: 1, 
-      y: 15, 
-      width: 1, 
-      height: 2, 
-      isBlocking: true,
-      data: {
-        jukeboxState: {
-          isPlaying: false,
-          trackIndex: 0,
-          trackName: 'Relaxing Chill Beats'
-        }
-      }
-    },
-
     // Arcade Game Table
-    { 
-      id: 'game_1', 
-      type: 'game_table', 
-      name: 'Arcade Tic-Tac-Toe', 
-      x: 6, 
-      y: 15, 
-      width: 2, 
-      height: 2, 
-      isBlocking: true,
-      data: {
-        gameState: {
-          board: Array(9).fill(null),
-          turn: 'X',
-          winner: null,
-          players: {}
-        }
-      }
-    },
-
-    // Presentation TV / Screen
     {
-      id: 'tv_1',
-      type: 'tv',
-      name: 'Presentation Screen',
-      x: 25,
-      y: 1,
-      width: 4,
-      height: 1,
+      id: 'game_1',
+      type: 'game_table',
+      name: 'Arcade Table',
+      x: 6,
+      y: 15,
+      width: 2,
+      height: 2,
       isBlocking: true,
       data: {
-        videoUrl: 'https://www.youtube.com/embed/jfKfPfyJRdk'
+        gameState: createGameState()
       }
     }
   ];
@@ -308,7 +267,6 @@ export function createBeachRetreatMap(): GridMap {
       { id: "b_plant1", type: "plant", name: "Palm Tree", x: 2, y: 2, width: 2, height: 2, isBlocking: true },
       { id: "b_table1", type: "conference_table", name: "Conference Table", x: 8, y: 4, width: 3, height: 2, isBlocking: true },
       { id: 'b_wb1', type: 'whiteboard', name: 'Sunset Brainstorm', x: 15, y: 2, width: 3, height: 1, isBlocking: true, data: { whiteboardStrokes: [] } },
-      { id: 'b_juke1', type: 'jukebox', name: 'Ocean Waves Audio', x: 22, y: 3, width: 1, height: 2, isBlocking: true, data: { jukeboxState: { isPlaying: false, trackIndex: 1, trackName: 'Ocean Waves' } } }
     ],
     privateZones: [
       { id: 'z_deck', name: 'Sun Deck Pod', color: 'rgba(234, 179, 8, 0.2)', x: 6, y: 2, width: 8, height: 6 }

@@ -133,9 +133,6 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
   { type: "whiteboard", name: "Whiteboard", icon: "📋", width: 2, height: 1, isBlocking: true },
   { type: "sticky_notes", name: "Notice Board", icon: "📌", width: 2, height: 1, isBlocking: true },
   { type: "game_table", name: "Tic-Tac-Toe Table", icon: "🎮", width: 2, height: 2, isBlocking: true },
-  { type: "jukebox", name: "Jukebox Radio", icon: "📻", width: 1, height: 1, isBlocking: true },
-  { type: "tv", name: "TV Screen", icon: "📺", width: 2, height: 1, isBlocking: true },
-  { type: "coffee_machine", name: "Espresso Bar", icon: "☕", width: 1, height: 1, isBlocking: true },
   { type: "bookshelf", name: "Bookshelf", icon: "📚", width: 1, height: 2, isBlocking: true },
 ];
 </script>

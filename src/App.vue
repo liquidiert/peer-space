@@ -25,6 +25,7 @@ import type {
 import { createDefaultOfficeMap } from './mapsData';
 import { useWebRTCProximity } from './composables/useWebRTCProximity';
 import { findPathAStar, occupiedKeySet } from './lib/pathfinding';
+import type { GameTableGame } from './lib/gameTable';
 
 const socket = ref<Socket | null>(null);
 const hasJoined = ref(false);
@@ -737,6 +738,15 @@ function showChimeToast(fromName: string) {
   }, 5000);
 }
 
+/** Generic transient message, reusing the chime toast's slot. */
+function showNoticeToast(message: string) {
+  chimeToast.value = message;
+  if (chimeToastTimeout) clearTimeout(chimeToastTimeout);
+  chimeToastTimeout = window.setTimeout(() => {
+    chimeToast.value = null;
+  }, 4000);
+}
+
 function handleMoveToDesk() {
   const desk = currentMap.value?.objects.find(
     (obj) => obj.type === 'desk' && obj.data?.deskState?.claimedByUserId === currentUser.value.id
@@ -848,6 +858,29 @@ function handleClearWhiteboard(payload: { objectId: string }) {
   }
 }
 
+const NOTE_DELETE_REASONS: Record<string, string> = {
+  not_allowed: 'You can only delete your own notes.',
+  no_note: 'That note is already gone.',
+};
+
+function handleDeleteNote(payload: { objectId: string; noteId: string }) {
+  if (!socket.value) return;
+  // Acknowledged rather than fire-and-forget. Every server-side refusal is a silent return,
+  // so without this a rejected delete and a server that has no such handler at all both look
+  // exactly like "the button does nothing".
+  socket.value
+    .timeout(5000)
+    .emit('object:delete_note', payload, (err: unknown, res?: { ok: boolean; reason?: string }) => {
+      if (err) {
+        showNoticeToast('Could not reach the server - the note was not deleted.');
+        return;
+      }
+      if (!res?.ok) {
+        showNoticeToast(NOTE_DELETE_REASONS[res?.reason ?? ''] || 'That note could not be deleted.');
+      }
+    });
+}
+
 function handleAddNote(payload: { objectId: string; note: StickyNote }) {
   if (socket.value) {
     socket.value.emit('object:add_note', payload);
@@ -860,7 +893,7 @@ function handleMakeGameMove(payload: { objectId: string; index: number; symbol: 
   }
 }
 
-function handleResetGame(payload: { objectId: string }) {
+function handleResetGame(payload: { objectId: string; game?: GameTableGame }) {
   if (socket.value) {
     socket.value.emit('object:game_reset', payload);
   }
@@ -901,10 +934,19 @@ function handleRemoveZone(zoneId: string) {
   }
 }
 
-function handleUpdateDesk(payload: { objectId: string; deskState: any }) {
-  if (socket.value) {
-    socket.value.emit('object:desk_updated', payload);
-  }
+// One emit per intent. The server takes no desk state from us at all - it derives the
+// claimant from the connection and validates equipment itself - so these carry only which
+// desk, and for settings, what to set.
+function handleDeskClaim(payload: { objectId: string }) {
+  socket.value?.emit('object:desk_claim', payload);
+}
+
+function handleDeskRelease(payload: { objectId: string }) {
+  socket.value?.emit('object:desk_release', payload);
+}
+
+function handleDeskSettings(payload: { objectId: string; statusNote: string; equipment: string }) {
+  socket.value?.emit('object:desk_settings', payload);
 }
 
 function handlePlaceObject(newObj: MapObject) {
@@ -1305,9 +1347,12 @@ function handleToggleBuilderMode() {
       @sendWhiteboardStroke="handleSendWhiteboardStroke"
       @clearWhiteboard="handleClearWhiteboard"
       @addNote="handleAddNote"
+      @deleteNote="handleDeleteNote"
       @makeGameMove="handleMakeGameMove"
       @resetGame="handleResetGame"
-      @updateDesk="handleUpdateDesk"
+      @deskClaim="handleDeskClaim"
+      @deskRelease="handleDeskRelease"
+      @deskSettings="handleDeskSettings"
     />
   </div>
 </template>

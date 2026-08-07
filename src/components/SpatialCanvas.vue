@@ -1181,68 +1181,6 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
       break;
     }
 
-    case 'jukebox': {
-      const body: Ramp = { dark: '#8e4256', base: '#b85f76', light: ACCENT.pink, hi: '#e9a9c0' };
-      // Arched top
-      fx(ctx, ox, oy, 2, 1, W - 4, 2, body.light);
-      fx(ctx, ox, oy, 1, 3, W - 2, H - 5, body.base);
-      ox1(ctx, ox, oy, 1, 3, W - 2, H - 5, OUTLINE);
-      ox1(ctx, ox, oy, 2, 1, W - 4, 3, OUTLINE);
-      // Glowing arch light
-      fx(ctx, ox, oy, 3, 2, W - 6, 1, ACCENT.yellow);
-      // Speaker grille
-      fx(ctx, ox, oy, 3, 5, W - 6, 5, body.dark);
-      for (let i = 4; i < W - 4; i += 2) {
-        fx(ctx, ox, oy, i, 5, 1, 5, '#4a2733');
-      }
-      // Control buttons
-      fx(ctx, ox, oy, 4, 11, 2, 2, ACCENT.teal);
-      fx(ctx, ox, oy, 7, 11, 2, 2, ACCENT.yellow);
-      fx(ctx, ox, oy, 10, 11, 2, 2, ACCENT.lime);
-      break;
-    }
-
-    case 'tv': {
-      // Wall-mounted flat screen
-      shadedBlock(ctx, ox, oy, 0, 1, W, H - 4, PALETTE.steel);
-      fx(ctx, ox, oy, 2, 3, W - 4, H - 8, PALETTE.water.dark);
-      // Screen content + scanlines
-      fx(ctx, ox, oy, 3, 4, W - 6, 2, ACCENT.sky);
-      fx(ctx, ox, oy, 3, 7, Math.max(2, W - 10), 2, ACCENT.sky);
-      for (let j = 4; j < H - 5; j += 2) {
-        fx(ctx, ox, oy, 2, j, W - 4, 1, 'rgba(12, 74, 110, 0.35)');
-      }
-      fx(ctx, ox, oy, 2, 3, W - 4, 1, ACCENT.sky); // glare
-      // Stand
-      shadedBlock(ctx, ox, oy, Math.floor(W / 2) - 2, H - 3, 4, 1, PALETTE.steel);
-      shadedBlock(ctx, ox, oy, Math.floor(W / 2) - 4, H - 2, 8, 1, PALETTE.steel);
-      break;
-    }
-
-    case 'coffee_machine': {
-      const body: Ramp = { dark: '#4a3122', base: '#6d4a33', light: '#8d6446', hi: '#b28a64' };
-      const steel = PALETTE.steel;
-
-      // Tall body with a chrome upper deck, so the machine silhouette is obvious.
-      shadedBlock(ctx, ox, oy, 1, 0, 14, 12, body);
-      shadedBlock(ctx, ox, oy, 2, 1, 12, 3, steel); // chrome top / bean hopper
-      fx(ctx, ox, oy, 3, 2, 4, 1, ACCENT.green); // ready lamp
-      fx(ctx, ox, oy, 11, 2, 2, 1, ACCENT.red); // power lamp
-
-      // Group head with the portafilter below it.
-      shadedBlock(ctx, ox, oy, 5, 5, 6, 2, steel);
-      fx(ctx, ox, oy, 7, 7, 2, 1, '#4a3020'); // espresso stream
-
-      // Cup sitting on the drip tray.
-      shadedBlock(ctx, ox, oy, 6, 8, 4, 3, PALETTE.marble);
-      fx(ctx, ox, oy, 7, 9, 2, 1, '#6b4526'); // coffee surface
-      fx(ctx, ox, oy, 10, 9, 1, 1, PALETTE.marble.dark); // handle
-
-      shadedBlock(ctx, ox, oy, 3, 12, 10, 2, steel); // drip tray
-      for (let i = 4; i < 12; i += 2) fx(ctx, ox, oy, i, 12, 1, 1, steel.dark); // tray grate
-      break;
-    }
-
     case 'bookshelf': {
       shadedBlock(ctx, ox, oy, 0, 0, W, H - 1, PALETTE.darkwood);
       // Two shelves of varied book spines

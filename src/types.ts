@@ -59,10 +59,7 @@ export type ObjectType =
   | 'whiteboard'
   | 'sticky_notes'
   | 'game_table'
-  | 'jukebox'
-  | 'tv'
   | 'bookshelf'
-  | 'coffee_machine'
   | 'door';
 
 export interface DeskState {
@@ -88,8 +85,6 @@ export interface MapObject {
     whiteboardStrokes?: WhiteboardStroke[];
     notes?: StickyNote[];
     gameState?: GameTableState;
-    jukeboxState?: JukeboxState;
-    videoUrl?: string;
     deskState?: DeskState;
   };
 }
@@ -103,13 +98,20 @@ export interface WhiteboardStroke {
 
 export interface StickyNote {
   id: string;
+  /** Display name, for showing on the note. Not usable for permissions - names are neither
+   *  unique nor verified, so deletion is authorised against authorId instead. */
   author: string;
+  /** Stable id of whoever wrote it. Optional: notes posted before this existed have none. */
+  authorId?: string;
   text: string;
   color: string;
   createdAt: number;
 }
 
 export interface GameTableState {
+  /** Which game the table is set to; see lib/gameTable for the board geometry and rules. */
+  game: 'tictactoe' | 'connect4';
+  /** Row-major, `cols * rows` cells. Index 0 is the top-left. */
   board: (string | null)[];
   turn: 'X' | 'O';
   winner: string | null;
@@ -117,12 +119,6 @@ export interface GameTableState {
     X?: { id: string; name: string };
     O?: { id: string; name: string };
   };
-}
-
-export interface JukeboxState {
-  isPlaying: boolean;
-  trackIndex: number;
-  trackName: string;
 }
 
 export interface PrivateZone {
