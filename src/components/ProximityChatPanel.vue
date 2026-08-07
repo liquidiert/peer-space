@@ -297,7 +297,7 @@ function handleSend() {
             >
               <span class="text-[10px] text-slate-700 font-extrabold mb-0.5 px-1 font-heading">{{ msg.senderName }}</span>
               <div
-                :class="`p-2.5 rounded-xl text-xs leading-relaxed border-2 border-slate-900 font-bold shadow-[2px_2px_0px_0px_#0f172a] ${
+                :class="`select-text p-2.5 rounded-xl text-xs leading-relaxed border-2 border-slate-900 font-bold shadow-[2px_2px_0px_0px_#0f172a] ${
                   msg.senderId === currentUser.socketId
                     ? 'bg-amber-300 text-slate-950'
                     : 'bg-white text-slate-900'

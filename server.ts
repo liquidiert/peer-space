@@ -244,6 +244,21 @@ async function startServer() {
       // and must never be trusted directly (that was previously a trivial privilege-escalation
       // hole: any client could just send { isAdmin: true }).
       const session = verifySessionToken(payload.sessionToken);
+
+      // A token that was *supplied but did not verify* means the client is holding a stale
+      // login - either past the 12h TTL, or signed with a secret from a previous server boot
+      // (which is what happens on every restart whenever SESSION_SECRET is unset). Silently
+      // treating that as "guest" is what made admin look broken rather than expired: the
+      // client still shows the cached Admin badge it persisted to localStorage, while every
+      // admin handler here rejects them. Tell the client so it can re-authenticate instead.
+      if (payload.sessionToken && !session) {
+        console.warn(
+          `[auth] Stale session token from ${socket.id} - expired, or signed with a previous ` +
+            `SESSION_SECRET. Asking the client to sign in again.`
+        );
+        socket.emit('auth:expired');
+      }
+
       const isAdmin = session ? session.isAdmin : false;
       const email = session ? session.email : undefined;
       const displayName = session?.name || payload.name || `Guest_${socket.id.substring(0, 4)}`;

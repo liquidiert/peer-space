@@ -88,6 +88,9 @@ const authenticatedUser = ref<{ name: string; email?: string; isAdmin?: boolean;
   loadSavedAuthUser()
 );
 
+/** Explains why the login screen came back, when it came back on its own. */
+const authNotice = ref<string | null>(null);
+
 watch(
   authenticatedUser,
   (newVal) => {
@@ -333,6 +336,15 @@ onMounted(() => {
   const sk = io();
   socket.value = sk;
 
+  sk.on('auth:expired', () => {
+    // Our stored login is no longer valid server-side, so we are not admin - however
+    // convincing the cached badge looks. Clear it and ask for a fresh sign-in rather than
+    // leaving the UI claiming privileges every server-side handler will refuse.
+    authenticatedUser.value = null;
+    hasJoined.value = false;
+    authNotice.value = 'Your session expired. Please sign in again to restore your access.';
+  });
+
   sk.on('init:state', (data: { currentUser: User; currentMap: GridMap; users: User[] }) => {
     currentUser.value = data.currentUser;
     currentMap.value = data.currentMap;
@@ -558,6 +570,7 @@ onMounted(() => {
     if (event.data?.type === 'OAUTH_AUTH_SUCCESS' && event.data?.user) {
       const u = event.data.user;
       authenticatedUser.value = u;
+      authNotice.value = null;
       if (u.name) {
         userNameInput.value = u.name;
       }
@@ -953,6 +966,16 @@ function handleToggleBuilderMode() {
             @update:avatar="handleUpdateAvatar"
             :showClose="false"
           />
+        </div>
+
+        <!-- Expired-session notice: without this, being bounced back to the login screen
+             mid-session looks like a random logout rather than an expired token. -->
+        <div
+          v-if="authNotice"
+          class="mb-3 w-full p-3 bg-rose-200 border-2 border-slate-900 rounded-xl text-xs font-extrabold text-slate-900 shadow-[2px_2px_0px_0px_#0f172a] flex items-center gap-2 text-left"
+        >
+          <ShieldCheck class="w-4 h-4 text-rose-700 shrink-0" />
+          <span>{{ authNotice }}</span>
         </div>
 
         <!-- Social Keycloak / Google Auth Login & Space Join Section -->

@@ -1267,12 +1267,12 @@ function renderUser(
   isGhost = false
 ) {
   const px = displayPos.x * CELL_SIZE + CELL_SIZE / 2;
-  let py = displayPos.y * CELL_SIZE + CELL_SIZE / 2;
+  const py = displayPos.y * CELL_SIZE + CELL_SIZE / 2;
 
-  // Rhythmic walking bounce
-  if (displayPos.isMoving) {
-    py -= Math.abs(Math.sin(Date.now() / 90)) * 2;
-  }
+  // The walking bounce lives in the sprite now, locked to the step it belongs to. It used
+  // to be a sine applied to py here, which moved the body by fractional pixels - and since
+  // the sprite origin has to be rounded to stay crisp, that surfaced as an irregular 1-2px
+  // jitter rather than a bounce.
 
   ctx.save();
 
