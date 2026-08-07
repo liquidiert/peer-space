@@ -1058,7 +1058,7 @@ function handleToggleBuilderMode() {
     >
       <div
         v-if="showUpdateToast"
-        class="fixed bottom-4 right-4 z-[60] bg-indigo-500 text-white border-3 border-slate-900 px-4 py-2.5 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] font-heading font-extrabold text-xs flex items-center gap-3 max-w-xs"
+        class="fixed bottom-4 right-4 z-60 bg-indigo-500 text-white border-3 border-slate-900 px-4 py-2.5 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] font-heading font-extrabold text-xs flex items-center gap-3 max-w-xs"
       >
         <RefreshCw class="w-4 h-4 shrink-0" />
         <span class="flex-1">A new version is ready</span>

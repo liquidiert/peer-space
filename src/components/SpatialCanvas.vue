@@ -1418,15 +1418,22 @@ function renderCanvas() {
       ctx.fillText(labelText, zx + zw / 2, zy + zh - 7);
     } else {
       // Zone Title Tag Box
+      ctx.font = 'bold 11px "Silkscreen", cursive';
+      const zoneLabel = `🔒 ${zone.name}`;
+      const textWidth = ctx.measureText(zoneLabel).width;
+      const boxWidth = Math.max(textWidth + 16, 60);
+      const boxHeight = 22;
+
       ctx.fillStyle = '#fef3c7';
-      ctx.fillRect(zx + 8, zy + 8, zone.name.length * 10 + 28, 22);
+      ctx.fillRect(zx + 8, zy + 8, boxWidth, boxHeight);
       ctx.strokeStyle = '#0f172a';
       ctx.lineWidth = 2;
-      ctx.strokeRect(zx + 8, zy + 8, zone.name.length * 10 + 28, 22);
+      ctx.strokeRect(zx + 8, zy + 8, boxWidth, boxHeight);
 
-      ctx.font = 'bold 11px "Silkscreen", cursive';
       ctx.fillStyle = '#0f172a';
-      ctx.fillText(`🔒 ${zone.name}`, zx + 14, zy + 22);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(zoneLabel, zx + 8 + boxWidth / 2, zy + 8 + boxHeight / 2 + 1);
     }
   });
 
@@ -1655,8 +1662,8 @@ watch([() => props.currentUser, () => props.users, () => props.currentMap, () =>
   <div
     ref="scrollContainerRef"
     :class="[
-      'w-full h-full overflow-auto custom-scrollbar',
-      isMobile ? 'block' : 'flex items-center justify-center p-4',
+      'w-full h-full overflow-auto custom-scrollbar p-4',
+      isMobile ? 'block' : 'flex justify-center items-start',
     ]"
   >
     <div class="inline-block relative border-4 border-slate-900 shadow-[8px_8px_0px_0px_#020617] bg-slate-900 overflow-hidden rounded-2xl pixel-rendering">
