@@ -51,10 +51,10 @@ export type TileType =
   | 'water';
 
 export type ObjectType = 
-  | 'desk'
-  | 'chair'
-  | 'couch'
-  | 'plant'
+  | "desk"
+  | "chair"
+  | "conference_table"
+  | "plant"
   | 'computer'
   | 'whiteboard'
   | 'sticky_notes'

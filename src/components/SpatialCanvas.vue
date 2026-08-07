@@ -1025,27 +1025,54 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
       break;
     }
 
-    case 'couch': {
-      const p = PALETTE.indigo;
-      // Darker backrest behind lighter seat cushions - same trick as the chair, so the
-      // parts separate without needing outlines everywhere.
-      const back: Ramp = { ...p, base: p.dark, light: p.base };
+    case "conference_table": {
+      const tableP = PALETTE.darkwood;
+      const steelP = PALETTE.steel;
+      const chairP = PALETTE.indigo;
 
-      shadedBlock(ctx, ox, oy, 0, 1, W, 5, back); // backrest
-      fx(ctx, ox, oy, 2, 3, W - 4, 1, p.base); // backrest seam
+      // 1. Chairs around top and bottom perimeter
+      const chairCount = Math.max(2, Math.floor(W / 12));
+      const spacing = W / chairCount;
 
-      shadedBlock(ctx, ox, oy, 0, 5, 3, H - 6, back); // armrests
-      shadedBlock(ctx, ox, oy, W - 3, 5, 3, H - 6, back);
-
-      const seatW = W - 6;
-      const cushions = Math.max(2, Math.round(seatW / 8));
-      const cw = Math.floor(seatW / cushions);
-      for (let i = 0; i < cushions; i++) {
-        const cxs = 3 + i * cw;
-        const cwidth = i === cushions - 1 ? seatW - i * cw : cw;
-        shadedBlock(ctx, ox, oy, cxs, 6, cwidth, H - 8, p);
-        fx(ctx, ox, oy, cxs + 1, 7, cwidth - 2, 1, p.hi); // cushion piping
+      // Top chairs
+      for (let i = 0; i < chairCount; i++) {
+        const cx = Math.floor(i * spacing + spacing / 2 - 3);
+        shadedBlock(ctx, ox, oy, cx, 0, 6, 3, chairP);
+        fx(ctx, ox, oy, cx + 1, 1, 4, 1, chairP.hi);
       }
+
+      // Bottom chairs
+      for (let i = 0; i < chairCount; i++) {
+        const cx = Math.floor(i * spacing + spacing / 2 - 3);
+        shadedBlock(ctx, ox, oy, cx, H - 3, 6, 3, chairP);
+        fx(ctx, ox, oy, cx + 1, H - 2, 4, 1, chairP.hi);
+      }
+
+      // 2. Table main body
+      const marginX = 2;
+      const marginY = 4;
+      const tw = W - marginX * 2;
+      const th = H - marginY * 2;
+
+      // Outer shadow & table base frame
+      fx(ctx, ox, oy, marginX, marginY + 1, tw, th, OUTLINE);
+
+      // Polished Darkwood Tabletop with bevel edges
+      shadedBlock(ctx, ox, oy, marginX, marginY, tw, th, tableP);
+
+      // Inlay strip / cable management box in table center
+      if (tw > 12 && th > 6) {
+        const boxW = Math.floor(tw * 0.5);
+        const boxH = Math.floor(th * 0.35);
+        const boxX = marginX + Math.floor((tw - boxW) / 2);
+        const boxY = marginY + Math.floor((th - boxH) / 2);
+        shadedBlock(ctx, ox, oy, boxX, boxY, boxW, boxH, steelP);
+        fx(ctx, ox, oy, boxX + 1, boxY + 1, boxW - 2, boxH - 2, steelP.dark);
+      }
+
+      // Tabletop edge bevel highlight
+      fx(ctx, ox, oy, marginX + 1, marginY + 1, tw - 2, 1, tableP.hi);
+      fx(ctx, ox, oy, marginX + 1, marginY + 1, 1, th - 2, tableP.light);
       break;
     }
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { Hammer, Trash2, Layers, Box, X, Shield, Plus, Lock, Move } from "lucide-vue-next";
+import { Hammer, Trash2, Layers, Box, X, Shield, Plus, Lock, Move, GripHorizontal } from "lucide-vue-next";
 import type { TileType, MapObject, ObjectType, PrivateZone } from "../types";
 
 const props = defineProps<{
@@ -22,22 +22,67 @@ const emit = defineEmits<{
   (e: "removeZone", zoneId: string): void;
 }>();
 
-const activeCategory = ref<'build' | 'zones'>('build');
+const activeCategory = ref<"build" | "zones">("build");
+
+// Popup Dragging State
+const popupPos = ref({ x: 16, y: 64 });
+const isDraggingPopup = ref(false);
+const dragStart = ref({ x: 0, y: 0 });
+const initialPopupPos = ref({ x: 0, y: 0 });
+
+function startPopupDrag(e: PointerEvent) {
+  const target = e.target as HTMLElement;
+  if (target.closest("button") || target.closest("input")) return;
+
+  isDraggingPopup.value = true;
+  dragStart.value = { x: e.clientX, y: e.clientY };
+  initialPopupPos.value = { ...popupPos.value };
+
+  try {
+    (e.currentTarget as HTMLElement)?.setPointerCapture(e.pointerId);
+  } catch (_) {}
+}
+
+function onPopupDrag(e: PointerEvent) {
+  if (!isDraggingPopup.value) return;
+
+  const dx = e.clientX - dragStart.value.x;
+  const dy = e.clientY - dragStart.value.y;
+
+  let newX = initialPopupPos.value.x + dx;
+  let newY = initialPopupPos.value.y + dy;
+
+  const maxWidth = Math.max(10, window.innerWidth - 330);
+  const maxHeight = Math.max(10, window.innerHeight - 100);
+  newX = Math.max(10, Math.min(maxWidth, newX));
+  newY = Math.max(10, Math.min(maxHeight, newY));
+
+  popupPos.value = { x: newX, y: newY };
+}
+
+function stopPopupDrag(e: PointerEvent) {
+  if (isDraggingPopup.value) {
+    isDraggingPopup.value = false;
+    try {
+      (e.currentTarget as HTMLElement)?.releasePointerCapture(e.pointerId);
+    } catch (_) {}
+  }
+}
 
 // Form state for creating a new private audio zone
-const newZoneName = ref('');
+const newZoneName = ref("");
 const newZoneX = ref(1);
 const newZoneY = ref(1);
 const newZoneW = ref(6);
 const newZoneH = ref(6);
-const newZoneColor = ref('rgba(59, 130, 246, 0.2)');
+const newZoneColor = ref("rgba(59, 130, 246, 0.2)");
 
 const COLOR_PRESETS = [
-  { label: 'Blue', value: 'rgba(59, 130, 246, 0.22)', border: '#3b82f6' },
-  { label: 'Purple', value: 'rgba(168, 85, 247, 0.22)', border: '#a855f7' },
-  { label: 'Emerald', value: 'rgba(34, 197, 94, 0.22)', border: '#22c55e' },
-  { label: 'Amber', value: 'rgba(245, 158, 11, 0.22)', border: '#f59e0b' },
-  { label: 'Rose', value: 'rgba(244, 63, 94, 0.22)', border: '#f43f5e' },
+  { label: "Blue", value: "rgba(59, 130, 246, 0.22)", border: "#3b82f6" },
+  { label: "Purple", value: "rgba(168, 85, 247, 0.22)", border: "#a855f7" },
+  { label: "Emerald", value: "rgba(34, 197, 94, 0.22)", border: "#22c55e" },
+  { label: "Amber", value: "rgba(245, 158, 11, 0.22)", border: "#f59e0b" },
+  { label: "Rose", value: "rgba(244, 63, 94, 0.22)", border: "#f43f5e" },
 ];
 
 function handleCreateZone() {
@@ -51,59 +96,74 @@ function handleCreateZone() {
     width: Math.max(1, newZoneW.value),
     height: Math.max(1, newZoneH.value),
   };
-  emit('addZone', zone);
-  newZoneName.value = '';
+  emit("addZone", zone);
+  newZoneName.value = "";
 }
 
 const TILE_PRESETS: { type: TileType; label: string; color: string }[] = [
-  { type: 'floor_wood', label: 'Hardwood Floor', color: '#c89f6d' },
-  { type: 'floor_carpet', label: 'Office Carpet', color: '#48566a' },
-  { type: 'floor_tile', label: 'Marble Tile', color: '#f1f5f9' },
-  { type: 'floor_grass', label: 'Outdoor Grass', color: '#4d7c0f' },
-  { type: 'floor_concrete', label: 'Grey Concrete', color: '#64748b' },
-  { type: 'wall_brick', label: 'Brick Wall', color: '#b91c1c' },
-  { type: 'wall_wood', label: 'Wood Wall', color: '#854d0e' },
-  { type: 'water', label: 'Pool Water', color: '#06b6d4' },
+  { type: "floor_wood", label: "Hardwood Floor", color: "#c89f6d" },
+  { type: "floor_carpet", label: "Office Carpet", color: "#48566a" },
+  { type: "floor_tile", label: "Marble Tile", color: "#f1f5f9" },
+  { type: "floor_grass", label: "Outdoor Grass", color: "#4d7c0f" },
+  { type: "floor_concrete", label: "Grey Concrete", color: "#64748b" },
+  { type: "wall_brick", label: "Brick Wall", color: "#b91c1c" },
+  { type: "wall_wood", label: "Wood Wall", color: "#854d0e" },
+  { type: "water", label: "Pool Water", color: "#06b6d4" },
 ];
 
 const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: number; height: number; isBlocking: boolean; data?: any }[] = [
   {
-    type: 'desk',
-    name: 'Work Desk',
-    icon: '🖥️',
+    type: "desk",
+    name: "Work Desk",
+    icon: "🖥️",
     width: 2,
     height: 1,
     isBlocking: true,
     data: {
       deskState: {
-        deskLabel: 'Workstation Desk',
-        equipment: 'laptop',
+        deskLabel: "Workstation Desk",
+        equipment: "laptop",
         stickyNotes: [],
       },
     },
   },
-  { type: 'chair', name: 'Office Chair', icon: '🪑', width: 1, height: 1, isBlocking: false },
-  { type: 'couch', name: 'Lounge Sofa', icon: '🛋️', width: 2, height: 1, isBlocking: true },
-  { type: 'plant', name: 'Potted Plant', icon: '🌿', width: 1, height: 1, isBlocking: true },
-  { type: 'whiteboard', name: 'Whiteboard', icon: '📋', width: 2, height: 1, isBlocking: true },
-  { type: 'sticky_notes', name: 'Notice Board', icon: '📌', width: 2, height: 1, isBlocking: true },
-  { type: 'game_table', name: 'Tic-Tac-Toe Table', icon: '🎮', width: 2, height: 2, isBlocking: true },
-  { type: 'jukebox', name: 'Jukebox Radio', icon: '📻', width: 1, height: 1, isBlocking: true },
-  { type: 'tv', name: 'TV Screen', icon: '📺', width: 2, height: 1, isBlocking: true },
-  { type: 'coffee_machine', name: 'Espresso Bar', icon: '☕', width: 1, height: 1, isBlocking: true },
-  { type: 'bookshelf', name: 'Bookshelf', icon: '📚', width: 1, height: 2, isBlocking: true },
+  { type: "chair", name: "Office Chair", icon: "🪑", width: 1, height: 1, isBlocking: false },
+  { type: "conference_table", name: "Conference Table", icon: "🏢", width: 3, height: 2, isBlocking: true },
+  { type: "plant", name: "Potted Plant", icon: "🌿", width: 1, height: 1, isBlocking: true },
+  { type: "whiteboard", name: "Whiteboard", icon: "📋", width: 2, height: 1, isBlocking: true },
+  { type: "sticky_notes", name: "Notice Board", icon: "📌", width: 2, height: 1, isBlocking: true },
+  { type: "game_table", name: "Tic-Tac-Toe Table", icon: "🎮", width: 2, height: 2, isBlocking: true },
+  { type: "jukebox", name: "Jukebox Radio", icon: "📻", width: 1, height: 1, isBlocking: true },
+  { type: "tv", name: "TV Screen", icon: "📺", width: 2, height: 1, isBlocking: true },
+  { type: "coffee_machine", name: "Espresso Bar", icon: "☕", width: 1, height: 1, isBlocking: true },
+  { type: "bookshelf", name: "Bookshelf", icon: "📚", width: 1, height: 2, isBlocking: true },
 ];
 </script>
 
 <template>
-  <div v-if="isOpen" class="fixed top-16 left-4 w-80 bg-white border-3 border-slate-900 rounded-2xl p-4 shadow-[6px_6px_0px_0px_#0f172a] z-40 text-slate-900 flex flex-col gap-4 max-h-[80vh] overflow-y-auto custom-scrollbar">
-    <!-- Header -->
-    <div class="flex items-center justify-between border-b-2 border-slate-900 pb-2.5">
+  <div
+    v-if="isOpen"
+    :style="{ top: `${popupPos.y}px`, left: `${popupPos.x}px` }"
+    class="fixed w-80 bg-white border-3 border-slate-900 rounded-2xl p-4 shadow-[6px_6px_0px_0px_#0f172a] z-40 text-slate-900 flex flex-col gap-4 max-h-[80vh] overflow-y-auto custom-scrollbar select-none"
+  >
+    <!-- Header (Draggable Handle) -->
+    <div
+      @pointerdown="startPopupDrag"
+      @pointermove="onPopupDrag"
+      @pointerup="stopPopupDrag"
+      @pointercancel="stopPopupDrag"
+      class="flex items-center justify-between border-b-2 border-slate-900 pb-2.5 cursor-grab active:cursor-grabbing touch-none select-none bg-amber-50/60 -mx-4 -mt-4 p-4 rounded-t-xl"
+    >
       <div class="flex items-center gap-2">
+        <GripHorizontal class="w-5 h-5 text-slate-500" />
         <Hammer class="w-5 h-5 text-amber-600" />
         <h3 class="text-base font-extrabold text-slate-900 font-heading">Map Builder</h3>
       </div>
-      <button type="button" @click="emit('close')" class="p-1 rounded-lg bg-slate-100 border-2 border-slate-900 hover:bg-slate-200 text-slate-900 transition-colors pixel-btn">
+      <button
+        type="button"
+        @click="emit('close')"
+        class="p-1 rounded-lg bg-slate-100 border-2 border-slate-900 hover:bg-slate-200 text-slate-900 transition-colors pixel-btn shrink-0"
+      >
         <X class="w-4 h-4" />
       </button>
     </div>

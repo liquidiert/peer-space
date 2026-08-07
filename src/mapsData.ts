@@ -76,9 +76,9 @@ export function createDefaultOfficeMap(): GridMap {
     },
     // Meeting Room Table & Chairs
     {
-      id: 'couch_meeting',
-      type: 'couch',
-      name: 'Conference Sofa',
+      id: "table_meeting",
+      type: "conference_table",
+      name: "Conference Table",
       x: 3,
       y: 4,
       width: 4,
@@ -305,8 +305,8 @@ export function createBeachRetreatMap(): GridMap {
     height,
     tiles,
     objects: [
-      { id: 'b_plant1', type: 'plant', name: 'Palm Tree', x: 2, y: 2, width: 2, height: 2, isBlocking: true },
-      { id: 'b_couch1', type: 'couch', name: 'Lounge Sofa', x: 8, y: 4, width: 3, height: 2, isBlocking: true },
+      { id: "b_plant1", type: "plant", name: "Palm Tree", x: 2, y: 2, width: 2, height: 2, isBlocking: true },
+      { id: "b_table1", type: "conference_table", name: "Conference Table", x: 8, y: 4, width: 3, height: 2, isBlocking: true },
       { id: 'b_wb1', type: 'whiteboard', name: 'Sunset Brainstorm', x: 15, y: 2, width: 3, height: 1, isBlocking: true, data: { whiteboardStrokes: [] } },
       { id: 'b_juke1', type: 'jukebox', name: 'Ocean Waves Audio', x: 22, y: 3, width: 1, height: 2, isBlocking: true, data: { jukeboxState: { isPlaying: false, trackIndex: 1, trackName: 'Ocean Waves' } } }
     ],

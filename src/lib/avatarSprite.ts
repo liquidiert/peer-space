@@ -22,7 +22,7 @@ import { ACCENT, mixHex, rampFrom, safeHex, SHADOW_TINT, type Ramp } from './pix
 
 export const AV_W = 16;
 export const AV_H = 18;
-export const AV_INK = '#1b2233';
+export const AV_INK = "#1e293b";
 
 // Sprite rows, top to bottom. Named because every feature is positioned relative to them.
 const HEAD_X = 3;
@@ -68,7 +68,7 @@ export function drawAvatarSprite(
   avatar: AvatarCustomization | undefined,
   options: AvatarSpriteOptions = {}
 ) {
-  const { direction = 'down', walkPhase = -1, presence = null, showEmoji = false } = options;
+  const { direction = "down", walkPhase = -1, presence = null, showEmoji = false } = options;
 
   // --- Walk cycle -------------------------------------------------------------
   // Four frames: two contact poses (one leg striding) separated by two passing poses where
@@ -84,18 +84,18 @@ export function drawAvatarSprite(
   const passing = walking && (walkPhase === 1 || walkPhase === 3);
   if (passing) oy -= scale;
 
-  const skin = rampFrom(safeHex(avatar?.skinColor, '#f0b090'));
-  const hair = rampFrom(safeHex(avatar?.hairColor, '#2b1a10'));
-  const outfit = rampFrom(safeHex(avatar?.outfitColor, '#5b86cf'));
+  const skin = rampFrom(safeHex(avatar?.skinColor, "#f0b090"));
+  const hair = rampFrom(safeHex(avatar?.hairColor, "#2b1a10"));
+  const outfit = rampFrom(safeHex(avatar?.outfitColor, "#5b86cf"));
   const trouser = rampFrom(mixHex(outfit.base, SHADOW_TINT, 0.42));
   const shoe = mixHex(outfit.base, AV_INK, 0.65);
 
-  const hairStyle = avatar?.hairStyle || 'short';
-  const hatStyle = avatar?.hatStyle || 'none';
-  const hatted = hatStyle !== 'none';
-  const facingUp = direction === 'up';
-  const facingSide = direction === 'left' || direction === 'right';
-  const mirror = direction === 'left';
+  const hairStyle = avatar?.hairStyle || "short";
+  const hatStyle = avatar?.hatStyle || "none";
+  const hatted = hatStyle !== "none";
+  const facingUp = direction === "up";
+  const facingSide = direction === "left" || direction === "right";
+  const mirror = direction === "left";
 
   /** Fill art pixels, mirrored horizontally when the character faces left. */
   const f = (x: number, y: number, w: number, h: number, color: string) => {
@@ -117,15 +117,21 @@ export function drawAvatarSprite(
     f(x + w - 1, y, 1, h, ramp.dark);
     f(x, y + h - 1, w, 1, ramp.dark);
   };
-  /** A shaded block with its own 1px outline. */
+  /** A shaded block with precise 1px perimeter outline (no solid filled dark background box). */
   const part = (x: number, y: number, w: number, h: number, ramp: Ramp) => {
-    f(x - 1, y - 1, w + 2, h + 2, AV_INK);
+    f(x - 1, y - 1, w + 2, 1, AV_INK);
+    f(x - 1, y + h, w + 2, 1, AV_INK);
+    f(x - 1, y, 1, h, AV_INK);
+    f(x + w, y, 1, h, AV_INK);
     shade(x, y, w, h, ramp);
   };
 
   // --- Afro halo, drawn behind the head ---------------------------------------
-  if (!hatted && hairStyle === 'afro') {
-    f(1, 0, 14, 9, AV_INK);
+  if (!hatted && hairStyle === "afro") {
+    f(1, 0, 14, 1, AV_INK);
+    f(1, 8, 14, 1, AV_INK);
+    f(1, 0, 1, 9, AV_INK);
+    f(14, 0, 1, 9, AV_INK);
     f(2, 0, 12, 8, hair.base);
     f(3, 0, 10, 1, hair.light);
     f(2, 7, 12, 1, hair.dark);
@@ -138,21 +144,26 @@ export function drawAvatarSprite(
   ];
   legs.forEach(([lx, lift]) => {
     const h = LEG_H - lift;
-    f(lx - 1, LEG_Y + lift - 1, 5, h + 2, AV_INK);
+    f(lx - 1, LEG_Y + lift, 1, h + 1, AV_INK);
+    f(lx + 3, LEG_Y + lift, 1, h + 1, AV_INK);
+    f(lx, LEG_Y + lift + h, 3, 1, AV_INK);
     f(lx, LEG_Y + lift, 3, h, trouser.base);
     f(lx, LEG_Y + lift, 1, h, trouser.light);
     f(lx, LEG_Y + lift + h - 1, 3, 1, shoe);
   });
 
   // --- Torso and arms ---------------------------------------------------------
-  // Outlined as one silhouette rather than three separately outlined boxes: per-part
-  // outlines put a double-thick seam between each arm and the body, which at this size
-  // turns the whole upper half into a dark blob.
-  f(1, TORSO_Y - 1, 14, TORSO_H + 2, AV_INK);
-  // Arms swing opposite the striding leg. They only ever rise, never drop, so a swinging
-  // arm can never paint over the bottom edge of the silhouette outline.
   const armLeftY = ARM_Y - (strideRight ? 1 : 0);
   const armRightY = ARM_Y - (strideLeft ? 1 : 0);
+
+  // Precise tight outline matching torso & arm silhouette
+  f(1, armLeftY, 1, ARM_H, AV_INK);
+  f(2, armLeftY + ARM_H, 2, 1, AV_INK);
+  f(14, armRightY, 1, ARM_H, AV_INK);
+  f(12, armRightY + ARM_H, 2, 1, AV_INK);
+  f(4, TORSO_Y + TORSO_H, 8, 1, AV_INK);
+  f(3, TORSO_Y - 1, 10, 1, AV_INK);
+
   shade(2, armLeftY, 2, ARM_H, outfit);
   shade(12, armRightY, 2, ARM_H, outfit);
   shade(4, TORSO_Y, 8, TORSO_H, outfit);
