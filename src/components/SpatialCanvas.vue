@@ -13,6 +13,8 @@ const props = defineProps<{
   builderAction: "place" | "erase" | "move";
   selectedTile: TileType;
   selectedObject: MapObject | null;
+  /** Drag on the map to describe a private zone rectangle, instead of typing coordinates. */
+  zoneDrawMode?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -23,6 +25,7 @@ const emit = defineEmits<{
   (e: "removeObject", objectId: string): void;
   (e: "moveObject", payload: { objectId: string; x: number; y: number }): void;
   (e: "changeTile", payload: { x: number; y: number; tileType: TileType }): void;
+  (e: "zoneDrawn", payload: { x: number; y: number; width: number; height: number }): void;
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -38,6 +41,22 @@ const hoveredObject = ref<MapObject | null>(null);
 const isMouseDown = ref(false);
 const mouseDownPos = ref<{ x: number; y: number } | null>(null);
 const hasDragged = ref(false);
+
+// Private-zone rectangle being dragged out on the map (builder mode only).
+const zoneDragStart = ref<{ x: number; y: number } | null>(null);
+const zoneDragEnd = ref<{ x: number; y: number } | null>(null);
+
+/** The drag normalised into a top-left origin plus a size, clamped to the map. */
+const pendingZoneRect = computed(() => {
+  const a = zoneDragStart.value;
+  const b = zoneDragEnd.value;
+  if (!a || !b || !props.currentMap) return null;
+  const x = Math.max(0, Math.min(a.x, b.x));
+  const y = Math.max(0, Math.min(a.y, b.y));
+  const right = Math.min(props.currentMap.width - 1, Math.max(a.x, b.x));
+  const bottom = Math.min(props.currentMap.height - 1, Math.max(a.y, b.y));
+  return { x, y, width: right - x + 1, height: bottom - y + 1 };
+});
 
 const canvasCursor = computed(() => {
   if (props.builderMode) {
@@ -61,8 +80,10 @@ function updateIsMobile() {
   isMobile.value = window.matchMedia('(max-width: 768px)').matches;
 }
 
-function followCameraOnMobile() {
-  if (!isMobile.value) return;
+/** How much map to keep visible ahead of the avatar before the desktop camera nudges. */
+const EDGE_MARGIN = CELL_SIZE * 3;
+
+function followCamera() {
   const container = scrollContainerRef.value;
   if (!container) return;
 
@@ -72,11 +93,36 @@ function followCameraOnMobile() {
   const px = (tileX + 0.5) * CELL_SIZE;
   const py = (tileY + 0.5) * CELL_SIZE;
 
-  container.scrollTo({
-    left: px - container.clientWidth / 2,
-    top: py - container.clientHeight / 2,
-    behavior: 'auto',
-  });
+  if (isMobile.value) {
+    // Phones show only a handful of tiles, so the avatar is kept centred on both axes.
+    container.scrollTo({
+      left: px - container.clientWidth / 2,
+      top: py - container.clientHeight / 2,
+      behavior: 'auto',
+    });
+    return;
+  }
+
+  // Desktop follows horizontally only: the map is wider than most windows but generally
+  // fits vertically. It is also a dead-zone follow rather than a re-centre - this runs every
+  // animation frame, so hard-centring would make the map impossible to scroll by hand, and
+  // would yank the view on every single step.
+  const viewLeft = container.scrollLeft;
+  const viewRight = viewLeft + container.clientWidth;
+
+  let targetLeft = viewLeft;
+  if (px < viewLeft + EDGE_MARGIN) {
+    targetLeft = px - EDGE_MARGIN;
+  } else if (px > viewRight - EDGE_MARGIN) {
+    targetLeft = px - container.clientWidth + EDGE_MARGIN;
+  }
+
+  const maxLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+  targetLeft = Math.max(0, Math.min(maxLeft, targetLeft));
+  // Omitting `top` leaves the vertical scroll exactly where the user put it.
+  if (Math.round(targetLeft) !== Math.round(viewLeft)) {
+    container.scrollTo({ left: targetLeft, behavior: 'auto' });
+  }
 }
 
 // ============================================================================
@@ -1565,7 +1611,37 @@ function renderCanvas() {
     renderUser(ctx, user, isSelfUser, currentPos, isSelfUser && isGhostMode.value);
   });
 
-  followCameraOnMobile();
+  // 5. Zone being dragged out in the builder. Drawn last, on top of everything, so the
+  //    rectangle stays readable over furniture and avatars while it is being sized.
+  const zoneRect = pendingZoneRect.value;
+  if (zoneRect) {
+    const zx = zoneRect.x * CELL_SIZE;
+    const zy = zoneRect.y * CELL_SIZE;
+    const zw = zoneRect.width * CELL_SIZE;
+    const zh = zoneRect.height * CELL_SIZE;
+
+    ctx.fillStyle = 'rgba(125, 138, 224, 0.28)';
+    ctx.fillRect(zx, zy, zw, zh);
+    ctx.strokeStyle = '#4f46e5';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([8, 6]);
+    ctx.strokeRect(zx + 1.5, zy + 1.5, zw - 3, zh - 3);
+    ctx.setLineDash([]);
+
+    // Live size readout - the whole point of drawing the zone is not having to work the
+    // numbers out, so show them as they change.
+    const caption = `${zoneRect.width} x ${zoneRect.height}`;
+    ctx.font = 'bold 12px "Pixelify Sans", cursive, sans-serif';
+    const captionW = ctx.measureText(caption).width + 14;
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(zx + zw / 2 - captionW / 2, zy + zh / 2 - 11, captionW, 22);
+    ctx.fillStyle = '#f4efe3';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(caption, zx + zw / 2, zy + zh / 2 + 1);
+  }
+
+  followCamera();
 }
 
 function startAnimLoop() {
@@ -1678,6 +1754,19 @@ function handlePointerDown(e: PointerEvent) {
   const tileX = Math.floor(mouseX / CELL_SIZE);
   const tileY = Math.floor(mouseY / CELL_SIZE);
 
+  // Drawing a zone owns the whole gesture - it must not also pick up and drag whatever
+  // object happens to sit under the first corner.
+  if (props.zoneDrawMode) {
+    zoneDragStart.value = { x: tileX, y: tileY };
+    zoneDragEnd.value = { x: tileX, y: tileY };
+    isMouseDown.value = true;
+    hasDragged.value = true; // suppress the click that follows this drag
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch (_) {}
+    return;
+  }
+
   const existingObj = props.currentMap.objects.find(
     (o) => tileX >= o.x && tileX < o.x + o.width && tileY >= o.y && tileY < o.y + o.height
   );
@@ -1709,6 +1798,11 @@ function handlePointerMove(e: PointerEvent) {
 
   const tileX = Math.floor(mouseX / CELL_SIZE);
   const tileY = Math.floor(mouseY / CELL_SIZE);
+
+  if (props.zoneDrawMode) {
+    if (zoneDragStart.value) zoneDragEnd.value = { x: tileX, y: tileY };
+    return;
+  }
 
   if (props.builderMode) {
     const objUnderMouse = props.currentMap.objects.find(
@@ -1748,6 +1842,16 @@ function handlePointerUp(e: PointerEvent) {
     } catch (_) {}
   }
 
+  // Releasing after dragging out a zone is what commits it.
+  if (props.zoneDrawMode && zoneDragStart.value) {
+    const rectangle = pendingZoneRect.value;
+    zoneDragStart.value = null;
+    zoneDragEnd.value = null;
+    isMouseDown.value = false;
+    if (rectangle) emit("zoneDrawn", rectangle);
+    return;
+  }
+
   if (isDraggingObject.value && draggedObject.value && currentDragTile.value) {
     if (
       currentDragTile.value.x !== draggedObject.value.x ||
@@ -1761,6 +1865,27 @@ function handlePointerUp(e: PointerEvent) {
     }
   }
 
+  isMouseDown.value = false;
+  isDraggingObject.value = false;
+  draggedObject.value = null;
+  currentDragTile.value = null;
+}
+
+/**
+ * An interrupted gesture must not commit anything. pointercancel fires when the browser
+ * takes the pointer away mid-drag (a system gesture, the pointer being invalidated, and so
+ * on); treating it as a normal pointerup turned that into a stray 1x1 zone and dropped the
+ * user out of draw mode.
+ */
+function handlePointerCancel(e: PointerEvent) {
+  const canvas = canvasRef.value;
+  if (canvas && e.pointerId !== undefined) {
+    try {
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    } catch (_) {}
+  }
+  zoneDragStart.value = null;
+  zoneDragEnd.value = null;
   isMouseDown.value = false;
   isDraggingObject.value = false;
   draggedObject.value = null;
@@ -1795,6 +1920,8 @@ function handleCanvasClick(e: MouseEvent) {
 
   const tileX = Math.floor(clickX / CELL_SIZE);
   const tileY = Math.floor(clickY / CELL_SIZE);
+
+  if (props.zoneDrawMode) return;
 
   if (props.builderMode) {
     if (props.builderAction === "erase") {
@@ -1887,7 +2014,7 @@ watch([() => props.currentUser, () => props.users, () => props.currentMap, () =>
         @pointermove="handlePointerMove"
         @pointerup="handlePointerUp"
         @pointerleave="handlePointerLeave"
-        @pointercancel="handlePointerUp"
+        @pointercancel="handlePointerCancel"
         :style="{ cursor: canvasCursor }"
         class="block touch-none pixel-rendering"
       />

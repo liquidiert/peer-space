@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { Hammer, Trash2, Layers, Box, X, Shield, Plus, Lock, Move, GripHorizontal } from "lucide-vue-next";
+import { ref, watch } from "vue";
+import { Hammer, Trash2, Layers, Box, X, Shield, Plus, Lock, Move, GripHorizontal, SquareDashedMousePointer } from "lucide-vue-next";
 import type { TileType, MapObject, ObjectType, PrivateZone } from "../types";
 
 const props = defineProps<{
@@ -10,6 +10,9 @@ const props = defineProps<{
   selectedObject: MapObject | null;
   currentMapId: string;
   privateZones: PrivateZone[];
+  zoneDrawMode: boolean;
+  /** Rectangle the user just dragged out on the map, if any. */
+  pendingZone: { x: number; y: number; width: number; height: number } | null;
 }>();
 
 const emit = defineEmits<{
@@ -20,6 +23,7 @@ const emit = defineEmits<{
   (e: "switchMapPreset", presetId: string): void;
   (e: "addZone", zone: PrivateZone): void;
   (e: "removeZone", zoneId: string): void;
+  (e: "setZoneDrawMode", enabled: boolean): void;
 }>();
 
 const activeCategory = ref<"build" | "zones">("build");
@@ -85,6 +89,20 @@ const COLOR_PRESETS = [
   { label: "Rose", value: "rgba(244, 63, 94, 0.22)", border: "#f43f5e" },
 ];
 
+// A rectangle dragged out on the map fills the same fields the user could type into, so the
+// numbers stay visible and adjustable rather than the drag being an opaque separate path.
+watch(
+  () => props.pendingZone,
+  (rect) => {
+    if (!rect) return;
+    newZoneX.value = rect.x;
+    newZoneY.value = rect.y;
+    newZoneW.value = rect.width;
+    newZoneH.value = rect.height;
+    activeCategory.value = "zones";
+  }
+);
+
 function handleCreateZone() {
   if (!newZoneName.value.trim()) return;
   const zone: PrivateZone = {
@@ -132,7 +150,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
   { type: "plant", name: "Potted Plant", icon: "🌿", width: 1, height: 1, isBlocking: true },
   { type: "whiteboard", name: "Whiteboard", icon: "📋", width: 2, height: 1, isBlocking: true },
   { type: "sticky_notes", name: "Notice Board", icon: "📌", width: 2, height: 1, isBlocking: true },
-  { type: "game_table", name: "Tic-Tac-Toe Table", icon: "🎮", width: 2, height: 2, isBlocking: true },
+  { type: "game_table", name: "Arcade Table", icon: "🎮", width: 2, height: 2, isBlocking: true },
   { type: "bookshelf", name: "Bookshelf", icon: "📚", width: 1, height: 2, isBlocking: true },
 ];
 </script>
@@ -140,8 +158,8 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
 <template>
   <div
     v-if="isOpen"
-    :style="{ top: `${popupPos.y}px`, left: `${popupPos.x}px` }"
-    class="fixed w-80 bg-white border-3 border-slate-900 rounded-2xl p-4 shadow-[6px_6px_0px_0px_#0f172a] z-40 text-slate-900 flex flex-col gap-4 max-h-[80vh] overflow-y-auto custom-scrollbar select-none"
+    :style="{ top: `${popupPos.y}px`, left: `${popupPos.x}px`, maxHeight: `calc(100vh - ${popupPos.y + 24}px)` }"
+    class="fixed w-80 bg-white border-3 border-slate-900 rounded-2xl p-4 shadow-[6px_6px_0px_0px_#0f172a] z-40 text-slate-900 flex flex-col gap-3 overflow-hidden select-none"
   >
     <!-- Header (Draggable Handle) -->
     <div
@@ -149,7 +167,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
       @pointermove="onPopupDrag"
       @pointerup="stopPopupDrag"
       @pointercancel="stopPopupDrag"
-      class="flex items-center justify-between border-b-2 border-slate-900 pb-2.5 cursor-grab active:cursor-grabbing touch-none select-none bg-amber-50/60 -mx-4 -mt-4 p-4 rounded-t-xl"
+      class="shrink-0 flex items-center justify-between border-b-2 border-slate-900 pb-2.5 cursor-grab active:cursor-grabbing touch-none select-none bg-amber-50/60 -mx-4 -mt-4 p-4 rounded-t-xl"
     >
       <div class="flex items-center gap-2">
         <GripHorizontal class="w-5 h-5 text-slate-500" />
@@ -166,13 +184,13 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
     </div>
 
     <!-- Category Tabs -->
-    <div class="grid grid-cols-2 gap-1.5 p-1 bg-slate-100 rounded-xl border-2 border-slate-900">
+    <div class="shrink-0 grid grid-cols-2 gap-1.5 p-1 bg-slate-100 rounded-xl border-2 border-slate-900">
       <button
         type="button"
         @click="activeCategory = 'build'"
-        :class="`py-1.5 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 transition-all pixel-btn ${
+        :class="`h-9 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 whitespace-nowrap transition-all pixel-btn ${
           activeCategory === 'build'
-            ? 'bg-amber-300 text-slate-950 font-heading border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]'
+            ? 'bg-amber-300 text-slate-950 border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]'
             : 'text-slate-700 hover:text-slate-950'
         }`"
       >
@@ -181,9 +199,9 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
       <button
         type="button"
         @click="activeCategory = 'zones'"
-        :class="`py-1.5 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 transition-all pixel-btn ${
+        :class="`h-9 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 whitespace-nowrap transition-all pixel-btn ${
           activeCategory === 'zones'
-            ? 'bg-amber-300 text-slate-950 font-heading border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]'
+            ? 'bg-amber-300 text-slate-950 border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]'
             : 'text-slate-700 hover:text-slate-950'
         }`"
       >
@@ -191,6 +209,9 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
       </button>
     </div>
 
+    <!-- Only the category body scrolls. Previously the whole panel did, so scrolling down to
+         reach "Create Private Zone" took the drag handle and the tab switcher off screen. -->
+    <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 -mr-1 flex flex-col gap-4">
     <template v-if="activeCategory === 'build'">
       <!-- Map Preset Switcher -->
       <div>
@@ -203,7 +224,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
             @click="emit('switchMapPreset', 'office_default')"
             :class="`px-2.5 py-2 text-xs font-bold rounded-lg border-2 border-slate-900 text-left transition-all pixel-btn ${
               currentMapId === 'office_default'
-                ? 'bg-amber-300 text-slate-950 font-heading shadow-[2px_2px_0px_0px_#0f172a]'
+                ? 'bg-amber-300 text-slate-950 shadow-[2px_2px_0px_0px_#0f172a]'
                 : 'bg-slate-100 hover:bg-slate-200 text-slate-900'
             }`"
           >
@@ -214,7 +235,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
             @click="emit('switchMapPreset', 'beach_retreat')"
             :class="`px-2.5 py-2 text-xs font-bold rounded-lg border-2 border-slate-900 text-left transition-all pixel-btn ${
               currentMapId === 'beach_retreat'
-                ? 'bg-amber-300 text-slate-950 font-heading shadow-[2px_2px_0px_0px_#0f172a]'
+                ? 'bg-amber-300 text-slate-950 shadow-[2px_2px_0px_0px_#0f172a]'
                 : 'bg-slate-100 hover:bg-slate-200 text-slate-900'
             }`"
           >
@@ -229,7 +250,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
           type="button"
           @click="emit('setBuilderAction', 'place')"
           :class="`py-1.5 text-xs font-bold rounded-lg flex items-center justify-center gap-1 transition-all pixel-btn ${
-            builderAction === 'place' ? 'bg-amber-300 text-slate-950 font-heading border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]' : 'text-slate-700 hover:text-slate-950'
+            builderAction === 'place' ? 'bg-amber-300 text-slate-950 border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]' : 'text-slate-700 hover:text-slate-950'
           }`"
         >
           <Hammer class="w-3.5 h-3.5" /> Place
@@ -238,7 +259,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
           type="button"
           @click="emit('setBuilderAction', 'move')"
           :class="`py-1.5 text-xs font-bold rounded-lg flex items-center justify-center gap-1 transition-all pixel-btn ${
-            builderAction === 'move' ? 'bg-indigo-300 text-slate-950 font-heading border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]' : 'text-slate-700 hover:text-slate-950'
+            builderAction === 'move' ? 'bg-indigo-300 text-slate-950 border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]' : 'text-slate-700 hover:text-slate-950'
           }`"
         >
           <Move class="w-3.5 h-3.5" /> Move
@@ -247,7 +268,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
           type="button"
           @click="emit('setBuilderAction', 'erase')"
           :class="`py-1.5 text-xs font-bold rounded-lg flex items-center justify-center gap-1 transition-all pixel-btn ${
-            builderAction === 'erase' ? 'bg-rose-400 text-slate-950 font-heading border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]' : 'text-slate-700 hover:text-slate-950'
+            builderAction === 'erase' ? 'bg-rose-400 text-slate-950 border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]' : 'text-slate-700 hover:text-slate-950'
           }`"
         >
           <Trash2 class="w-3.5 h-3.5" /> Erase
@@ -271,14 +292,15 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
                 emit('setSelectedTile', t.type);
                 emit('setSelectedObject', null);
               }"
-              :class="`p-2 rounded-lg border-2 border-slate-900 text-left text-xs flex items-center gap-2 transition-all pixel-btn ${
+              :title="t.label"
+              :class="`min-h-11 p-2 rounded-lg border-2 border-slate-900 text-left text-[11px] leading-tight flex items-center gap-2 transition-all pixel-btn ${
                 selectedTile === t.type && !selectedObject
                   ? 'bg-amber-300 text-slate-950 font-bold shadow-[2px_2px_0px_0px_#0f172a]'
                   : 'bg-slate-100 hover:bg-slate-200 text-slate-900 font-semibold'
               }`"
             >
-              <span class="w-4 h-4 rounded border border-slate-900 shadow-sm" :style="{ backgroundColor: t.color }" />
-              <span class="truncate">{{ t.label }}</span>
+              <span class="w-4 h-4 shrink-0 rounded border border-slate-900 shadow-sm" :style="{ backgroundColor: t.color }" />
+              <span class="min-w-0">{{ t.label }}</span>
             </button>
           </div>
         </div>
@@ -307,15 +329,16 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
                   data: obj.data ? JSON.parse(JSON.stringify(obj.data)) : undefined,
                 });
               }"
-              :class="`p-2 rounded-lg border-2 border-slate-900 text-left text-xs flex items-center gap-2 transition-all pixel-btn ${
+              :title="obj.name"
+              :class="`min-h-11 p-2 rounded-lg border-2 border-slate-900 text-left text-[11px] leading-tight flex items-center gap-2 transition-all pixel-btn ${
                 selectedObject?.type === obj.type
                   ? 'bg-amber-300 text-slate-950 font-bold shadow-[2px_2px_0px_0px_#0f172a]'
                   : 'bg-slate-100 hover:bg-slate-200 text-slate-900 font-semibold'
               }`"
             >
-              <span class="text-base">{{ obj.icon }}</span>
+              <span class="text-base shrink-0">{{ obj.icon }}</span>
               <div class="flex flex-col min-w-0">
-                <span class="truncate font-semibold">{{ obj.name }}</span>
+                <span class="font-semibold">{{ obj.name }}</span>
                 <span class="text-[10px] text-slate-600 font-bold">{{ obj.width }}x{{ obj.height }} grid</span>
               </div>
             </button>
@@ -384,6 +407,21 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
             class="px-3 py-1.5 bg-white border-2 border-slate-900 rounded-lg text-xs font-bold text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-400"
           />
 
+          <!-- Drag the rectangle out on the map rather than working the tile numbers out by
+               hand. The fields below stay authoritative and editable either way. -->
+          <button
+            type="button"
+            @click="emit('setZoneDrawMode', !zoneDrawMode)"
+            :class="`w-full text-xs font-extrabold py-2 px-3 rounded-xl border-2 border-slate-900 flex items-center justify-center gap-1.5 whitespace-nowrap pixel-btn ${
+              zoneDrawMode
+                ? 'bg-indigo-500 text-white shadow-[2px_2px_0px_0px_#0f172a]'
+                : 'bg-white text-slate-900 hover:bg-slate-100'
+            }`"
+          >
+            <SquareDashedMousePointer class="w-4 h-4" />
+            {{ zoneDrawMode ? 'Drawing - drag the map' : 'Draw zone on map' }}
+          </button>
+
           <div class="grid grid-cols-2 gap-2 text-xs">
             <div>
               <label class="text-[10px] font-bold text-slate-600">Start Tile X, Y</label>
@@ -428,8 +466,16 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
       </div>
     </template>
 
-    <p class="text-[11px] text-slate-900 bg-amber-100 p-2.5 rounded-lg border-2 border-slate-900 font-bold leading-relaxed shadow-[2px_2px_0px_0px_#0f172a]">
-      💡 Drag objects directly on the map to relocate them! Click grid cells to paint tiles or place furniture objects in real time.
+    </div>
+
+    <!-- Contextual: the tip is pinned, so it should be about the tab you are actually on. -->
+    <p class="shrink-0 text-[11px] text-slate-900 bg-amber-100 p-2.5 rounded-lg border-2 border-slate-900 font-bold leading-relaxed shadow-[2px_2px_0px_0px_#0f172a]">
+      <template v-if="activeCategory === 'build'">
+        💡 Click grid cells to paint tiles or place props. Drag objects on the map to move them.
+      </template>
+      <template v-else>
+        💡 Hit "Draw zone on map", then drag a rectangle over the map to set the bounds.
+      </template>
     </p>
   </div>
 </template>

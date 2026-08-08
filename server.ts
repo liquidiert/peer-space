@@ -358,15 +358,39 @@ async function startServer() {
       const map = maps.get(currentMapId);
       if (!map) return;
 
+      const validDirections = ['up', 'down', 'left', 'right'];
+      if (!validDirections.includes(data.direction)) return;
+
+      /**
+       * A blocked move still turns the character to face the way they tried to go.
+       *
+       * Every rejection below used to be a bare `return`, so walking into a wall left the
+       * avatar facing whatever direction it happened to be facing already - most obviously
+       * after arriving somewhere by click-to-move, where the facing is a side effect of the
+       * last step of the path. Turning on the spot is always legal: it changes no position,
+       * no zone and no collision, so it cannot be used to walk through anything.
+       */
+      const turnInPlace = () => {
+        if (user.direction === data.direction) return;
+        user.direction = data.direction;
+        user.lastSeen = Date.now();
+        io.emit('user:moved', {
+          userId: socket.id,
+          position: user.position,
+          direction: user.direction,
+          currentZoneId: user.currentZoneId,
+        });
+      };
+
       // Validate bounds
       if (data.x < 0 || data.x >= map.width || data.y < 0 || data.y >= map.height) {
-        return;
+        return turnInPlace();
       }
 
       // Check collision with tile or blocking map objects
       const targetTile = map.tiles[data.y]?.[data.x];
       if (targetTile === 'wall_brick' || targetTile === 'wall_wood' || targetTile === 'water') {
-        return; // blocked
+        return turnInPlace(); // blocked
       }
 
       const blockingObj = map.objects.find((obj) => {
@@ -380,7 +404,7 @@ async function startServer() {
       });
 
       if (blockingObj) {
-        return; // blocked
+        return turnInPlace(); // blocked
       }
 
       // Collision with other users - two people can no longer occupy the same tile, unless
@@ -388,7 +412,7 @@ async function startServer() {
       // Authoritative here (not just client-side) so simultaneous moves from two clients
       // can't both land on the same tile via a race.
       if (!data.ghost && isOccupiedByOtherUser(data.x, data.y, socket.id)) {
-        return; // blocked
+        return turnInPlace(); // blocked
       }
 
       // Update position & zone

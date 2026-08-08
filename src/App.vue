@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, shallowRef, watch } from 'vue';
 import { io, Socket } from 'socket.io-client';
 import SpatialCanvas from './components/SpatialCanvas.vue';
 import ControlBar from './components/ControlBar.vue';
@@ -21,13 +21,14 @@ import type {
   WhiteboardStroke,
   StickyNote,
   PresenceStatus,
+  PrivateZone,
 } from './types';
 import { createDefaultOfficeMap } from './mapsData';
 import { useWebRTCProximity } from './composables/useWebRTCProximity';
 import { findPathAStar, occupiedKeySet } from './lib/pathfinding';
 import type { GameTableGame } from './lib/gameTable';
 
-const socket = ref<Socket | null>(null);
+const socket = shallowRef<Socket | null>(null);
 const hasJoined = ref(false);
 const userNameInput = ref('');
 
@@ -324,6 +325,18 @@ const selectedObject = ref<MapObject | null>(null);
 
 // Modal UI State
 const activeObjectModal = ref<MapObject | null>(null);
+
+// Interactive private-zone drawing: while on, dragging the map sizes a rectangle instead of
+// painting tiles. The finished rectangle is handed to the drawer, which fills its form.
+const zoneDrawMode = ref(false);
+const pendingZone = ref<{ x: number; y: number; width: number; height: number } | null>(null);
+
+function handleZoneDrawn(rect: { x: number; y: number; width: number; height: number }) {
+  pendingZone.value = rect;
+  // One rectangle per activation: leaving it armed would keep hijacking map clicks after
+  // the user has moved on to naming the zone.
+  zoneDrawMode.value = false;
+}
 const showAvatarBuilderModal = ref(false);
 
 onMounted(() => {
@@ -922,6 +935,10 @@ watch(
   }
 );
 
+watch(builderMode, (on) => {
+  if (!on) zoneDrawMode.value = false;
+});
+
 function handleAddZone(zone: PrivateZone) {
   if (socket.value) {
     socket.value.emit('map:add_zone', zone);
@@ -1242,6 +1259,8 @@ function handleToggleBuilderMode() {
         :builderAction="builderAction"
         :selectedTile="selectedTile"
         :selectedObject="selectedObject"
+        :zoneDrawMode="zoneDrawMode"
+        @zoneDrawn="handleZoneDrawn"
         @move="handleMove"
         @navigateTile="handleNavigateTile"
         @interactObject="(obj) => activeObjectModal = obj"
@@ -1259,6 +1278,9 @@ function handleToggleBuilderMode() {
         :selectedObject="selectedObject"
         :currentMapId="currentMap.id"
         :privateZones="currentMap.privateZones"
+        :zoneDrawMode="zoneDrawMode"
+        :pendingZone="pendingZone"
+        @setZoneDrawMode="(on) => (zoneDrawMode = on)"
         @close="builderMode = false"
         @setBuilderAction="(act) => builderAction = act"
         @setSelectedTile="(tile) => selectedTile = tile"
