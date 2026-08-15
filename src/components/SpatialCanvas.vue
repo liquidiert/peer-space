@@ -26,6 +26,7 @@ const emit = defineEmits<{
   (e: "moveObject", payload: { objectId: string; x: number; y: number }): void;
   (e: "changeTile", payload: { x: number; y: number; tileType: TileType }): void;
   (e: "zoneDrawn", payload: { x: number; y: number; width: number; height: number }): void;
+  (e: "userContextMenu", payload: { socketId: string; clientX: number; clientY: number }): void;
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -1905,6 +1906,33 @@ function handleGlobalPointerUp(e: PointerEvent) {
 }
 
 // Canvas Click Event Handler
+/**
+ * Right-clicking someone opens their context menu. The hit test is against the *rendered*
+ * position (displayPosMap), not the authoritative tile, so it matches what the user is
+ * actually pointing at while people are mid-step.
+ */
+function handleContextMenu(e: MouseEvent) {
+  const canvas = canvasRef.value;
+  if (!canvas || props.builderMode) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  const hit = props.users.find((u) => {
+    if (u.socketId === props.currentUser.socketId) return false;
+    const pos = displayPosMap.get(u.socketId) ?? u.position;
+    const cx = (pos.x + 0.5) * CELL_SIZE;
+    const cy = (pos.y + 0.5) * CELL_SIZE;
+    // The sprite is about one tile wide and stands a little above its tile centre.
+    return Math.abs(x - cx) <= CELL_SIZE / 2 && y >= cy - CELL_SIZE && y <= cy + CELL_SIZE / 2;
+  });
+  if (!hit) return;
+
+  e.preventDefault();
+  emit("userContextMenu", { socketId: hit.socketId, clientX: e.clientX, clientY: e.clientY });
+}
+
 function handleCanvasClick(e: MouseEvent) {
   if (hasDragged.value) {
     hasDragged.value = false;
@@ -2010,6 +2038,7 @@ watch([() => props.currentUser, () => props.users, () => props.currentMap, () =>
       <canvas
         ref="canvasRef"
         @click="handleCanvasClick"
+        @contextmenu="handleContextMenu"
         @pointerdown="handlePointerDown"
         @pointermove="handlePointerMove"
         @pointerup="handlePointerUp"

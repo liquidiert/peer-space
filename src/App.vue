@@ -9,7 +9,7 @@ import MiniMap from './components/MiniMap.vue';
 import AvatarBuilder from './components/AvatarBuilder.vue';
 import ObjectModals from './components/ObjectModals.vue';
 import VideoDock from './components/VideoDock.vue';
-import { Sparkles, Compass, LogIn, CheckCircle2, LogOut, ShieldCheck, Hammer, RefreshCw } from 'lucide-vue-next';
+import { Sparkles, Compass, LogIn, CheckCircle2, LogOut, ShieldCheck, Hammer, RefreshCw, X, BellRing, Menu, Volume2, UserRoundCog } from 'lucide-vue-next';
 import { useRegisterSW } from 'virtual:pwa-register/vue';
 import type {
   User,
@@ -200,12 +200,6 @@ function loadSavedPresenceStatus(): PresenceStatus {
 }
 
 const presenceStatus = ref<PresenceStatus>(loadSavedPresenceStatus());
-const PRESENCE_STATUS_CYCLE: PresenceStatus[] = ['available', 'busy', 'dnd'];
-
-function cyclePresenceStatus() {
-  const idx = PRESENCE_STATUS_CYCLE.indexOf(presenceStatus.value);
-  presenceStatus.value = PRESENCE_STATUS_CYCLE[(idx + 1) % PRESENCE_STATUS_CYCLE.length];
-}
 
 watch(presenceStatus, (newVal) => {
   try {
@@ -307,7 +301,13 @@ const {
   unlockBlockedAudioPlayback,
   hasConnectionTrouble,
   troubledPeerIds,
+  setUserVolume,
+  getUserVolume,
+  proximityVolumeEnabled,
+  setProximityVolumeEnabled,
 } = useWebRTCProximity(socket, currentUser, users, isMuted, isDeafened);
+
+setProximityVolumeEnabled(loadProximityVolumePreference());
 
 // Names of the peers whose connection has been failing long enough to be worth telling the
 // user about, so the warning can say who they've lost rather than just "something is wrong".
@@ -325,6 +325,64 @@ const selectedObject = ref<MapObject | null>(null);
 
 // Modal UI State
 const activeObjectModal = ref<MapObject | null>(null);
+
+// --- App menu (top-left, beside Map Builder) --------------------------------------------
+const appMenuOpen = ref(false);
+
+const PROXIMITY_VOLUME_PERSISTENCE_KEY = 'peerspace_proximity_volume';
+
+function loadProximityVolumePreference(): boolean {
+  try {
+    // Defaults to on: spatial audio is the point of the room, so the opt-out has to be
+    // explicit rather than something a missing key silently turns off.
+    return localStorage.getItem(PROXIMITY_VOLUME_PERSISTENCE_KEY) !== 'off';
+  } catch (e) {
+    return true;
+  }
+}
+
+function toggleProximityVolume() {
+  const next = !proximityVolumeEnabled.value;
+  setProximityVolumeEnabled(next);
+  try {
+    localStorage.setItem(PROXIMITY_VOLUME_PERSISTENCE_KEY, next ? 'on' : 'off');
+  } catch (e) {
+    console.warn('Failed to persist proximity volume preference:', e);
+  }
+}
+
+// --- Per-user context menu (right-click an avatar) --------------------------------------
+const userMenu = ref<{ socketId: string; x: number; y: number } | null>(null);
+
+const userMenuTarget = computed(() =>
+  users.value.find((u) => u.socketId === userMenu.value?.socketId) || null
+);
+
+function openUserContextMenu(payload: { socketId: string; clientX: number; clientY: number }) {
+  // Clamp so the menu never opens half off-screen when someone is near an edge.
+  const MENU_W = 240;
+  const MENU_H = 150;
+  userMenu.value = {
+    socketId: payload.socketId,
+    x: Math.min(payload.clientX, window.innerWidth - MENU_W - 8),
+    y: Math.min(payload.clientY, window.innerHeight - MENU_H - 8),
+  };
+}
+
+function closeUserMenu() {
+  userMenu.value = null;
+}
+
+function dismissPopoversOnOutsideClick(e: MouseEvent) {
+  const el = e.target as HTMLElement | null;
+  if (userMenu.value && !el?.closest('[data-user-menu]')) closeUserMenu();
+  if (appMenuOpen.value && !el?.closest('[data-app-menu]')) appMenuOpen.value = false;
+}
+
+/** The menu closes if its subject leaves, so it can never act on someone who is gone. */
+watch(userMenuTarget, (target) => {
+  if (userMenu.value && !target) closeUserMenu();
+});
 
 // Interactive private-zone drawing: while on, dragging the map sizes a rectangle instead of
 // painting tiles. The finished rectangle is handed to the drawer, which fills its form.
@@ -418,7 +476,7 @@ onMounted(() => {
 
   sk.on('chime:received', (data: { fromSocketId: string; fromName: string }) => {
     playChimeSound();
-    showChimeToast(data.fromName);
+    showIncomingRing(data.fromSocketId, data.fromName);
   });
 
   // Object updates
@@ -605,10 +663,12 @@ onMounted(() => {
 
   window.addEventListener('message', handleOAuthMessage);
   window.addEventListener('keydown', handleGlobalHotkeys);
+  window.addEventListener('click', dismissPopoversOnOutsideClick);
 
   onUnmounted(() => {
     window.removeEventListener('message', handleOAuthMessage);
     window.removeEventListener('keydown', handleGlobalHotkeys);
+    window.removeEventListener('click', dismissPopoversOnOutsideClick);
   });
 });
 
@@ -707,10 +767,23 @@ function handleTeleportToUser(data: { x: number; y: number }) {
   handleNavigateTile(data);
 }
 
+const CHIME_FAIL_REASONS: Record<string, string> = {
+  rate_limited: 'You just rang them - give them a moment.',
+  gone: 'They have left the space.',
+  not_joined: 'You are not connected to the space.',
+};
+
 function handleChimeUser(data: { socketId: string }) {
-  if (socket.value) {
-    socket.value.emit('user:chime', { to: data.socketId });
-  }
+  if (!socket.value) return;
+  // Acknowledged: ringing is a request for attention, so the sender needs to know whether it
+  // actually went out. Server-side refusals (notably the rate limit) are silent otherwise.
+  socket.value
+    .timeout(5000)
+    .emit('user:chime', { to: data.socketId }, (err: unknown, res?: { ok: boolean; reason?: string; name?: string }) => {
+      if (err) return showNoticeToast('Could not reach the server - nobody was rung.');
+      if (res?.ok) return showNoticeToast(`🔔 Ringing ${res.name || 'them'}...`);
+      showNoticeToast(CHIME_FAIL_REASONS[res?.reason ?? ''] || 'Could not ring them.');
+    });
 }
 
 // A short two-tone chime via Web Audio - no audio asset needed, and it still fires even
@@ -743,12 +816,42 @@ function playChimeSound() {
 
 const chimeToast = ref<string | null>(null);
 let chimeToastTimeout: number | null = null;
-function showChimeToast(fromName: string) {
-  chimeToast.value = `🔔 ${fromName} is trying to reach you!`;
-  if (chimeToastTimeout) clearTimeout(chimeToastTimeout);
-  chimeToastTimeout = window.setTimeout(() => {
-    chimeToast.value = null;
-  }, 5000);
+
+/**
+ * Someone is ringing you. Held as state rather than a text toast so it can offer the two
+ * things you actually want to do about it - go to them, or dismiss it. A ring that can only
+ * be read and not answered is the half of this feature that was missing.
+ */
+const incomingRing = ref<{ fromSocketId: string; fromName: string } | null>(null);
+let incomingRingTimeout: number | null = null;
+
+function showIncomingRing(fromSocketId: string, fromName: string) {
+  incomingRing.value = { fromSocketId, fromName };
+  if (incomingRingTimeout) clearTimeout(incomingRingTimeout);
+  // Longer than a plain toast: it is actionable, so it has to outlast a glance away.
+  incomingRingTimeout = window.setTimeout(() => {
+    incomingRing.value = null;
+  }, 15000);
+}
+
+function dismissIncomingRing() {
+  incomingRing.value = null;
+  if (incomingRingTimeout) clearTimeout(incomingRingTimeout);
+}
+
+/** Walk over to whoever rang. Their position is read live, in case they have moved since. */
+function goToRinger() {
+  const ringer = users.value.find((u) => u.socketId === incomingRing.value?.fromSocketId);
+  dismissIncomingRing();
+  if (!ringer) return showNoticeToast('They have left the space.');
+  handleNavigateTile({ x: ringer.position.x, y: ringer.position.y });
+}
+
+/** Ring back, so a ring can start a conversation instead of ending one. */
+function ringBack() {
+  const target = incomingRing.value?.fromSocketId;
+  dismissIncomingRing();
+  if (target) handleChimeUser({ socketId: target });
 }
 
 /** Generic transient message, reusing the chime toast's slot. */
@@ -785,7 +888,11 @@ function handleGlobalHotkeys(e: KeyboardEvent) {
   if (!hasJoined.value || e.metaKey || e.ctrlKey || e.altKey) return;
 
   if (e.key === 'Escape') {
-    if (activeObjectModal.value) {
+    if (userMenu.value) {
+      closeUserMenu();
+    } else if (appMenuOpen.value) {
+      appMenuOpen.value = false;
+    } else if (activeObjectModal.value) {
       activeObjectModal.value = null;
     } else if (showAvatarBuilderModal.value) {
       showAvatarBuilderModal.value = false;
@@ -1169,6 +1276,64 @@ function handleToggleBuilderMode() {
           </div>
         </div>
 
+        <!-- App menu: settings that are not per-moment controls, so they do not belong
+             in the control bar with mute/camera. -->
+        <div class="relative" data-app-menu>
+          <button
+            type="button"
+            @click="appMenuOpen = !appMenuOpen"
+            title="Menu"
+            :class="`text-[10px] font-bold px-2.5 py-1 rounded-lg border-2 border-slate-900 flex items-center gap-1.5 transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] font-heading ${
+              appMenuOpen ? 'bg-amber-400 text-slate-950' : 'bg-slate-100 text-slate-900 hover:bg-slate-200'
+            }`"
+          >
+            <Menu class="w-3.5 h-3.5" />
+            <span class="hidden sm:inline">Menu</span>
+          </button>
+
+          <div
+            v-if="appMenuOpen"
+            class="absolute top-full left-0 mt-2 w-64 bg-white border-3 border-slate-900 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] p-2 flex flex-col gap-1.5 z-50"
+          >
+            <button
+              type="button"
+              @click="appMenuOpen = false; showAvatarBuilderModal = true"
+              class="w-full text-left px-2.5 py-2 rounded-xl border-2 border-transparent hover:bg-slate-100 hover:border-slate-900 flex items-center gap-2.5 transition-colors"
+            >
+              <UserRoundCog class="w-4 h-4 text-indigo-700 shrink-0" />
+              <span class="min-w-0">
+                <span class="block text-xs font-extrabold text-slate-900 font-heading">Avatar settings</span>
+                <span class="block text-[10px] font-bold text-slate-600">Change your look and status emoji</span>
+              </span>
+            </button>
+
+            <button
+              type="button"
+              @click="toggleProximityVolume"
+              class="w-full text-left px-2.5 py-2 rounded-xl border-2 border-transparent hover:bg-slate-100 hover:border-slate-900 flex items-center gap-2.5 transition-colors"
+            >
+              <Volume2 class="w-4 h-4 text-indigo-700 shrink-0" />
+              <span class="min-w-0 flex-1">
+                <span class="block text-xs font-extrabold text-slate-900 font-heading">Proximity volume</span>
+                <span class="block text-[10px] font-bold text-slate-600">
+                  {{ proximityVolumeEnabled ? 'Voices fade with distance' : 'Everyone in range is equally loud' }}
+                </span>
+              </span>
+              <span
+                :class="`shrink-0 w-9 h-5 rounded-full border-2 border-slate-900 relative transition-colors ${
+                  proximityVolumeEnabled ? 'bg-emerald-400' : 'bg-slate-300'
+                }`"
+              >
+                <span
+                  :class="`absolute top-0.5 w-3 h-3 rounded-full bg-white border-2 border-slate-900 transition-all ${
+                    proximityVolumeEnabled ? 'left-4.5' : 'left-0.5'
+                  }`"
+                />
+              </span>
+            </button>
+          </div>
+        </div>
+
         <!-- Map Builder Quick Access (Visible for Admin Users) -->
         <button
           v-if="currentUser.isAdmin"
@@ -1233,7 +1398,54 @@ function handleToggleBuilderMode() {
         <span v-else>⚠️ Trouble connecting to a nearby peer — retrying…</span>
       </div>
 
-      <!-- Chime Toast: another user rang you (via the bell button in Chat & People) -->
+      <!-- Incoming ring: actionable, so it can be answered rather than only read. -->
+      <transition
+        enter-active-class="transition duration-300 ease-out"
+        enter-from-class="opacity-0 -translate-y-4"
+        enter-to-class="opacity-100 translate-y-0"
+        leave-active-class="transition duration-200 ease-in"
+        leave-from-class="opacity-100 translate-y-0"
+        leave-to-class="opacity-0 -translate-y-4"
+      >
+        <div
+          v-if="incomingRing"
+          class="absolute top-4 right-4 z-50 w-64 bg-indigo-300 text-slate-950 border-3 border-slate-900 p-3 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] flex flex-col gap-2.5"
+        >
+          <div class="flex items-center gap-2">
+            <span class="text-lg animate-bounce">🔔</span>
+            <div class="min-w-0">
+              <p class="font-heading font-extrabold text-xs truncate">{{ incomingRing.fromName }}</p>
+              <p class="text-[10px] font-bold text-slate-800">is ringing you</p>
+            </div>
+            <button
+              type="button"
+              @click="dismissIncomingRing"
+              title="Dismiss"
+              class="ml-auto p-1 rounded-lg bg-white/70 hover:bg-white border-2 border-slate-900 pixel-btn shrink-0"
+            >
+              <X class="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <div class="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              @click="goToRinger"
+              class="py-1.5 text-[11px] font-extrabold rounded-lg bg-amber-300 hover:bg-amber-400 border-2 border-slate-900 flex items-center justify-center gap-1 pixel-btn font-heading"
+            >
+              <Compass class="w-3.5 h-3.5" /> Go to
+            </button>
+            <button
+              type="button"
+              @click="ringBack"
+              class="py-1.5 text-[11px] font-extrabold rounded-lg bg-white hover:bg-slate-100 border-2 border-slate-900 flex items-center justify-center gap-1 pixel-btn font-heading"
+            >
+              <BellRing class="w-3.5 h-3.5" /> Ring back
+            </button>
+          </div>
+        </div>
+      </transition>
+
+      <!-- Transient status messages (ring confirmations, delete failures, ...) -->
       <transition
         enter-active-class="transition duration-300 ease-out"
         enter-from-class="opacity-0 -translate-y-4"
@@ -1261,6 +1473,7 @@ function handleToggleBuilderMode() {
         :selectedObject="selectedObject"
         :zoneDrawMode="zoneDrawMode"
         @zoneDrawn="handleZoneDrawn"
+        @userContextMenu="openUserContextMenu"
         @move="handleMove"
         @navigateTile="handleNavigateTile"
         @interactObject="(obj) => activeObjectModal = obj"
@@ -1329,7 +1542,7 @@ function handleToggleBuilderMode() {
         @openAvatarBuilder="showAvatarBuilderModal = true"
         @toggleChat="handleToggleChat"
         @moveToDesk="handleMoveToDesk"
-        @cyclePresenceStatus="cyclePresenceStatus"
+        @setPresenceStatus="(s: PresenceStatus) => (presenceStatus = s)"
       />
 
       <!-- Floating WebRTC Video Dock -->
@@ -1359,6 +1572,57 @@ function handleToggleBuilderMode() {
         :showClose="true"
         @close="showAvatarBuilderModal = false"
       />
+    </div>
+
+    <!-- Per-user context menu: right-click someone on the map -->
+    <div
+      v-if="userMenu && userMenuTarget"
+      data-user-menu
+      class="fixed z-50 w-60 bg-white border-3 border-slate-900 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] p-3 flex flex-col gap-2.5"
+      :style="{ left: `${userMenu.x}px`, top: `${userMenu.y}px` }"
+    >
+      <div class="flex items-center gap-2 border-b-2 border-slate-900 pb-2">
+        <span
+          :class="`w-3 h-3 rounded-full border-2 border-slate-900 shrink-0 ${
+            userMenuTarget.presenceStatus === 'dnd'
+              ? 'bg-rose-500'
+              : userMenuTarget.presenceStatus === 'busy'
+              ? 'bg-amber-500'
+              : 'bg-emerald-500'
+          }`"
+        />
+        <p class="text-xs font-extrabold text-slate-900 font-heading truncate">{{ userMenuTarget.name }}</p>
+        <button
+          type="button"
+          @click="closeUserMenu"
+          class="ml-auto p-0.5 rounded bg-slate-100 hover:bg-slate-200 border-2 border-slate-900 pixel-btn shrink-0"
+        >
+          <X class="w-3 h-3" />
+        </button>
+      </div>
+
+      <div>
+        <div class="flex items-center justify-between mb-1">
+          <label class="text-[10px] font-bold text-slate-700 uppercase tracking-wider font-heading flex items-center gap-1">
+            <Volume2 class="w-3.5 h-3.5" /> Volume
+          </label>
+          <span class="text-[10px] font-extrabold text-slate-900">
+            {{ Math.round(getUserVolume(userMenu.socketId) * 100) }}%
+          </span>
+        </div>
+        <input
+          type="range"
+          min="0"
+          max="200"
+          step="5"
+          :value="Math.round(getUserVolume(userMenu.socketId) * 100)"
+          @input="setUserVolume(userMenu.socketId, Number(($event.target as HTMLInputElement).value) / 100)"
+          class="w-full accent-indigo-500"
+        />
+        <p class="text-[10px] text-slate-600 font-bold mt-0.5">
+          Relative to proximity - 100% leaves them as the room decides.
+        </p>
+      </div>
     </div>
 
     <!-- Interactive Object Modal -->

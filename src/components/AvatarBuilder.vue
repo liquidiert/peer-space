@@ -154,7 +154,7 @@ function randomize() {
     <!-- Live Preview Stage -->
     <div class="flex flex-col items-center justify-center py-3.5 sm:py-4 bg-amber-50 border-2 border-slate-900 rounded-xl mb-3 relative overflow-hidden shadow-[3px_3px_0px_0px_#0f172a] shrink-0">
       <!-- Background Grid Accent -->
-      <div class="absolute inset-0 bg-[radial-gradient(#0f172a_1px,transparent_1px)] [background-size:12px_12px] opacity-20" />
+      <div class="absolute inset-0 bg-[radial-gradient(#0f172a_1px,transparent_1px)] bg-size-[12px_12px] opacity-20" />
 
       <div class="flex items-center gap-3 z-10">
         <!-- The character, drawn by the same sprite code the world canvas uses. -->

@@ -287,10 +287,6 @@ export function drawAvatarSprite(
     ctx.fillRect(ox + 11 * scale, oy + 1 * scale, 4 * scale, 4 * scale);
     ctx.fillStyle = color;
     ctx.fillRect(ox + 12 * scale, oy + 2 * scale, 2 * scale, 2 * scale);
-    if (presence === 'dnd') {
-      ctx.fillStyle = AV_INK;
-      ctx.fillRect(ox + 12 * scale, oy + 2 * scale, 2 * scale, 1 * scale);
-    }
   }
 
   // --- Status emoji chip ------------------------------------------------------

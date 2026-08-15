@@ -229,6 +229,39 @@ export function useWebRTCProximity(
 
   const MAX_AUDIO_DISTANCE = 4; // Tiles
 
+  /**
+   * Per-listener volume trim, socketId -> multiplier. 1 is untouched; below 1 turns someone
+   * down, above 1 turns them up relative to what proximity would otherwise give.
+   *
+   * Deliberately a multiplier rather than an absolute level: an absolute one would be
+   * overwritten the moment either of you moved. It is also session-scoped, keyed by socket
+   * id, because that is what the audio elements are keyed by - a preference that outlived
+   * the session would need to be keyed by user id and reconciled on every join.
+   */
+  const perUserVolume = ref<Record<string, number>>({});
+
+  /** Whether distance attenuates volume at all. Off = a flat level for everyone in range. */
+  const proximityVolumeEnabled = ref(true);
+
+  /** An <audio> element's volume only accepts 0..1, so a boost can never exceed full scale. */
+  function clampVolume(v: number): number {
+    return Math.max(0, Math.min(1, Math.round(v * 100) / 100));
+  }
+
+  function setUserVolume(socketId: string, gain: number) {
+    perUserVolume.value = { ...perUserVolume.value, [socketId]: Math.max(0, Math.min(2, gain)) };
+    updateRemoteVolume(socketId);
+  }
+
+  function getUserVolume(socketId: string): number {
+    return perUserVolume.value[socketId] ?? 1;
+  }
+
+  function setProximityVolumeEnabled(enabled: boolean) {
+    proximityVolumeEnabled.value = enabled;
+    updateAllRemoteVolumes();
+  }
+
   // 1. Initialize Microphone Audio Stream
   async function initLocalAudio() {
     try {
@@ -981,13 +1014,23 @@ export function useWebRTCProximity(
 
     if (!isWithinProximityRange(targetUser)) return 0;
 
+    // Per-listener trim, set from the right-click menu on someone's avatar. Applied as a
+    // multiplier on top of whatever the room decides, so it survives walking around rather
+    // than being a one-off absolute level that distance immediately overrides.
+    const gain = perUserVolume.value[targetUser.socketId] ?? 1;
+
+    // With proximity volume switched off the room stops attenuating by distance entirely -
+    // anyone you can hear at all, you hear at full level. Range and zone gating still apply,
+    // so this makes the space behave like a normal call rather than removing the walls.
+    if (!proximityVolumeEnabled.value) return clampVolume(gain);
+
     // Private Zone: both inside the same zone counts as full volume regardless of distance
-    if (me.currentZoneId && targetUser.currentZoneId) return 1.0;
+    if (me.currentZoneId && targetUser.currentZoneId) return clampVolume(gain);
 
     // Both on main open floor -> linear distance attenuation (1.0 at distance 0, 0.0 at MAX_AUDIO_DISTANCE)
     const dist = Math.hypot(me.position.x - targetUser.position.x, me.position.y - targetUser.position.y);
     const rawVolume = 1 - dist / MAX_AUDIO_DISTANCE;
-    return Math.max(0, Math.min(1, Math.round(rawVolume * 100) / 100));
+    return clampVolume(rawVolume * gain);
   }
 
   function updateRemoteVolume(targetSocketId: string) {
@@ -1111,6 +1154,11 @@ export function useWebRTCProximity(
     hasConnectionTrouble,
     troubledPeerIds,
     peerConnectionStates,
+    perUserVolume,
+    setUserVolume,
+    getUserVolume,
+    proximityVolumeEnabled,
+    setProximityVolumeEnabled,
     // Read-only escape hatch for integration tests to inspect actual RTCPeerConnection state
     // (signaling state, senders/tracks) instead of re-deriving it from reactive refs alone.
     // Not used by any UI component.

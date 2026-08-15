@@ -494,22 +494,36 @@ async function startServer() {
 
     // Chime: ring a colleague's client to get their attention (particularly meant for
     // reaching someone marked Busy/DND, but works on anyone).
-    socket.on('user:chime', (payload: { to: string }) => {
-      const sender = users.get(socket.id);
-      const target = users.get(payload?.to);
-      if (!sender || !target || target.socketId === sender.socketId) return;
+    socket.on(
+      'user:chime',
+      (payload: { to: string }, ack?: (r: { ok: boolean; reason?: string; name?: string }) => void) => {
+        // Acknowledged so the sender learns what happened. Ringing someone is a request for
+        // their attention, and every outcome here used to be a silent `return` - so a
+        // rate-limited ring and a delivered one looked identical from the sending side.
+        const reply = (ok: boolean, reason?: string, name?: string) => {
+          if (typeof ack === 'function') ack({ ok, reason, name });
+        };
 
-      const key = `${sender.socketId}->${target.socketId}`;
-      const now = Date.now();
-      const last = lastChimeAt.get(key) || 0;
-      if (now - last < CHIME_COOLDOWN_MS) return; // rate limited, ignore silently
-      lastChimeAt.set(key, now);
+        const sender = users.get(socket.id);
+        const target = users.get(payload?.to);
+        if (!sender) return reply(false, 'not_joined');
+        if (!target || target.socketId === sender.socketId) return reply(false, 'gone');
 
-      io.to(target.socketId).emit('chime:received', {
-        fromSocketId: sender.socketId,
-        fromName: sender.name,
-      });
-    });
+        const key = `${sender.socketId}->${target.socketId}`;
+        const now = Date.now();
+        const last = lastChimeAt.get(key) || 0;
+        if (now - last < CHIME_COOLDOWN_MS) {
+          return reply(false, 'rate_limited', target.name);
+        }
+        lastChimeAt.set(key, now);
+
+        io.to(target.socketId).emit('chime:received', {
+          fromSocketId: sender.socketId,
+          fromName: sender.name,
+        });
+        reply(true, undefined, target.name);
+      }
+    );
 
     // Interactive Object: Whiteboard stroke
     socket.on('object:whiteboard_stroke', (payload: { objectId: string; stroke: WhiteboardStroke }) => {
