@@ -205,7 +205,7 @@ const myDesk = computed(() => {
         type="button"
         @click="presenceMenuOpen = !presenceMenuOpen"
         :title="`Status: ${presenceMeta.label}`"
-        :class="`h-10 px-3 sm:px-3.5 sm:w-[5.5rem] border-2 border-slate-900 rounded-xl text-xs font-bold text-slate-900 inline-flex items-center justify-center gap-2 transition-colors pixel-btn shadow-[2px_2px_0px_0px_#0f172a] ${
+        :class="`h-10 px-3 sm:px-3.5 sm:w-22 border-2 border-slate-900 rounded-xl text-xs font-bold text-slate-900 inline-flex items-center justify-center gap-2 transition-colors pixel-btn shadow-[2px_2px_0px_0px_#0f172a] ${
           presenceMenuOpen ? 'bg-amber-300' : 'bg-slate-100 hover:bg-slate-200'
         }`"
       >
