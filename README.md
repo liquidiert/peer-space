@@ -1,6 +1,6 @@
 # PeerSpace ![peer-space-logo.png](public\favicon-32x32.png)
 
-Pixel Office World (PeerSpace) is a real-time 2D spatial virtual office and multiplayer workspace. Features interactive avatars, private meeting zones, proximity video/audio docks, and an interactive Admin Map Builder.
+PeerSpace is a real-time 2D spatial virtual office and multiplayer workspace. Features interactive avatars, private meeting zones, proximity video/audio docks, and an interactive Admin Map Builder.
 
 ---
 
@@ -42,8 +42,8 @@ Create a `.env` file or supply environment variables to your deployment environm
 | :--- | :--- | :--- |
 | `PORT` | Container internal & exposed port | `3000` |
 | `NODE_ENV` | Environment mode | `production` |
-| `KEYCLOAK_URL` | Base URL of Keycloak Realm | `https://cloak.dev.personalclientcare.com/realms/ins3c` |
-| `KEYCLOAK_CLIENT_ID` | Keycloak OIDC Client ID | `ins3c-login` |
+| `KEYCLOAK_URL` | Base URL of Keycloak Realm | `https://cloak.my-domain.com/realms/peer-space` |
+| `KEYCLOAK_CLIENT_ID` | Keycloak OIDC Client ID | `peer-space` |
 | `KEYCLOAK_CLIENT_SECRET` | Keycloak Client Secret (if confidential) | `""` |
 
 ---
@@ -75,8 +75,8 @@ docker run -d \
   --name peerspace \
   -p 3000:3000 \
   -e NODE_ENV=production \
-  -e KEYCLOAK_URL="https://cloak.dev.personalclientcare.com/realms/ins3c" \
-  -e KEYCLOAK_CLIENT_ID="ins3c-login" \
+  -e KEYCLOAK_URL="https://cloak.my-domain.com/realms/peer-space" \
+  -e KEYCLOAK_CLIENT_ID="peer-space" \
   peerspace-app
 ```
 
