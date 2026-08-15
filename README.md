@@ -1,4 +1,4 @@
-# Pixel Office World 🎮🏢
+# PeerSpace ![peer-space-logo.png](public\favicon-32x32.png)
 
 Pixel Office World (PeerSpace) is a real-time 2D spatial virtual office and multiplayer workspace. Features interactive avatars, private meeting zones, proximity video/audio docks, and an interactive Admin Map Builder.
 
