@@ -1120,6 +1120,17 @@ function handleToggleBuilderMode() {
     builderMode.value = false;
   }
 }
+function handlePlaceDummy() {
+  if (!socket.value || !currentUser.value?.isAdmin) return;
+  const pos = currentUser.value.position;
+  socket.value.emit('dummy:place', {
+    x: pos.x,
+    y: pos.y,
+    direction: currentUser.value.direction,
+    presenceStatus: 'available',
+  });
+}
+
 </script>
 
 <template>
@@ -1543,6 +1554,7 @@ function handleToggleBuilderMode() {
         @toggleChat="handleToggleChat"
         @moveToDesk="handleMoveToDesk"
         @setPresenceStatus="(s: PresenceStatus) => (presenceStatus = s)"
+        @placeDummy="handlePlaceDummy"
       />
 
       <!-- Floating WebRTC Video Dock -->

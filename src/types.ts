@@ -38,6 +38,7 @@ export interface User {
   currentZoneId: string | null;
   lastSeen: number;
   presenceStatus: PresenceStatus;
+  isDummy?: boolean;
 }
 
 export type TileType = 

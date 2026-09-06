@@ -1,19 +1,32 @@
-import { Hono } from 'hono';
-import { getRequestListener } from '@hono/node-server';
-import { serveStatic } from '@hono/node-server/serve-static';
-import { createServer } from 'http';
-import { createServer as createHttpsServer } from 'https';
-import { Server, Socket } from 'socket.io';
-import path from 'path';
-import fs from 'fs';
-import os from 'os';
-import { createServer as createViteServer } from 'vite';
-import { User, GridMap, ChatMessage, MapObject, WhiteboardStroke, StickyNote, PrivateZone, PresenceStatus } from './src/types';
-import { createDefaultOfficeMap, createBeachRetreatMap } from './src/mapsData';
-import { initWorkspaceDatabase } from './src/db';
-import { createSessionToken, verifySessionToken } from './src/lib/session';
-import { canDeleteNote } from './src/lib/notePermissions';
-import { canClaimDesk, canManageDesk, isDeskEquipment } from './src/lib/deskPermissions';
+import { Hono } from "hono";
+import { getRequestListener } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
+import { createServer } from "http";
+import { createServer as createHttpsServer } from "https";
+import { Server, Socket } from "socket.io";
+import path from "path";
+import fs from "fs";
+import os from "os";
+import { createServer as createViteServer } from "vite";
+import {
+  User,
+  GridMap,
+  ChatMessage,
+  MapObject,
+  WhiteboardStroke,
+  StickyNote,
+  PrivateZone,
+  PresenceStatus,
+} from "./src/types";
+import { createDefaultOfficeMap, createBeachRetreatMap } from "./src/mapsData";
+import { initWorkspaceDatabase } from "./src/db";
+import { createSessionToken, verifySessionToken } from "./src/lib/session";
+import { canDeleteNote } from "./src/lib/notePermissions";
+import {
+  canClaimDesk,
+  canManageDesk,
+  isDeskEquipment,
+} from "./src/lib/deskPermissions";
 import {
   createGameState,
   findWinner,
@@ -22,8 +35,8 @@ import {
   resolveMove,
   specFor,
   type GameTableGame,
-} from './src/lib/gameTable';
-import { isTileWalkable } from './src/lib/pathfinding';
+} from "./src/lib/gameTable";
+import { isTileWalkable } from "./src/lib/pathfinding";
 
 async function startServer() {
   const app = new Hono();
@@ -55,12 +68,16 @@ async function startServer() {
    * one would open an empty modal. Stripping on load is a one-way migration: the next save
    * writes the cleaned map back.
    */
-  const RETIRED_OBJECT_TYPES = new Set(['jukebox', 'tv', 'coffee_machine']);
+  const RETIRED_OBJECT_TYPES = new Set(["jukebox", "tv", "coffee_machine"]);
   function stripRetiredObjects(map: GridMap): GridMap {
-    const kept = (map.objects || []).filter((o) => !RETIRED_OBJECT_TYPES.has(o.type as string));
+    const kept = (map.objects || []).filter(
+      (o) => !RETIRED_OBJECT_TYPES.has(o.type as string),
+    );
     const removed = (map.objects || []).length - kept.length;
     if (removed > 0) {
-      console.log(`[maps] Removed ${removed} retired object(s) from "${map.name}".`);
+      console.log(
+        `[maps] Removed ${removed} retired object(s) from "${map.name}".`,
+      );
     }
     return { ...map, objects: kept };
   }
@@ -70,7 +87,8 @@ async function startServer() {
     savedMaps.forEach((m) => {
       const cleaned = stripRetiredObjects(m);
       maps.set(cleaned.id, cleaned);
-      if (cleaned.objects.length !== (m.objects || []).length) db.saveMap(cleaned);
+      if (cleaned.objects.length !== (m.objects || []).length)
+        db.saveMap(cleaned);
     });
   } else {
     maps.set(defaultOffice.id, defaultOffice);
@@ -94,18 +112,21 @@ async function startServer() {
   }
 
   let vite: any;
-  if (process.env.NODE_ENV !== 'production') {
+  if (process.env.NODE_ENV !== "production") {
     vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: 'spa',
+      appType: "spa",
     });
   }
 
   const listener = getRequestListener(app.fetch);
 
-  const requestHandler = (req: import('http').IncomingMessage, res: import('http').ServerResponse) => {
-    const url = req.url || '';
-    if (url.startsWith('/api/') || url.startsWith('/auth/')) {
+  const requestHandler = (
+    req: import("http").IncomingMessage,
+    res: import("http").ServerResponse,
+  ) => {
+    const url = req.url || "";
+    if (url.startsWith("/api/") || url.startsWith("/auth/")) {
       listener(req, res);
     } else if (vite) {
       vite.middlewares(req, res, () => {
@@ -119,21 +140,27 @@ async function startServer() {
   // In local dev, serve HTTPS if mkcert-generated certs are present (certs/dev-cert.pem, certs/dev-key.pem).
   // Mobile browsers only expose getUserMedia (mic/camera) on secure contexts, and a LAN IP over
   // plain http:// doesn't qualify - so testing WebRTC features from a phone needs this.
-  const devCertPath = path.resolve(__dirname, 'certs/dev-cert.pem');
-  const devKeyPath = path.resolve(__dirname, 'certs/dev-key.pem');
-  const useHttps = process.env.NODE_ENV !== 'production' && fs.existsSync(devCertPath) && fs.existsSync(devKeyPath);
+  const devCertPath = path.resolve(__dirname, "certs/dev-cert.pem");
+  const devKeyPath = path.resolve(__dirname, "certs/dev-key.pem");
+  const useHttps =
+    process.env.NODE_ENV !== "production" &&
+    fs.existsSync(devCertPath) &&
+    fs.existsSync(devKeyPath);
 
   const httpServer = useHttps
     ? createHttpsServer(
-        { cert: fs.readFileSync(devCertPath), key: fs.readFileSync(devKeyPath) },
-        requestHandler
+        {
+          cert: fs.readFileSync(devCertPath),
+          key: fs.readFileSync(devKeyPath),
+        },
+        requestHandler,
       )
     : createServer(requestHandler);
 
   const io = new Server(httpServer, {
     cors: {
-      origin: '*',
-      methods: ['GET', 'POST'],
+      origin: "*",
+      methods: ["GET", "POST"],
     },
   });
 
@@ -152,7 +179,7 @@ async function startServer() {
     }
     // 2. Automatic private zone for 2x1 desks (lower 2x1 standing area y = desk.y + height, and desk tile itself)
     for (const obj of map.objects) {
-      if (obj.type === 'desk') {
+      if (obj.type === "desk") {
         const deskW = obj.width || 2;
         const deskH = obj.height || 1;
         if (
@@ -168,9 +195,19 @@ async function startServer() {
   }
 
   // Helper: is this tile currently stood on by some other connected user?
-  function isOccupiedByOtherUser(x: number, y: number, excludeSocketId: string): boolean {
+  function isOccupiedByOtherUser(
+    x: number,
+    y: number,
+    excludeSocketId: string,
+    forAdmin = false,
+  ): boolean {
     for (const u of users.values()) {
-      if (u.socketId !== excludeSocketId && u.position.x === x && u.position.y === y) {
+      if (
+        u.socketId !== excludeSocketId &&
+        u.position.x === x &&
+        u.position.y === y
+      ) {
+        if (u.isDummy && !forAdmin) continue;
         return true;
       }
     }
@@ -182,9 +219,18 @@ async function startServer() {
   function findFreeSpawnTile(
     map: GridMap,
     preferred: { x: number; y: number },
-    excludeSocketId: string
+    excludeSocketId: string,
+    forAdmin = false,
   ): { x: number; y: number } {
-    if (isTileWalkable(map, preferred.x, preferred.y) && !isOccupiedByOtherUser(preferred.x, preferred.y, excludeSocketId)) {
+    if (
+      isTileWalkable(map, preferred.x, preferred.y) &&
+      !isOccupiedByOtherUser(
+        preferred.x,
+        preferred.y,
+        excludeSocketId,
+        forAdmin,
+      )
+    ) {
       return preferred;
     }
     for (let radius = 1; radius <= 10; radius++) {
@@ -193,7 +239,10 @@ async function startServer() {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue; // ring only
           const x = preferred.x + dx;
           const y = preferred.y + dy;
-          if (isTileWalkable(map, x, y) && !isOccupiedByOtherUser(x, y, excludeSocketId)) {
+          if (
+            isTileWalkable(map, x, y) &&
+            !isOccupiedByOtherUser(x, y, excludeSocketId, forAdmin)
+          ) {
             return { x, y };
           }
         }
@@ -211,10 +260,20 @@ async function startServer() {
     const PROXIMITY_TILE_RADIUS = 7; // Maximum tile distance for proximity voice
 
     userList.forEach((userA) => {
-      const activePeers: { peerId: string; distance: number; inSameZone: boolean }[] = [];
+      // Dummies are completely invisible to non-admins
+      if (userA.isDummy && !userA.isAdmin) return;
+
+      const activePeers: {
+        peerId: string;
+        distance: number;
+        inSameZone: boolean;
+      }[] = [];
 
       userList.forEach((userB) => {
         if (userA.socketId === userB.socketId) return;
+
+        // Dummies are completely invisible to non-admins
+        if (userB.isDummy && !userA.isAdmin) return;
 
         const zoneA = userA.currentZoneId;
         const zoneB = userB.currentZoneId;
@@ -224,32 +283,69 @@ async function startServer() {
         if (zoneA || zoneB) {
           if (zoneA && zoneB && zoneA === zoneB) {
             // Both in same private zone -> Always connected regardless of grid distance!
-            activePeers.push({ peerId: userB.socketId, distance: 0, inSameZone: true });
+            activePeers.push({
+              peerId: userB.socketId,
+              distance: 0,
+              inSameZone: true,
+            });
           }
           // If in different zones or one is outside -> no voice connection
           return;
         }
 
         // Neither is in a private zone -> Use Euclidean grid tile proximity
-        const dist = Math.hypot(userA.position.x - userB.position.x, userA.position.y - userB.position.y);
+        const dist = Math.hypot(
+          userA.position.x - userB.position.x,
+          userA.position.y - userB.position.y,
+        );
         if (dist <= PROXIMITY_TILE_RADIUS) {
-          activePeers.push({ peerId: userB.socketId, distance: dist, inSameZone: false });
+          activePeers.push({
+            peerId: userB.socketId,
+            distance: dist,
+            inSameZone: false,
+          });
         }
       });
 
-      io.to(userA.socketId).emit('spatial:proximity_update', {
+      io.to(userA.socketId).emit("spatial:proximity_update", {
         activePeers,
       });
     });
   }
 
+  // Emit an event only to connected admin users (excluding dummies)
+  function emitToAdmins(eventName: string, data: any) {
+    for (const [sId, u] of users.entries()) {
+      if (u.isAdmin && !u.isDummy) {
+        io.to(sId).emit(eventName, data);
+      }
+    }
+  }
+
+  // Broadcast a user-list event, hiding dummies from non-admin viewers
+  function broadcastUsersWithFilter(
+    eventName: string,
+    makePayload: (userList: User[]) => any,
+  ) {
+    const allUsers = Array.from(users.values());
+    const publicUsers = allUsers.filter((u) => !u.isDummy);
+
+    for (const [sId, u] of users.entries()) {
+      if (u.isDummy) continue;
+      io.to(sId).emit(
+        eventName,
+        makePayload(u.isAdmin ? allUsers : publicUsers),
+      );
+    }
+  }
+
   // Socket.IO event handlers
-  io.on('connection', (socket: Socket) => {
+  io.on("connection", (socket: Socket) => {
     console.log(`User connected: ${socket.id}`);
 
     // Join room
     socket.on(
-      'user:join',
+      "user:join",
       (payload: {
         name: string;
         avatar: any;
@@ -260,207 +356,249 @@ async function startServer() {
         lastPosition?: { mapId: string; x: number; y: number };
         presenceStatus?: PresenceStatus;
       }) => {
-      const map = maps.get(currentMapId) || defaultOffice;
+        const map = maps.get(currentMapId) || defaultOffice;
 
-      // Resume where the browser last left off, as long as it was on this same map and the
-      // tile is still walkable (map layout may have changed via the builder since then).
-      const lp = payload.lastPosition;
-      const preferredPosition =
-        lp && lp.mapId === map.id && isTileWalkable(map, lp.x, lp.y)
-          ? { x: lp.x, y: lp.y }
-          : { ...map.spawnPoint };
-      // Collision detection means two users can no longer share a tile - if the resume/spawn
-      // tile is already taken, nudge the new arrival to the nearest free tile instead.
-      const startPosition = findFreeSpawnTile(map, preferredPosition, socket.id);
-
-      const initialZone = getPrivateZoneId(map, startPosition.x, startPosition.y);
-
-      // isAdmin and a cross-device stable identity (email) can ONLY come from a verified
-      // Keycloak session token - payload.isAdmin/email are otherwise fully client-controlled
-      // and must never be trusted directly (that was previously a trivial privilege-escalation
-      // hole: any client could just send { isAdmin: true }).
-      const session = verifySessionToken(payload.sessionToken);
-
-      // A token that was *supplied but did not verify* means the client is holding a stale
-      // login - either past the 12h TTL, or signed with a secret from a previous server boot
-      // (which is what happens on every restart whenever SESSION_SECRET is unset). Silently
-      // treating that as "guest" is what made admin look broken rather than expired: the
-      // client still shows the cached Admin badge it persisted to localStorage, while every
-      // admin handler here rejects them. Tell the client so it can re-authenticate instead.
-      if (payload.sessionToken && !session) {
-        console.warn(
-          `[auth] Stale session token from ${socket.id} - expired, or signed with a previous ` +
-            `SESSION_SECRET. Asking the client to sign in again.`
+        // Resume where the browser last left off, as long as it was on this same map and the
+        // tile is still walkable (map layout may have changed via the builder since then).
+        const lp = payload.lastPosition;
+        const preferredPosition =
+          lp && lp.mapId === map.id && isTileWalkable(map, lp.x, lp.y)
+            ? { x: lp.x, y: lp.y }
+            : { ...map.spawnPoint };
+        // Collision detection means two users can no longer share a tile - if the resume/spawn
+        // tile is already taken, nudge the new arrival to the nearest free tile instead.
+        const startPosition = findFreeSpawnTile(
+          map,
+          preferredPosition,
+          socket.id,
         );
-        socket.emit('auth:expired');
-      }
 
-      const isAdmin = session ? session.isAdmin : false;
-      const email = session ? session.email : undefined;
-      const displayName = session?.name || payload.name || `Guest_${socket.id.substring(0, 4)}`;
+        const initialZone = getPrivateZoneId(
+          map,
+          startPosition.x,
+          startPosition.y,
+        );
 
-      // Prefer a stable identity that survives reloads/reconnects (socket.id is re-generated
-      // every connection) - the verified email when authenticated, else the persisted
-      // per-browser clientId, else fall back to socket.id for older/guest clients.
-      const stableId = email || payload.clientId || socket.id;
+        // isAdmin and a cross-device stable identity (email) can ONLY come from a verified
+        // Keycloak session token - payload.isAdmin/email are otherwise fully client-controlled
+        // and must never be trusted directly (that was previously a trivial privilege-escalation
+        // hole: any client could just send { isAdmin: true }).
+        const session = verifySessionToken(payload.sessionToken);
 
-      const validPresenceStatuses: PresenceStatus[] = ['available', 'busy', 'dnd'];
-      const presenceStatus = validPresenceStatuses.includes(payload.presenceStatus as PresenceStatus)
-        ? (payload.presenceStatus as PresenceStatus)
-        : 'available';
+        // A token that was *supplied but did not verify* means the client is holding a stale
+        // login - either past the 12h TTL, or signed with a secret from a previous server boot
+        // (which is what happens on every restart whenever SESSION_SECRET is unset). Silently
+        // treating that as "guest" is what made admin look broken rather than expired: the
+        // client still shows the cached Admin badge it persisted to localStorage, while every
+        // admin handler here rejects them. Tell the client so it can re-authenticate instead.
+        if (payload.sessionToken && !session) {
+          console.warn(
+            `[auth] Stale session token from ${socket.id} - expired, or signed with a previous ` +
+              `SESSION_SECRET. Asking the client to sign in again.`,
+          );
+          socket.emit("auth:expired");
+        }
 
-      const newUser: User = {
-        id: stableId,
-        socketId: socket.id,
-        name: displayName,
-        position: startPosition,
-        direction: 'down',
-        avatar: payload.avatar || {
-          skinColor: '#f87171',
-          hairStyle: 'short',
-          hairColor: '#1e293b',
-          outfitColor: '#3b82f6',
-          glasses: false,
-          hatStyle: 'none',
-          statusEmoji: '👋',
-        },
-        isMuted: false,
-        isDeafened: false,
-        isSpeaking: false,
-        isScreenSharing: false,
-        isAdmin,
-        currentZoneId: initialZone,
-        lastSeen: Date.now(),
-        presenceStatus,
-      };
+        const isAdmin = session ? session.isAdmin : false;
+        const email = session ? session.email : undefined;
+        const displayName =
+          session?.name || payload.name || `Guest_${socket.id.substring(0, 4)}`;
 
-      users.set(socket.id, newUser);
+        // Prefer a stable identity that survives reloads/reconnects (socket.id is re-generated
+        // every connection) - the verified email when authenticated, else the persisted
+        // per-browser clientId, else fall back to socket.id for older/guest clients.
+        const stableId = email || payload.clientId || socket.id;
 
-      // Send initial map & user state to connected user
-      socket.emit('init:state', {
-        currentUser: newUser,
-        currentMap: map,
-        users: Array.from(users.values()),
-      });
+        const validPresenceStatuses: PresenceStatus[] = [
+          "available",
+          "busy",
+          "dnd",
+        ];
+        const presenceStatus = validPresenceStatuses.includes(
+          payload.presenceStatus as PresenceStatus,
+        )
+          ? (payload.presenceStatus as PresenceStatus)
+          : "available";
 
-      // Notify others
-      socket.broadcast.emit('user:joined', newUser);
+        const newUser: User = {
+          id: stableId,
+          socketId: socket.id,
+          name: displayName,
+          position: startPosition,
+          direction: "down",
+          avatar: payload.avatar || {
+            skinColor: "#f87171",
+            hairStyle: "short",
+            hairColor: "#1e293b",
+            outfitColor: "#3b82f6",
+            glasses: false,
+            hatStyle: "none",
+            statusEmoji: "👋",
+          },
+          isMuted: false,
+          isDeafened: false,
+          isSpeaking: false,
+          isScreenSharing: false,
+          isAdmin,
+          currentZoneId: initialZone,
+          lastSeen: Date.now(),
+          presenceStatus,
+        };
 
-      updateSpatialProximity();
-      }
+        users.set(socket.id, newUser);
+
+        // Send initial map & user state to connected user
+        const visibleUsers = newUser.isAdmin
+          ? Array.from(users.values())
+          : Array.from(users.values()).filter((u) => !u.isDummy);
+        socket.emit("init:state", {
+          currentUser: newUser,
+          currentMap: map,
+          users: visibleUsers,
+        });
+
+        // Notify others
+        socket.broadcast.emit("user:joined", newUser);
+
+        updateSpatialProximity();
+      },
     );
 
     // Handle User Movement
-    socket.on('user:move', (data: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right'; ghost?: boolean }) => {
-      const user = users.get(socket.id);
-      if (!user) return;
+    socket.on(
+      "user:move",
+      (data: {
+        x: number;
+        y: number;
+        direction: "up" | "down" | "left" | "right";
+        ghost?: boolean;
+      }) => {
+        const user = users.get(socket.id);
+        if (!user) return;
 
-      const map = maps.get(currentMapId);
-      if (!map) return;
+        const map = maps.get(currentMapId);
+        if (!map) return;
 
-      const validDirections = ['up', 'down', 'left', 'right'];
-      if (!validDirections.includes(data.direction)) return;
+        const validDirections = ["up", "down", "left", "right"];
+        if (!validDirections.includes(data.direction)) return;
 
-      /**
-       * A blocked move still turns the character to face the way they tried to go.
-       *
-       * Every rejection below used to be a bare `return`, so walking into a wall left the
-       * avatar facing whatever direction it happened to be facing already - most obviously
-       * after arriving somewhere by click-to-move, where the facing is a side effect of the
-       * last step of the path. Turning on the spot is always legal: it changes no position,
-       * no zone and no collision, so it cannot be used to walk through anything.
-       */
-      const turnInPlace = () => {
-        if (user.direction === data.direction) return;
+        /**
+         * A blocked move still turns the character to face the way they tried to go.
+         *
+         * Every rejection below used to be a bare `return`, so walking into a wall left the
+         * avatar facing whatever direction it happened to be facing already - most obviously
+         * after arriving somewhere by click-to-move, where the facing is a side effect of the
+         * last step of the path. Turning on the spot is always legal: it changes no position,
+         * no zone and no collision, so it cannot be used to walk through anything.
+         */
+        const turnInPlace = () => {
+          if (user.direction === data.direction) return;
+          user.direction = data.direction;
+          user.lastSeen = Date.now();
+          io.emit("user:moved", {
+            userId: socket.id,
+            position: user.position,
+            direction: user.direction,
+            currentZoneId: user.currentZoneId,
+          });
+        };
+
+        // Validate bounds
+        if (
+          data.x < 0 ||
+          data.x >= map.width ||
+          data.y < 0 ||
+          data.y >= map.height
+        ) {
+          return turnInPlace();
+        }
+
+        // Check collision with tile or blocking map objects
+        const targetTile = map.tiles[data.y]?.[data.x];
+        if (
+          targetTile === "wall_brick" ||
+          targetTile === "wall_wood" ||
+          targetTile === "water"
+        ) {
+          return turnInPlace(); // blocked
+        }
+
+        const blockingObj = map.objects.find((obj) => {
+          if (!obj.isBlocking) return false;
+          return (
+            data.x >= obj.x &&
+            data.x < obj.x + obj.width &&
+            data.y >= obj.y &&
+            data.y < obj.y + obj.height
+          );
+        });
+
+        if (blockingObj) {
+          return turnInPlace(); // blocked
+        }
+
+        // Collision with other users - two people can no longer occupy the same tile, unless
+        // the mover is holding Ghost mode (client sends `ghost: true` while "g" is held).
+        // Authoritative here (not just client-side) so simultaneous moves from two clients
+        // can't both land on the same tile via a race.
+        if (!data.ghost && isOccupiedByOtherUser(data.x, data.y, socket.id)) {
+          return turnInPlace(); // blocked
+        }
+
+        // Update position & zone
+        user.position = { x: data.x, y: data.y };
         user.direction = data.direction;
+        user.currentZoneId = getPrivateZoneId(map, data.x, data.y);
         user.lastSeen = Date.now();
-        io.emit('user:moved', {
+
+        // Broadcast move to all users
+        io.emit("user:moved", {
           userId: socket.id,
           position: user.position,
           direction: user.direction,
           currentZoneId: user.currentZoneId,
         });
-      };
 
-      // Validate bounds
-      if (data.x < 0 || data.x >= map.width || data.y < 0 || data.y >= map.height) {
-        return turnInPlace();
-      }
-
-      // Check collision with tile or blocking map objects
-      const targetTile = map.tiles[data.y]?.[data.x];
-      if (targetTile === 'wall_brick' || targetTile === 'wall_wood' || targetTile === 'water') {
-        return turnInPlace(); // blocked
-      }
-
-      const blockingObj = map.objects.find((obj) => {
-        if (!obj.isBlocking) return false;
-        return (
-          data.x >= obj.x &&
-          data.x < obj.x + obj.width &&
-          data.y >= obj.y &&
-          data.y < obj.y + obj.height
-        );
-      });
-
-      if (blockingObj) {
-        return turnInPlace(); // blocked
-      }
-
-      // Collision with other users - two people can no longer occupy the same tile, unless
-      // the mover is holding Ghost mode (client sends `ghost: true` while "g" is held).
-      // Authoritative here (not just client-side) so simultaneous moves from two clients
-      // can't both land on the same tile via a race.
-      if (!data.ghost && isOccupiedByOtherUser(data.x, data.y, socket.id)) {
-        return turnInPlace(); // blocked
-      }
-
-      // Update position & zone
-      user.position = { x: data.x, y: data.y };
-      user.direction = data.direction;
-      user.currentZoneId = getPrivateZoneId(map, data.x, data.y);
-      user.lastSeen = Date.now();
-
-      // Broadcast move to all users
-      io.emit('user:moved', {
-        userId: socket.id,
-        position: user.position,
-        direction: user.direction,
-        currentZoneId: user.currentZoneId,
-      });
-
-      updateSpatialProximity();
-    });
+        updateSpatialProximity();
+      },
+    );
 
     // Handle User Profile / Status Update
-    socket.on('user:update_profile', (updates: Partial<User>) => {
+    socket.on("user:update_profile", (updates: Partial<User>) => {
       const user = users.get(socket.id);
       if (!user) return;
 
       if (updates.name) user.name = updates.name;
       if (updates.avatar) user.avatar = { ...user.avatar, ...updates.avatar };
-      if (typeof updates.isMuted === 'boolean') user.isMuted = updates.isMuted;
-      if (typeof updates.isDeafened === 'boolean') user.isDeafened = updates.isDeafened;
-      if (typeof updates.isSpeaking === 'boolean') user.isSpeaking = updates.isSpeaking;
-      if (typeof updates.isVideoOn === 'boolean') user.isVideoOn = updates.isVideoOn;
-      if (typeof updates.isAdmin === 'boolean' && user.isAdmin) user.isAdmin = updates.isAdmin;
-      if (updates.presenceStatus && ['available', 'busy', 'dnd'].includes(updates.presenceStatus)) {
+      if (typeof updates.isMuted === "boolean") user.isMuted = updates.isMuted;
+      if (typeof updates.isDeafened === "boolean")
+        user.isDeafened = updates.isDeafened;
+      if (typeof updates.isSpeaking === "boolean")
+        user.isSpeaking = updates.isSpeaking;
+      if (typeof updates.isVideoOn === "boolean")
+        user.isVideoOn = updates.isVideoOn;
+      if (typeof updates.isAdmin === "boolean" && user.isAdmin)
+        user.isAdmin = updates.isAdmin;
+      if (
+        updates.presenceStatus &&
+        ["available", "busy", "dnd"].includes(updates.presenceStatus)
+      ) {
         user.presenceStatus = updates.presenceStatus;
       }
 
-      io.emit('user:updated', user);
+      io.emit("user:updated", user);
     });
 
     // Handle WebRTC Signaling
-    socket.on('webrtc:signal', (data: { to: string; signal: any }) => {
-      io.to(data.to).emit('webrtc:signal', {
+    socket.on("webrtc:signal", (data: { to: string; signal: any }) => {
+      io.to(data.to).emit("webrtc:signal", {
         from: socket.id,
         signal: data.signal,
       });
     });
 
     // Handle Spatial / Room Chat
-    socket.on('chat:send', (payload: { text: string; isSpatial: boolean }) => {
+    socket.on("chat:send", (payload: { text: string; isSpatial: boolean }) => {
       const user = users.get(socket.id);
       if (!user) return;
 
@@ -480,80 +618,93 @@ async function startServer() {
         users.forEach((otherUser) => {
           const dist = Math.hypot(
             user.position.x - otherUser.position.x,
-            user.position.y - otherUser.position.y
+            user.position.y - otherUser.position.y,
           );
-          if (dist <= PROXIMITY_CHAT_RADIUS || user.socketId === otherUser.socketId) {
-            io.to(otherUser.socketId).emit('chat:message', chatMsg);
+          if (
+            dist <= PROXIMITY_CHAT_RADIUS ||
+            user.socketId === otherUser.socketId
+          ) {
+            io.to(otherUser.socketId).emit("chat:message", chatMsg);
           }
         });
       } else {
         // Broadcast global room message
-        io.emit('chat:message', chatMsg);
+        io.emit("chat:message", chatMsg);
       }
     });
 
     // Chime: ring a colleague's client to get their attention (particularly meant for
     // reaching someone marked Busy/DND, but works on anyone).
     socket.on(
-      'user:chime',
-      (payload: { to: string }, ack?: (r: { ok: boolean; reason?: string; name?: string }) => void) => {
+      "user:chime",
+      (
+        payload: { to: string },
+        ack?: (r: { ok: boolean; reason?: string; name?: string }) => void,
+      ) => {
         // Acknowledged so the sender learns what happened. Ringing someone is a request for
         // their attention, and every outcome here used to be a silent `return` - so a
         // rate-limited ring and a delivered one looked identical from the sending side.
         const reply = (ok: boolean, reason?: string, name?: string) => {
-          if (typeof ack === 'function') ack({ ok, reason, name });
+          if (typeof ack === "function") ack({ ok, reason, name });
         };
 
         const sender = users.get(socket.id);
         const target = users.get(payload?.to);
-        if (!sender) return reply(false, 'not_joined');
-        if (!target || target.socketId === sender.socketId) return reply(false, 'gone');
+        if (!sender) return reply(false, "not_joined");
+        if (!target || target.socketId === sender.socketId)
+          return reply(false, "gone");
+        // Dummies are invisible and cannot be interacted with by normal users
+        if (target.isDummy && !sender.isAdmin) return reply(false, "gone");
+        if (!sender.isAdmin && target.isDummy) return reply(false, "gone");
 
         const key = `${sender.socketId}->${target.socketId}`;
         const now = Date.now();
         const last = lastChimeAt.get(key) || 0;
         if (now - last < CHIME_COOLDOWN_MS) {
-          return reply(false, 'rate_limited', target.name);
+          return reply(false, "rate_limited", target.name);
         }
         lastChimeAt.set(key, now);
 
-        io.to(target.socketId).emit('chime:received', {
+        io.to(target.socketId).emit("chime:received", {
           fromSocketId: sender.socketId,
           fromName: sender.name,
         });
         reply(true, undefined, target.name);
-      }
+      },
     );
 
     // Interactive Object: Whiteboard stroke
-    socket.on('object:whiteboard_stroke', (payload: { objectId: string; stroke: WhiteboardStroke }) => {
-      const map = maps.get(currentMapId);
-      if (!map) return;
+    socket.on(
+      "object:whiteboard_stroke",
+      (payload: { objectId: string; stroke: WhiteboardStroke }) => {
+        const map = maps.get(currentMapId);
+        if (!map) return;
 
-      const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (obj && obj.type === 'whiteboard') {
-        if (!obj.data) obj.data = {};
-        if (!obj.data.whiteboardStrokes) obj.data.whiteboardStrokes = [];
-        obj.data.whiteboardStrokes.push(payload.stroke);
+        const obj = map.objects.find((o) => o.id === payload.objectId);
+        if (obj && obj.type === "whiteboard") {
+          if (!obj.data) obj.data = {};
+          if (!obj.data.whiteboardStrokes) obj.data.whiteboardStrokes = [];
+          obj.data.whiteboardStrokes.push(payload.stroke);
 
-        io.emit('object:whiteboard_updated', {
-          objectId: payload.objectId,
-          strokes: obj.data.whiteboardStrokes,
-        });
+          io.emit("object:whiteboard_updated", {
+            objectId: payload.objectId,
+            strokes: obj.data.whiteboardStrokes,
+          });
 
-        persistCurrentMap();
-      }
-    });
+          persistCurrentMap();
+        }
+      },
+    );
 
     // Clear Whiteboard
-    socket.on('object:whiteboard_clear', (payload: { objectId: string }) => {
+    socket.on("object:whiteboard_clear", (payload: { objectId: string }) => {
       const map = maps.get(currentMapId);
       if (!map) return;
 
       const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (obj && obj.type === 'whiteboard') {
+      if (obj && obj.type === "whiteboard") {
         if (obj.data) obj.data.whiteboardStrokes = [];
-        io.emit('object:whiteboard_updated', {
+        io.emit("object:whiteboard_updated", {
           objectId: payload.objectId,
           strokes: [],
         });
@@ -563,106 +714,130 @@ async function startServer() {
     });
 
     // Sticky Note Add
-    socket.on('object:add_note', (payload: { objectId: string; note: StickyNote }) => {
-      const map = maps.get(currentMapId);
-      if (!map) return;
+    socket.on(
+      "object:add_note",
+      (payload: { objectId: string; note: StickyNote }) => {
+        const map = maps.get(currentMapId);
+        if (!map) return;
 
-      const author = users.get(socket.id);
-      if (!author || !payload?.note) return;
+        const author = users.get(socket.id);
+        if (!author || !payload?.note) return;
 
-      const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (!obj) return;
+        const obj = map.objects.find((o) => o.id === payload.objectId);
+        if (!obj) return;
 
-      // Authorship is stamped from the connection, not taken from the payload: a client
-      // could otherwise post under someone else's name, and authorId is what deletion is
-      // authorised against, so it has to mean something.
-      const note: StickyNote = {
-        id: typeof payload.note.id === 'string' ? payload.note.id : `note_${Date.now()}`,
-        text: String(payload.note.text ?? '').slice(0, 500),
-        color: typeof payload.note.color === 'string' ? payload.note.color : '#fef08a',
-        createdAt: Date.now(),
-        author: author.name,
-        authorId: author.id,
-      };
-      if (!note.text.trim()) return;
+        // Authorship is stamped from the connection, not taken from the payload: a client
+        // could otherwise post under someone else's name, and authorId is what deletion is
+        // authorised against, so it has to mean something.
+        const note: StickyNote = {
+          id:
+            typeof payload.note.id === "string"
+              ? payload.note.id
+              : `note_${Date.now()}`,
+          text: String(payload.note.text ?? "").slice(0, 500),
+          color:
+            typeof payload.note.color === "string"
+              ? payload.note.color
+              : "#fef08a",
+          createdAt: Date.now(),
+          author: author.name,
+          authorId: author.id,
+        };
+        if (!note.text.trim()) return;
 
-      if (obj.type === 'sticky_notes') {
-        if (!obj.data) obj.data = {};
-        if (!obj.data.notes) obj.data.notes = [];
-        obj.data.notes.push(note);
+        if (obj.type === "sticky_notes") {
+          if (!obj.data) obj.data = {};
+          if (!obj.data.notes) obj.data.notes = [];
+          obj.data.notes.push(note);
 
-        io.emit('object:notes_updated', {
+          io.emit("object:notes_updated", {
+            objectId: payload.objectId,
+            notes: obj.data.notes,
+          });
+
+          persistCurrentMap();
+          return;
+        }
+
+        // Desk notes go through this path too, so that leaving a note is the *only* way to
+        // change someone else's desk - it can append, and nothing else.
+        if (obj.type === "desk" || obj.type === "computer") {
+          obj.data = obj.data || {};
+          const state = obj.data.deskState || {};
+          obj.data.deskState = {
+            ...state,
+            stickyNotes: [note, ...(state.stickyNotes || [])],
+          };
+
+          io.emit("map:object_updated", {
+            objectId: payload.objectId,
+            object: obj,
+          });
+          persistCurrentMap();
+        }
+      },
+    );
+
+    // Game move
+    socket.on(
+      "object:game_move",
+      (payload: { objectId: string; index: number; symbol: "X" | "O" }) => {
+        const map = maps.get(currentMapId);
+        if (!map) return;
+
+        const obj = map.objects.find((o) => o.id === payload.objectId);
+        if (!obj || obj.type !== "game_table" || !obj.data?.gameState) return;
+
+        const state = normalizeGameState(obj.data.gameState);
+        obj.data.gameState = state;
+
+        // Turn order is enforced here rather than only in the modal. Without it a client could
+        // play both colours and simply drop four of its own discs in a row.
+        if (payload.symbol !== state.turn) return;
+
+        // The client sends the cell it clicked; for 4-to-Win the server decides where that disc
+        // actually lands, so a hand-crafted payload cannot float one in mid-air.
+        const target = resolveMove(state, payload.index);
+        if (target === null) return;
+
+        state.board[target] = payload.symbol;
+        state.turn = payload.symbol === "X" ? "O" : "X";
+        state.winner = findWinner(state.board, specFor(state.game));
+
+        io.emit("object:game_updated", {
           objectId: payload.objectId,
-          notes: obj.data.notes,
+          gameState: state,
         });
 
         persistCurrentMap();
-        return;
-      }
-
-      // Desk notes go through this path too, so that leaving a note is the *only* way to
-      // change someone else's desk - it can append, and nothing else.
-      if (obj.type === 'desk' || obj.type === 'computer') {
-        obj.data = obj.data || {};
-        const state = obj.data.deskState || {};
-        obj.data.deskState = { ...state, stickyNotes: [note, ...(state.stickyNotes || [])] };
-
-        io.emit('map:object_updated', { objectId: payload.objectId, object: obj });
-        persistCurrentMap();
-      }
-    });
-
-    // Game move
-    socket.on('object:game_move', (payload: { objectId: string; index: number; symbol: 'X' | 'O' }) => {
-      const map = maps.get(currentMapId);
-      if (!map) return;
-
-      const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (!obj || obj.type !== 'game_table' || !obj.data?.gameState) return;
-
-      const state = normalizeGameState(obj.data.gameState);
-      obj.data.gameState = state;
-
-      // Turn order is enforced here rather than only in the modal. Without it a client could
-      // play both colours and simply drop four of its own discs in a row.
-      if (payload.symbol !== state.turn) return;
-
-      // The client sends the cell it clicked; for 4-to-Win the server decides where that disc
-      // actually lands, so a hand-crafted payload cannot float one in mid-air.
-      const target = resolveMove(state, payload.index);
-      if (target === null) return;
-
-      state.board[target] = payload.symbol;
-      state.turn = payload.symbol === 'X' ? 'O' : 'X';
-      state.winner = findWinner(state.board, specFor(state.game));
-
-      io.emit('object:game_updated', {
-        objectId: payload.objectId,
-        gameState: state,
-      });
-
-      persistCurrentMap();
-    });
+      },
+    );
 
     // Reset Game (also how the table is switched between games)
-    socket.on('object:game_reset', (payload: { objectId: string; game?: GameTableGame }) => {
-      const map = maps.get(currentMapId);
-      if (!map) return;
+    socket.on(
+      "object:game_reset",
+      (payload: { objectId: string; game?: GameTableGame }) => {
+        const map = maps.get(currentMapId);
+        if (!map) return;
 
-      const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (!obj || obj.type !== 'game_table' || !obj.data?.gameState) return;
+        const obj = map.objects.find((o) => o.id === payload.objectId);
+        if (!obj || obj.type !== "game_table" || !obj.data?.gameState) return;
 
-      const current = normalizeGameState(obj.data.gameState);
-      const nextGame = payload.game && GAME_SPECS[payload.game] ? payload.game : current.game;
-      obj.data.gameState = createGameState(nextGame);
+        const current = normalizeGameState(obj.data.gameState);
+        const nextGame =
+          payload.game && GAME_SPECS[payload.game]
+            ? payload.game
+            : current.game;
+        obj.data.gameState = createGameState(nextGame);
 
-      io.emit('object:game_updated', {
-        objectId: payload.objectId,
-        gameState: obj.data.gameState,
-      });
+        io.emit("object:game_updated", {
+          objectId: payload.objectId,
+          gameState: obj.data.gameState,
+        });
 
-      persistCurrentMap();
-    });
+        persistCurrentMap();
+      },
+    );
 
     /**
      * Deleting a sticky note, from either the bulletin board or a desk.
@@ -677,52 +852,63 @@ async function startServer() {
      * authorId existed have none and can only be cleared by an admin.
      */
     socket.on(
-      'object:delete_note',
-      (payload: { objectId: string; noteId: string }, ack?: (r: { ok: boolean; reason?: string }) => void) => {
-      // Acknowledged so a refused or unhandled delete is visible. Every failure path here is
-      // a silent `return`, which is what made a stale server (one started before this handler
-      // existed) look identical to a working one that simply declined.
-      const reply = (ok: boolean, reason?: string) => {
-        if (typeof ack === 'function') ack({ ok, reason });
-      };
+      "object:delete_note",
+      (
+        payload: { objectId: string; noteId: string },
+        ack?: (r: { ok: boolean; reason?: string }) => void,
+      ) => {
+        // Acknowledged so a refused or unhandled delete is visible. Every failure path here is
+        // a silent `return`, which is what made a stale server (one started before this handler
+        // existed) look identical to a working one that simply declined.
+        const reply = (ok: boolean, reason?: string) => {
+          if (typeof ack === "function") ack({ ok, reason });
+        };
 
-      const map = maps.get(currentMapId);
-      if (!map) return reply(false, 'no_map');
+        const map = maps.get(currentMapId);
+        if (!map) return reply(false, "no_map");
 
-      const user = users.get(socket.id);
-      if (!user || !payload?.objectId || !payload?.noteId) return reply(false, 'bad_request');
+        const user = users.get(socket.id);
+        if (!user || !payload?.objectId || !payload?.noteId)
+          return reply(false, "bad_request");
 
-      const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (!obj) return reply(false, 'no_object');
+        const obj = map.objects.find((o) => o.id === payload.objectId);
+        if (!obj) return reply(false, "no_object");
 
-      if (obj.type === 'sticky_notes') {
-        const notes = obj.data?.notes;
-        const note = notes?.find((n) => n.id === payload.noteId);
-        if (!notes || !note) return reply(false, 'no_note');
-        if (!canDeleteNote(user, note)) return reply(false, 'not_allowed');
+        if (obj.type === "sticky_notes") {
+          const notes = obj.data?.notes;
+          const note = notes?.find((n) => n.id === payload.noteId);
+          if (!notes || !note) return reply(false, "no_note");
+          if (!canDeleteNote(user, note)) return reply(false, "not_allowed");
 
-        obj.data!.notes = notes.filter((n) => n.id !== payload.noteId);
-        io.emit('object:notes_updated', { objectId: payload.objectId, notes: obj.data!.notes });
-        persistCurrentMap();
-        return reply(true);
-      }
+          obj.data!.notes = notes.filter((n) => n.id !== payload.noteId);
+          io.emit("object:notes_updated", {
+            objectId: payload.objectId,
+            notes: obj.data!.notes,
+          });
+          persistCurrentMap();
+          return reply(true);
+        }
 
-      if (obj.type === 'desk' || obj.type === 'computer') {
-        const deskState = obj.data?.deskState;
-        const notes = deskState?.stickyNotes;
-        const note = notes?.find((n) => n.id === payload.noteId);
-        if (!deskState || !notes || !note) return reply(false, 'no_note');
-        if (!canDeleteNote(user, note, deskState)) return reply(false, 'not_allowed');
+        if (obj.type === "desk" || obj.type === "computer") {
+          const deskState = obj.data?.deskState;
+          const notes = deskState?.stickyNotes;
+          const note = notes?.find((n) => n.id === payload.noteId);
+          if (!deskState || !notes || !note) return reply(false, "no_note");
+          if (!canDeleteNote(user, note, deskState))
+            return reply(false, "not_allowed");
 
-        deskState.stickyNotes = notes.filter((n) => n.id !== payload.noteId);
-        io.emit('map:object_updated', { objectId: payload.objectId, object: obj });
-        persistCurrentMap();
-        return reply(true);
-      }
+          deskState.stickyNotes = notes.filter((n) => n.id !== payload.noteId);
+          io.emit("map:object_updated", {
+            objectId: payload.objectId,
+            object: obj,
+          });
+          persistCurrentMap();
+          return reply(true);
+        }
 
-      return reply(false, 'unsupported_object');
-    }
-  );
+        return reply(false, "unsupported_object");
+      },
+    );
 
     /**
      * Desks used to be updated by a single object:desk_updated event that took a whole
@@ -739,15 +925,17 @@ async function startServer() {
       const map = maps.get(currentMapId);
       if (!map) return null;
       const obj = map.objects.find((o) => o.id === objectId);
-      return obj && (obj.type === 'desk' || obj.type === 'computer') ? obj : null;
+      return obj && (obj.type === "desk" || obj.type === "computer")
+        ? obj
+        : null;
     }
 
     function broadcastDesk(desk: MapObject) {
-      io.emit('map:object_updated', { objectId: desk.id, object: desk });
+      io.emit("map:object_updated", { objectId: desk.id, object: desk });
       persistCurrentMap();
     }
 
-    socket.on('object:desk_claim', (payload: { objectId: string }) => {
+    socket.on("object:desk_claim", (payload: { objectId: string }) => {
       const user = users.get(socket.id);
       const desk = payload?.objectId ? findDesk(payload.objectId) : null;
       if (!user || !desk) return;
@@ -761,12 +949,12 @@ async function startServer() {
         claimedByUserId: user.id,
         claimedByUserName: user.name,
         deskLabel: `${user.name}'s Desk`,
-        statusNote: state.statusNote || '💻 Working at my desk',
+        statusNote: state.statusNote || "💻 Working at my desk",
       };
       broadcastDesk(desk);
     });
 
-    socket.on('object:desk_release', (payload: { objectId: string }) => {
+    socket.on("object:desk_release", (payload: { objectId: string }) => {
       const user = users.get(socket.id);
       const desk = payload?.objectId ? findDesk(payload.objectId) : null;
       if (!user || !desk) return;
@@ -782,14 +970,18 @@ async function startServer() {
         claimedByUserId: undefined,
         claimedByUserName: undefined,
         deskLabel: undefined,
-        statusNote: '',
+        statusNote: "",
       };
       broadcastDesk(desk);
     });
 
     socket.on(
-      'object:desk_settings',
-      (payload: { objectId: string; statusNote?: string; equipment?: string }) => {
+      "object:desk_settings",
+      (payload: {
+        objectId: string;
+        statusNote?: string;
+        equipment?: string;
+      }) => {
         const user = users.get(socket.id);
         const desk = payload?.objectId ? findDesk(payload.objectId) : null;
         if (!user || !desk) return;
@@ -800,15 +992,19 @@ async function startServer() {
         desk.data!.deskState = {
           ...state,
           statusNote:
-            typeof payload.statusNote === 'string' ? payload.statusNote.slice(0, 140) : state!.statusNote,
-          equipment: isDeskEquipment(payload.equipment) ? payload.equipment : state!.equipment,
+            typeof payload.statusNote === "string"
+              ? payload.statusNote.slice(0, 140)
+              : state!.statusNote,
+          equipment: isDeskEquipment(payload.equipment)
+            ? payload.equipment
+            : state!.equipment,
         };
         broadcastDesk(desk);
-      }
+      },
     );
 
     // Map Builder - Add or Update Private Zone
-    socket.on('map:add_zone', (zone: PrivateZone) => {
+    socket.on("map:add_zone", (zone: PrivateZone) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
       const map = maps.get(currentMapId);
@@ -826,7 +1022,7 @@ async function startServer() {
         u.currentZoneId = getPrivateZoneId(map, u.position.x, u.position.y);
       });
 
-      io.emit('map:zones_updated', {
+      io.emit("map:zones_updated", {
         privateZones: map.privateZones,
         users: Array.from(users.values()),
       });
@@ -836,7 +1032,7 @@ async function startServer() {
     });
 
     // Map Builder - Remove Private Zone
-    socket.on('map:remove_zone', (zoneId: string) => {
+    socket.on("map:remove_zone", (zoneId: string) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
       const map = maps.get(currentMapId);
@@ -849,10 +1045,10 @@ async function startServer() {
         u.currentZoneId = getPrivateZoneId(map, u.position.x, u.position.y);
       });
 
-      io.emit('map:zones_updated', {
+      broadcastUsersWithFilter("map:zones_updated", (userList) => ({
         privateZones: map.privateZones,
-        users: Array.from(users.values()),
-      });
+        users: userList,
+      }));
 
       updateSpatialProximity();
       persistCurrentMap();
@@ -871,20 +1067,26 @@ async function startServer() {
     });
 
     // Map Builder - Move Object
-    socket.on("map:move_object", (payload: { objectId: string; x: number; y: number }) => {
-      const sender = users.get(socket.id);
-      if (!sender?.isAdmin) return;
-      const map = maps.get(currentMapId);
-      if (!map) return;
+    socket.on(
+      "map:move_object",
+      (payload: { objectId: string; x: number; y: number }) => {
+        const sender = users.get(socket.id);
+        if (!sender?.isAdmin) return;
+        const map = maps.get(currentMapId);
+        if (!map) return;
 
-      const obj = map.objects.find((o) => o.id === payload.objectId);
-      if (obj) {
-        obj.x = payload.x;
-        obj.y = payload.y;
-        io.emit("map:object_updated", { objectId: payload.objectId, object: obj });
-        persistCurrentMap();
-      }
-    });
+        const obj = map.objects.find((o) => o.id === payload.objectId);
+        if (obj) {
+          obj.x = payload.x;
+          obj.y = payload.y;
+          io.emit("map:object_updated", {
+            objectId: payload.objectId,
+            object: obj,
+          });
+          persistCurrentMap();
+        }
+      },
+    );
 
     // Map Builder - Remove Object
     socket.on("map:remove_object", (objectId: string) => {
@@ -899,21 +1101,29 @@ async function startServer() {
     });
 
     // Map Builder - Change Tile
-    socket.on('map:change_tile', (payload: { x: number; y: number; tileType: any }) => {
-      const sender = users.get(socket.id);
-      if (!sender?.isAdmin) return;
-      const map = maps.get(currentMapId);
-      if (!map) return;
+    socket.on(
+      "map:change_tile",
+      (payload: { x: number; y: number; tileType: any }) => {
+        const sender = users.get(socket.id);
+        if (!sender?.isAdmin) return;
+        const map = maps.get(currentMapId);
+        if (!map) return;
 
-      if (payload.y >= 0 && payload.y < map.height && payload.x >= 0 && payload.x < map.width) {
-        map.tiles[payload.y][payload.x] = payload.tileType;
-        io.emit('map:tile_changed', payload);
-        persistCurrentMap();
-      }
-    });
+        if (
+          payload.y >= 0 &&
+          payload.y < map.height &&
+          payload.x >= 0 &&
+          payload.x < map.width
+        ) {
+          map.tiles[payload.y][payload.x] = payload.tileType;
+          io.emit("map:tile_changed", payload);
+          persistCurrentMap();
+        }
+      },
+    );
 
     // Switch Map Preset
-    socket.on('map:switch_preset', (mapId: string) => {
+    socket.on("map:switch_preset", (mapId: string) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
       if (maps.has(mapId)) {
@@ -924,71 +1134,274 @@ async function startServer() {
         // Teleport all current users to spawn
         users.forEach((u) => {
           u.position = { ...newMap.spawnPoint };
-          u.currentZoneId = getPrivateZoneId(newMap, u.position.x, u.position.y);
+          u.currentZoneId = getPrivateZoneId(
+            newMap,
+            u.position.x,
+            u.position.y,
+          );
         });
 
-        io.emit('map:switched', {
+        broadcastUsersWithFilter("map:switched", (userList) => ({
           currentMap: newMap,
-          users: Array.from(users.values()),
-        });
+          users: userList,
+        }));
 
         updateSpatialProximity();
       }
     });
 
     // Handle Disconnect
-    socket.on('disconnect', () => {
+    socket.on("disconnect", () => {
       console.log(`User disconnected: ${socket.id}`);
       users.delete(socket.id);
-      io.emit('user:left', socket.id);
+      io.emit("user:left", socket.id);
       updateSpatialProximity();
 
       // Drop any chime cooldown entries involving this socket so the map doesn't grow forever.
       for (const key of lastChimeAt.keys()) {
-        if (key.startsWith(`${socket.id}->`) || key.endsWith(`->${socket.id}`)) {
+        if (
+          key.startsWith(`${socket.id}->`) ||
+          key.endsWith(`->${socket.id}`)
+        ) {
           lastChimeAt.delete(key);
         }
       }
     });
+
+    // ==========================================
+    // DUMMY USERS (Admin Only - Hidden from Normal Users)
+    // ==========================================
+
+    // Admin places a new dummy user
+    socket.on(
+      "dummy:place",
+      (payload: {
+        name?: string;
+        x: number;
+        y: number;
+        direction?: Direction;
+        presenceStatus?: PresenceStatus;
+      }) => {
+        const sender = users.get(socket.id);
+        if (!sender?.isAdmin) return;
+
+        const map = maps.get(currentMapId);
+        if (!map) return;
+
+        const dummyId = `dummy_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
+        const dummyUser: User = {
+          id: dummyId,
+          socketId: dummyId,
+          name:
+            payload.name ||
+            `Dummy_${Math.random().toString(36).substring(2, 6)}`,
+          position: { x: payload.x, y: payload.y },
+          direction: payload.direction || "down",
+          avatar: {
+            skinColor: "#a78bfa",
+            hairStyle: "short",
+            hairColor: "#1e293b",
+            outfitColor: "#8b5cf6",
+            glasses: false,
+            hatStyle: "none",
+            statusEmoji: "🤖",
+          },
+          isMuted: false,
+          isDeafened: false,
+          isSpeaking: false,
+          isScreenSharing: false,
+          isAdmin: true,
+          isDummy: true,
+          currentZoneId: getPrivateZoneId(map, payload.x, payload.y),
+          lastSeen: Date.now(),
+          presenceStatus: payload.presenceStatus || "available",
+        };
+
+        users.set(dummyId, dummyUser);
+        emitToAdmins("user:joined", dummyUser);
+        updateSpatialProximity();
+      },
+    );
+
+    // Admin moves a dummy user
+    socket.on(
+      "dummy:move",
+      (payload: {
+        dummyId: string;
+        x: number;
+        y: number;
+        direction?: Direction;
+      }) => {
+        const sender = users.get(socket.id);
+        if (!sender?.isAdmin) return;
+
+        const dummy = users.get(payload?.dummyId);
+        if (!dummy || !dummy.isDummy) return;
+
+        const map = maps.get(currentMapId);
+        if (!map) return;
+
+        dummy.position = { x: payload.x, y: payload.y };
+        if (payload.direction) dummy.direction = payload.direction;
+        dummy.currentZoneId = getPrivateZoneId(map, payload.x, payload.y);
+
+        emitToAdmins("user:moved", {
+          userId: dummy.socketId,
+          position: dummy.position,
+          direction: dummy.direction,
+          currentZoneId: dummy.currentZoneId,
+        });
+        updateSpatialProximity();
+      },
+    );
+
+    // Admin updates a dummy user (name, status, voice/speaking, mute, etc.)
+    socket.on(
+      "dummy:update",
+      (payload: { dummyId: string; updates: Partial<User> }) => {
+        const sender = users.get(socket.id);
+        if (!sender?.isAdmin) return;
+
+        const dummy = users.get(payload?.dummyId);
+        if (!dummy || !dummy.isDummy) return;
+
+        const { updates } = payload;
+        if (!updates) return;
+
+        if (typeof updates.name === "string" && updates.name.trim()) {
+          dummy.name = updates.name.trim();
+        }
+        if (updates.avatar) {
+          dummy.avatar = { ...dummy.avatar, ...updates.avatar };
+        }
+        if (
+          updates.presenceStatus &&
+          ["available", "busy", "dnd"].includes(updates.presenceStatus)
+        ) {
+          dummy.presenceStatus = updates.presenceStatus;
+        }
+        if (typeof updates.isSpeaking === "boolean") {
+          dummy.isSpeaking = updates.isSpeaking;
+        }
+        if (typeof updates.isMuted === "boolean") {
+          dummy.isMuted = updates.isMuted;
+        }
+        if (
+          updates.direction &&
+          ["up", "down", "left", "right"].includes(updates.direction)
+        ) {
+          dummy.direction = updates.direction;
+        }
+
+        emitToAdmins("user:updated", dummy);
+      },
+    );
+
+    // Admin removes a dummy user
+    socket.on("dummy:remove", (payload: { dummyId: string }) => {
+      const sender = users.get(socket.id);
+      if (!sender?.isAdmin) return;
+
+      const dummy = users.get(payload?.dummyId);
+      if (!dummy || !dummy.isDummy) return;
+
+      users.delete(payload.dummyId);
+      emitToAdmins("user:left", payload.dummyId);
+      updateSpatialProximity();
+    });
+
+    // Admin triggers dummy to say something in chat (only visible to admins!)
+    socket.on(
+      "dummy:chat",
+      (payload: { dummyId: string; text: string; isSpatial: boolean }) => {
+        const sender = users.get(socket.id);
+        if (!sender?.isAdmin) return;
+
+        const dummy = users.get(payload?.dummyId);
+        if (!dummy || !dummy.isDummy) return;
+        if (!payload.text?.trim()) return;
+
+        const chatMsg: ChatMessage = {
+          id: `msg_${Date.now()}`,
+          senderId: dummy.socketId,
+          senderName: dummy.name,
+          text: payload.text.trim(),
+          timestamp: Date.now(),
+          isSpatial: Boolean(payload.isSpatial),
+          senderPosition: { ...dummy.position },
+        };
+
+        if (payload.isSpatial) {
+          const PROXIMITY_CHAT_RADIUS = 8;
+          for (const [sId, otherUser] of users.entries()) {
+            if (!otherUser.isAdmin || otherUser.isDummy) continue;
+            const dist = Math.hypot(
+              dummy.position.x - otherUser.position.x,
+              dummy.position.y - otherUser.position.y,
+            );
+            if (dist <= PROXIMITY_CHAT_RADIUS) {
+              io.to(sId).emit("chat:message", chatMsg);
+            }
+          }
+        } else {
+          for (const [sId, otherUser] of users.entries()) {
+            if (otherUser.isAdmin && !otherUser.isDummy) {
+              io.to(sId).emit("chat:message", chatMsg);
+            }
+          }
+        }
+      },
+    );
   });
 
   // REST API Endpoints with Hono
-  app.get('/api/health', (c) => {
-    return c.json({ status: 'ok', activeUsers: users.size });
+  app.get("/api/health", (c) => {
+    return c.json({ status: "ok", activeUsers: users.size });
   });
 
-  app.get('/api/workspace/sqlite-info', (c) => {
+  app.get("/api/workspace/sqlite-info", (c) => {
     return c.json({
-      status: 'ok',
+      status: "ok",
       sqlite: db.getDbInfo(),
       activeMapId: currentMapId,
     });
   });
 
   // Keycloak / Google Auth Login URL Endpoint
-  app.get('/api/auth/login-url', (c) => {
-    const keycloakUrl = process.env.KEYCLOAK_URL || 'https://cloak.dev.personalclientcare.com/realms/ins3c';
-    const clientId = process.env.KEYCLOAK_CLIENT_ID || 'ins3c-login';
+  app.get("/api/auth/login-url", (c) => {
+    const keycloakUrl =
+      process.env.KEYCLOAK_URL ||
+      "https://cloak.dev.personalclientcare.com/realms/ins3c";
+    const clientId = process.env.KEYCLOAK_CLIENT_ID || "ins3c-login";
 
     const reqUrl = new URL(c.req.url);
-    const rawProto = c.req.header('x-forwarded-proto') || reqUrl.protocol.replace(':', '') || 'https';
-    const proto = rawProto.split(',')[0].trim();
-    const rawHost = c.req.header('x-forwarded-host') || c.req.header('host') || reqUrl.host || '';
-    const host = rawHost.split(',')[0].trim();
-    const finalProto = (host.endsWith('.run.app') || proto === 'https') ? 'https' : proto;
+    const rawProto =
+      c.req.header("x-forwarded-proto") ||
+      reqUrl.protocol.replace(":", "") ||
+      "https";
+    const proto = rawProto.split(",")[0].trim();
+    const rawHost =
+      c.req.header("x-forwarded-host") ||
+      c.req.header("host") ||
+      reqUrl.host ||
+      "";
+    const host = rawHost.split(",")[0].trim();
+    const finalProto =
+      host.endsWith(".run.app") || proto === "https" ? "https" : proto;
     const computedRedirectUri = `${finalProto}://${host}/auth/callback`;
 
-    const redirectUri = c.req.query('redirect_uri') || computedRedirectUri;
+    const redirectUri = c.req.query("redirect_uri") || computedRedirectUri;
 
     const params = new URLSearchParams({
       client_id: clientId,
       redirect_uri: redirectUri,
-      response_type: 'code',
-      scope: 'openid profile email',
+      response_type: "code",
+      scope: "openid profile email",
     });
 
-    if (c.req.query('idp') === 'google') {
-      params.append('kc_idp_hint', 'google');
+    if (c.req.query("idp") === "google") {
+      params.append("kc_idp_hint", "google");
     }
 
     const authUrl = `${keycloakUrl}/protocol/openid-connect/auth?${params.toString()}`;
@@ -996,45 +1409,62 @@ async function startServer() {
   });
 
   // OAuth Callback Endpoint
-  app.get('/auth/callback', async (c) => {
-    const code = c.req.query('code');
-    const keycloakUrl = process.env.KEYCLOAK_URL || 'https://cloak.dev.personalclientcare.com/realms/ins3c';
-    const clientId = process.env.KEYCLOAK_CLIENT_ID || 'ins3c-login';
-    const clientSecret = process.env.KEYCLOAK_CLIENT_SECRET || '';
+  app.get("/auth/callback", async (c) => {
+    const code = c.req.query("code");
+    const keycloakUrl =
+      process.env.KEYCLOAK_URL ||
+      "https://cloak.dev.personalclientcare.com/realms/ins3c";
+    const clientId = process.env.KEYCLOAK_CLIENT_ID || "ins3c-login";
+    const clientSecret = process.env.KEYCLOAK_CLIENT_SECRET || "";
 
     if (!code) {
-      return c.text('Missing authorization code', 400);
+      return c.text("Missing authorization code", 400);
     }
 
     try {
       const reqUrl = new URL(c.req.url);
-      const rawProto = c.req.header('x-forwarded-proto') || reqUrl.protocol.replace(':', '') || 'https';
-      const proto = rawProto.split(',')[0].trim();
-      const rawHost = c.req.header('x-forwarded-host') || c.req.header('host') || reqUrl.host || '';
-      const host = rawHost.split(',')[0].trim();
-      const finalProto = (host.endsWith('.run.app') || proto === 'https') ? 'https' : proto;
+      const rawProto =
+        c.req.header("x-forwarded-proto") ||
+        reqUrl.protocol.replace(":", "") ||
+        "https";
+      const proto = rawProto.split(",")[0].trim();
+      const rawHost =
+        c.req.header("x-forwarded-host") ||
+        c.req.header("host") ||
+        reqUrl.host ||
+        "";
+      const host = rawHost.split(",")[0].trim();
+      const finalProto =
+        host.endsWith(".run.app") || proto === "https" ? "https" : proto;
       const redirectUri = `${finalProto}://${host}/auth/callback`;
 
       const tokenBody = new URLSearchParams({
-        grant_type: 'authorization_code',
+        grant_type: "authorization_code",
         client_id: clientId,
         code: code as string,
         redirect_uri: redirectUri,
       });
 
       if (clientSecret) {
-        tokenBody.append('client_secret', clientSecret);
+        tokenBody.append("client_secret", clientSecret);
       }
 
-      const tokenRes = await fetch(`${keycloakUrl}/protocol/openid-connect/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: tokenBody.toString(),
-      });
+      const tokenRes = await fetch(
+        `${keycloakUrl}/protocol/openid-connect/token`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: tokenBody.toString(),
+        },
+      );
 
       if (!tokenRes.ok) {
         const errorText = await tokenRes.text();
-        console.error('Keycloak token exchange error:', tokenRes.status, errorText);
+        console.error(
+          "Keycloak token exchange error:",
+          tokenRes.status,
+          errorText,
+        );
         return c.html(`
           <!DOCTYPE html>
           <html>
@@ -1066,13 +1496,13 @@ async function startServer() {
       const tokens: any = await tokenRes.json();
 
       const parseJwtPayload = (token?: string) => {
-        if (!token || typeof token !== 'string') return null;
+        if (!token || typeof token !== "string") return null;
         try {
-          const parts = token.split('.');
+          const parts = token.split(".");
           if (parts.length !== 3) return null;
           const base64Url = parts[1];
-          const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-          const jsonStr = Buffer.from(base64, 'base64').toString('utf-8');
+          const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+          const jsonStr = Buffer.from(base64, "base64").toString("utf-8");
           return JSON.parse(jsonStr);
         } catch {
           return null;
@@ -1085,14 +1515,17 @@ async function startServer() {
 
       if (tokens.access_token) {
         try {
-          const userinfoRes = await fetch(`${keycloakUrl}/protocol/openid-connect/userinfo`, {
-            headers: { Authorization: `Bearer ${tokens.access_token}` },
-          });
+          const userinfoRes = await fetch(
+            `${keycloakUrl}/protocol/openid-connect/userinfo`,
+            {
+              headers: { Authorization: `Bearer ${tokens.access_token}` },
+            },
+          );
           if (userinfoRes.ok) {
             userinfo = await userinfoRes.json();
           }
         } catch (e) {
-          console.warn('Failed to fetch userinfo from Keycloak:', e);
+          console.warn("Failed to fetch userinfo from Keycloak:", e);
         }
       }
 
@@ -1100,57 +1533,65 @@ async function startServer() {
 
       const getEmail = () => {
         for (const s of sources) {
-          if (s.email && typeof s.email === 'string' && s.email.trim()) {
+          if (s.email && typeof s.email === "string" && s.email.trim()) {
             return s.email.trim();
           }
         }
-        return '';
+        return "";
       };
 
       const formatName = (str: string) => {
-        if (!str) return '';
-        if (str.includes(' ') || (/[A-Z]/.test(str) && /[a-z]/.test(str))) return str;
-        return str.replace(/[._-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+        if (!str) return "";
+        if (str.includes(" ") || (/[A-Z]/.test(str) && /[a-z]/.test(str)))
+          return str;
+        return str
+          .replace(/[._-]/g, " ")
+          .replace(/\b\w/g, (c) => c.toUpperCase());
       };
 
       const resolveName = (): string => {
         for (const s of sources) {
-          if (s.name && typeof s.name === 'string' && s.name.trim() && !['Keycloak User', 'Member'].includes(s.name.trim())) {
+          if (
+            s.name &&
+            typeof s.name === "string" &&
+            s.name.trim() &&
+            !["Keycloak User", "Member"].includes(s.name.trim())
+          ) {
             return s.name.trim();
           }
         }
         for (const s of sources) {
           if (s.given_name || s.family_name) {
-            const full = `${s.given_name || ''} ${s.family_name || ''}`.trim();
-            if (full && full !== 'undefined undefined') return full;
+            const full = `${s.given_name || ""} ${s.family_name || ""}`.trim();
+            if (full && full !== "undefined undefined") return full;
           }
         }
         for (const s of sources) {
           const uname = s.preferred_username || s.nickname || s.username;
-          if (uname && typeof uname === 'string' && uname.trim()) {
+          if (uname && typeof uname === "string" && uname.trim()) {
             return formatName(uname.trim());
           }
         }
         const mail = getEmail();
-        if (mail && mail.includes('@')) {
-          const prefix = mail.split('@')[0];
+        if (mail && mail.includes("@")) {
+          const prefix = mail.split("@")[0];
           if (prefix) return formatName(prefix);
         }
-        return 'Member';
+        return "Member";
       };
 
       const checkIsAdminGroup = (): boolean => {
         for (const s of sources) {
-          if (!s || typeof s !== 'object') continue;
+          if (!s || typeof s !== "object") continue;
 
           const matchesAdmin = (val: any): boolean => {
             if (!val) return false;
-            if (typeof val === 'string') {
+            if (typeof val === "string") {
               const clean = val.trim().toLowerCase();
-              if (clean === 'admin' || clean === '/admin') return true;
+              if (clean === "admin" || clean === "/admin") return true;
               const parts = clean.split(/[\/\s,;:]+/).filter(Boolean);
-              if (parts.includes('admin')) return true;
-            } else if (typeof val === 'object') {
+              if (parts.includes("admin")) return true;
+            } else if (typeof val === "object") {
               if (val.name && matchesAdmin(val.name)) return true;
               if (val.path && matchesAdmin(val.path)) return true;
               if (val.id && matchesAdmin(val.id)) return true;
@@ -1161,15 +1602,17 @@ async function startServer() {
 
           const recursiveCheck = (obj: any, depth = 0): boolean => {
             if (!obj || depth > 5) return false;
-            if (typeof obj === 'string') return matchesAdmin(obj);
+            if (typeof obj === "string") return matchesAdmin(obj);
             if (Array.isArray(obj)) {
               for (const item of obj) {
-                if (matchesAdmin(item) || recursiveCheck(item, depth + 1)) return true;
+                if (matchesAdmin(item) || recursiveCheck(item, depth + 1))
+                  return true;
               }
-            } else if (typeof obj === 'object') {
+            } else if (typeof obj === "object") {
               for (const key of Object.keys(obj)) {
                 const val = obj[key];
-                if (matchesAdmin(val) || recursiveCheck(val, depth + 1)) return true;
+                if (matchesAdmin(val) || recursiveCheck(val, depth + 1))
+                  return true;
               }
             }
             return false;
@@ -1191,7 +1634,11 @@ async function startServer() {
         authenticated: true,
         // Signed by the server after this Keycloak exchange was verified - the socket layer
         // trusts this token (never raw client-submitted name/email/isAdmin) for identity/admin.
-        sessionToken: createSessionToken({ email: verifiedEmail, name: verifiedName, isAdmin: verifiedIsAdmin }),
+        sessionToken: createSessionToken({
+          email: verifiedEmail,
+          name: verifiedName,
+          isAdmin: verifiedIsAdmin,
+        }),
       };
 
       return c.html(`
@@ -1231,40 +1678,50 @@ async function startServer() {
         </html>
       `);
     } catch (err) {
-      console.error('Keycloak OAuth callback error:', err);
-      return c.text('OAuth callback processing error.', 500);
+      console.error("Keycloak OAuth callback error:", err);
+      return c.text("OAuth callback processing error.", 500);
     }
   });
 
   // Serve static assets in production
-  if (process.env.NODE_ENV === 'production') {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use('*', serveStatic({ root: './dist' }));
-    app.get('*', (c) => {
+  if (process.env.NODE_ENV === "production") {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use("*", serveStatic({ root: "./dist" }));
+    app.get("*", (c) => {
       try {
-        const html = fs.readFileSync(path.join(distPath, 'index.html'), 'utf-8');
+        const html = fs.readFileSync(
+          path.join(distPath, "index.html"),
+          "utf-8",
+        );
         return c.html(html);
       } catch {
-        return c.text('Not found', 404);
+        return c.text("Not found", 404);
       }
     });
   }
 
-  httpServer.listen(PORT, '0.0.0.0', () => {
-    const scheme = useHttps ? 'https' : 'http';
-    console.log(`PeerSpace Hono/Bun server running on ${scheme}://0.0.0.0:${PORT}`);
+  httpServer.listen(PORT, "0.0.0.0", () => {
+    const scheme = useHttps ? "https" : "http";
+    console.log(
+      `PeerSpace Hono/Bun server running on ${scheme}://0.0.0.0:${PORT}`,
+    );
     if (useHttps) {
       const lanIps = Object.values(os.networkInterfaces())
         .flat()
-        .filter((i): i is os.NetworkInterfaceInfo => !!i && i.family === 'IPv4' && !i.internal)
+        .filter(
+          (i): i is os.NetworkInterfaceInfo =>
+            !!i && i.family === "IPv4" && !i.internal,
+        )
         .map((i) => i.address);
       lanIps.forEach((ip) => {
-        console.log(`  -> Open this URL on your phone (same wifi) to test camera/mic: ${scheme}://${ip}:${PORT}`);
+        console.log(
+          `  -> Open this URL on your phone (same wifi) to test camera/mic: ${scheme}://${ip}:${PORT}`,
+        );
       });
     }
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start server:', err);
+  console.error("Failed to start server:", err);
 });
