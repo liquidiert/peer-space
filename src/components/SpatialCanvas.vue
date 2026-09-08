@@ -1077,49 +1077,127 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
       const steelP = PALETTE.steel;
       const chairP = PALETTE.indigo;
 
-      // 1. Chairs around top and bottom perimeter
-      const chairCount = Math.max(2, Math.floor(W / 12));
-      const spacing = W / chairCount;
+      // The old art was a plain rectangle with a row of stubby blocks above and below it,
+      // which read as a bench rather than a meeting table and never made it obvious how
+      // many people it seats. It is now drawn as a real boardroom table: seats on all four
+      // sides (each an actual chair with a backrest, arms and a shadow), a chamfered top
+      // with a lighter inlay, a cable tray with grommets down the middle, and a few props.
+      const seatsPerSide = Math.max(2, Math.round(W / 16));
+      const CHAIR_W = 8;
+      const CHAIR_D = 5; // depth: backrest + seat
 
-      // Top chairs
-      for (let i = 0; i < chairCount; i++) {
-        const cx = Math.floor(i * spacing + spacing / 2 - 3);
-        shadedBlock(ctx, ox, oy, cx, 0, 6, 3, chairP);
-        fx(ctx, ox, oy, cx + 1, 1, 4, 1, chairP.hi);
+      /**
+       * One chair, in art pixels, facing the table. `side` decides which way the backrest
+       * sits relative to the seat, so the same routine serves all four edges.
+       */
+      function drawChair(cx: number, cy: number, side: 'top' | 'bottom' | 'left' | 'right') {
+        const horizontal = side === 'top' || side === 'bottom';
+        const w = horizontal ? CHAIR_W : CHAIR_D;
+        const h = horizontal ? CHAIR_D : CHAIR_W;
+
+        // Contact shadow first so the chair sits on the floor rather than floating.
+        fx(ctx, ox, oy, cx + 1, cy + h - 1, w - 1, 1, 'rgba(20, 26, 44, 0.28)');
+
+        // Seat pad.
+        shadedBlock(ctx, ox, oy, cx, cy, w, h, chairP);
+
+        // Backrest: a thicker, darker band on the edge facing away from the table.
+        if (side === 'top') {
+          fx(ctx, ox, oy, cx + 1, cy + 1, w - 2, 2, chairP.dark);
+          fx(ctx, ox, oy, cx + 1, cy + 1, w - 2, 1, chairP.light);
+        } else if (side === 'bottom') {
+          fx(ctx, ox, oy, cx + 1, cy + h - 3, w - 2, 2, chairP.dark);
+          fx(ctx, ox, oy, cx + 1, cy + h - 3, w - 2, 1, chairP.hi);
+        } else if (side === 'left') {
+          fx(ctx, ox, oy, cx + 1, cy + 1, 2, h - 2, chairP.dark);
+          fx(ctx, ox, oy, cx + 1, cy + 1, 1, h - 2, chairP.light);
+        } else {
+          fx(ctx, ox, oy, cx + w - 3, cy + 1, 2, h - 2, chairP.dark);
+          fx(ctx, ox, oy, cx + w - 3, cy + 1, 1, h - 2, chairP.hi);
+        }
+
+        // Specular nick on the cushion - one pixel of life, same trick as the other props.
+        fx(ctx, ox, oy, cx + (horizontal ? 2 : 1), cy + (horizontal ? h - 2 : 2), 1, 1, chairP.hi);
       }
 
-      // Bottom chairs
-      for (let i = 0; i < chairCount; i++) {
-        const cx = Math.floor(i * spacing + spacing / 2 - 3);
-        shadedBlock(ctx, ox, oy, cx, H - 3, 6, 3, chairP);
-        fx(ctx, ox, oy, cx + 1, H - 2, 4, 1, chairP.hi);
-      }
-
-      // 2. Table main body
-      const marginX = 2;
-      const marginY = 4;
+      const marginX = 3;
+      const marginY = CHAIR_D + 1;
       const tw = W - marginX * 2;
       const th = H - marginY * 2;
 
-      // Outer shadow & table base frame
-      fx(ctx, ox, oy, marginX, marginY + 1, tw, th, OUTLINE);
-
-      // Polished Darkwood Tabletop with bevel edges
-      shadedBlock(ctx, ox, oy, marginX, marginY, tw, th, tableP);
-
-      // Inlay strip / cable management box in table center
-      if (tw > 12 && th > 6) {
-        const boxW = Math.floor(tw * 0.5);
-        const boxH = Math.floor(th * 0.35);
-        const boxX = marginX + Math.floor((tw - boxW) / 2);
-        const boxY = marginY + Math.floor((th - boxH) / 2);
-        shadedBlock(ctx, ox, oy, boxX, boxY, boxW, boxH, steelP);
-        fx(ctx, ox, oy, boxX + 1, boxY + 1, boxW - 2, boxH - 2, steelP.dark);
+      // Seats along the long edges.
+      const spacing = tw / seatsPerSide;
+      for (let i = 0; i < seatsPerSide; i++) {
+        const cx = Math.floor(marginX + i * spacing + spacing / 2 - CHAIR_W / 2);
+        drawChair(cx, 0, 'top');
+        drawChair(cx, H - CHAIR_D - 1, 'bottom');
       }
 
-      // Tabletop edge bevel highlight
-      fx(ctx, ox, oy, marginX + 1, marginY + 1, tw - 2, 1, tableP.hi);
-      fx(ctx, ox, oy, marginX + 1, marginY + 1, 1, th - 2, tableP.light);
+      // Head-of-table seats, only where there is actually room for them.
+      const hasEndSeats = th >= CHAIR_W + 2 && marginX >= CHAIR_D - 1;
+      if (hasEndSeats) {
+        const cy = marginY + Math.floor((th - CHAIR_W) / 2);
+        drawChair(0, cy, 'left');
+        drawChair(W - CHAIR_D - 1, cy, 'right');
+      }
+
+      // Drop shadow under the top, then the top itself.
+      fx(ctx, ox, oy, marginX, marginY + 1, tw, th, OUTLINE);
+      shadedBlock(ctx, ox, oy, marginX, marginY, tw, th, tableP);
+
+      // Chamfered corners: knock a pixel out of each corner and re-outline it, which is how
+      // a rounded boardroom top reads at this resolution.
+      [
+        [marginX, marginY],
+        [marginX + tw - 1, marginY],
+        [marginX, marginY + th - 1],
+        [marginX + tw - 1, marginY + th - 1],
+      ].forEach(([px, py]) => fx(ctx, ox, oy, px, py, 1, 1, OUTLINE));
+
+      // Inlay panel - a lighter band inset from the edge, the way veneered tops are banded.
+      if (tw > 10 && th > 6) {
+        fx(ctx, ox, oy, marginX + 2, marginY + 2, tw - 4, th - 4, tableP.light);
+        ox1(ctx, ox, oy, marginX + 2, marginY + 2, tw - 4, th - 4, tableP.dark);
+        dither(ctx, ox, oy, marginX + 3, marginY + 3, tw - 6, th - 6, tableP.base, 1);
+      }
+
+      // Cable tray with grommets down the spine of the table.
+      if (tw > 14 && th > 8) {
+        const trayW = Math.floor(tw * 0.55);
+        const trayH = Math.max(3, Math.floor(th * 0.3));
+        const trayX = marginX + Math.floor((tw - trayW) / 2);
+        const trayY = marginY + Math.floor((th - trayH) / 2);
+        shadedBlock(ctx, ox, oy, trayX, trayY, trayW, trayH, steelP);
+        fx(ctx, ox, oy, trayX + 1, trayY + 1, trayW - 2, trayH - 2, steelP.dark);
+        for (let gx = trayX + 2; gx < trayX + trayW - 2; gx += 4) {
+          fx(ctx, ox, oy, gx, trayY + 1, 1, 1, steelP.hi);
+        }
+      }
+
+      // Props: a laptop, a notepad and a mug, placed deterministically off the object's own
+      // tile so a given table always looks the same rather than shuffling every repaint.
+      if (tw > 18 && th > 8) {
+        const roll = tileHash(obj.x, obj.y, 7);
+        const propY = marginY + 2;
+
+        // Open laptop, lid up, at the left seat.
+        fx(ctx, ox, oy, marginX + 3, propY, 6, 3, ACCENT.ink);
+        fx(ctx, ox, oy, marginX + 4, propY + 1, 4, 1, ACCENT.sky);
+        fx(ctx, ox, oy, marginX + 3, propY + 3, 6, 1, steelP.light);
+
+        // Notepad on the far side.
+        fx(ctx, ox, oy, marginX + tw - 10, marginY + th - 5, 6, 3, ACCENT.cream);
+        ox1(ctx, ox, oy, marginX + tw - 10, marginY + th - 5, 6, 3, OUTLINE);
+        fx(ctx, ox, oy, marginX + tw - 9, marginY + th - 4, 4, 1, steelP.base);
+
+        // Mug, on whichever side the hash picks.
+        const mugX = roll > 0.5 ? marginX + tw - 6 : marginX + 4;
+        const mugY = roll > 0.5 ? propY : marginY + th - 5;
+        fx(ctx, ox, oy, mugX, mugY, 3, 3, roll > 0.5 ? ACCENT.red : ACCENT.teal);
+        ox1(ctx, ox, oy, mugX, mugY, 3, 3, OUTLINE);
+        fx(ctx, ox, oy, mugX + 1, mugY + 1, 1, 1, ACCENT.cream);
+      }
+
       break;
     }
 

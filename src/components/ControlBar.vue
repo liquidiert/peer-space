@@ -37,7 +37,6 @@ const emit = defineEmits<{
   (e: 'toggleChat'): void;
   (e: 'moveToDesk'): void;
   (e: 'setPresenceStatus', status: PresenceStatus): void;
-  (e: 'placeDummy'): void;
 }>();
 
 const currentZone = computed(() => {
@@ -237,16 +236,5 @@ const myDesk = computed(() => {
         </button>
       </div>
       </div>
-  <!-- Dummy User Placement (Admin only) -->
-  <button
-    v-if="currentUser.isAdmin"
-    type="button"
-    @click="emit('placeDummy')"
-    title="Place a test user at your location (Admin)"
-    :class="`h-10 px-3 sm:px-3.5 rounded-xl border-2 border-slate-900 inline-flex items-center justify-center gap-2 text-xs font-bold transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] bg-purple-100 text-purple-950 hover:bg-purple-200`"
-  >
-    <UserRoundCog class="w-4 h-4 shrink-0" />
-    <span class="hidden sm:inline font-heading whitespace-nowrap">Test User</span>
-  </button>
 </div>
 </template>

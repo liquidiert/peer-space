@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { Hammer, Trash2, Layers, Box, X, Shield, Plus, Lock, Move, GripHorizontal, SquareDashedMousePointer } from "lucide-vue-next";
-import type { TileType, MapObject, ObjectType, PrivateZone } from "../types";
+import { Hammer, Trash2, Layers, Box, X, Shield, Plus, Lock, Move, GripHorizontal, SquareDashedMousePointer, UserRoundCog } from "lucide-vue-next";
+import type { TileType, MapObject, ObjectType, PrivateZone, User } from "../types";
 
 const props = defineProps<{
   isOpen: boolean;
@@ -13,6 +13,8 @@ const props = defineProps<{
   zoneDrawMode: boolean;
   /** Rectangle the user just dragged out on the map, if any. */
   pendingZone: { x: number; y: number; width: number; height: number } | null;
+  /** Test ("dummy") users currently placed on the map - admin-only, so empty for everyone else. */
+  dummyUsers: User[];
 }>();
 
 const emit = defineEmits<{
@@ -24,9 +26,11 @@ const emit = defineEmits<{
   (e: "addZone", zone: PrivateZone): void;
   (e: "removeZone", zoneId: string): void;
   (e: "setZoneDrawMode", enabled: boolean): void;
+  (e: "placeDummy"): void;
+  (e: "removeDummy", dummyId: string): void;
 }>();
 
-const activeCategory = ref<"build" | "zones">("build");
+const activeCategory = ref<"build" | "zones" | "testers">("build");
 
 // Popup Dragging State
 const popupPos = ref({ x: 16, y: 64 });
@@ -184,28 +188,42 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
     </div>
 
     <!-- Category Tabs -->
-    <div class="shrink-0 grid grid-cols-2 gap-1.5 p-1 bg-slate-100 rounded-xl border-2 border-slate-900">
+    <div class="shrink-0 grid grid-cols-3 gap-1 p-1 bg-slate-100 rounded-xl border-2 border-slate-900">
       <button
         type="button"
         @click="activeCategory = 'build'"
-        :class="`h-9 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 whitespace-nowrap transition-all pixel-btn ${
+        title="Tiles & Props"
+        :class="`h-9 px-1 text-[11px] font-bold rounded-lg flex items-center justify-center gap-1 whitespace-nowrap transition-all pixel-btn ${
           activeCategory === 'build'
             ? 'bg-amber-300 text-slate-950 border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]'
             : 'text-slate-700 hover:text-slate-950'
         }`"
       >
-        <Hammer class="w-3.5 h-3.5" /> Tiles & Props
+        <Hammer class="w-3.5 h-3.5 shrink-0" /> Tiles
       </button>
       <button
         type="button"
         @click="activeCategory = 'zones'"
-        :class="`h-9 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 whitespace-nowrap transition-all pixel-btn ${
+        title="Private Zones"
+        :class="`h-9 px-1 text-[11px] font-bold rounded-lg flex items-center justify-center gap-1 whitespace-nowrap transition-all pixel-btn ${
           activeCategory === 'zones'
             ? 'bg-amber-300 text-slate-950 border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]'
             : 'text-slate-700 hover:text-slate-950'
         }`"
       >
-        <Lock class="w-3.5 h-3.5 text-indigo-700" /> Private Zones
+        <Lock class="w-3.5 h-3.5 text-indigo-700 shrink-0" /> Zones
+      </button>
+      <button
+        type="button"
+        @click="activeCategory = 'testers'"
+        title="Test Users"
+        :class="`h-9 px-1 text-[11px] font-bold rounded-lg flex items-center justify-center gap-1 whitespace-nowrap transition-all pixel-btn ${
+          activeCategory === 'testers'
+            ? 'bg-amber-300 text-slate-950 border-2 border-slate-900 shadow-[2px_2px_0px_0px_#0f172a]'
+            : 'text-slate-700 hover:text-slate-950'
+        }`"
+      >
+        <UserRoundCog class="w-3.5 h-3.5 text-purple-700 shrink-0" /> Testers
       </button>
     </div>
 
@@ -466,6 +484,60 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
       </div>
     </template>
 
+    <!-- TEST USERS CATEGORY -->
+    <template v-else-if="activeCategory === 'testers'">
+      <div class="flex flex-col gap-3">
+        <div class="p-2.5 bg-purple-50 border-2 border-slate-900 rounded-xl text-xs text-purple-950 font-semibold leading-relaxed">
+          <p class="font-extrabold flex items-center gap-1 text-purple-900 font-heading mb-1">
+            <UserRoundCog class="w-3.5 h-3.5 text-purple-600" /> Test Users
+          </p>
+          Placed at your current tile and only ever visible to admins. Each one emits a quiet
+          continuous tone and a test video pattern so you can check proximity audio and the
+          video dock on your own.
+        </div>
+
+        <div>
+          <label class="text-xs font-bold text-slate-900 uppercase tracking-wider mb-2 block font-heading">
+            Placed ({{ dummyUsers.length }})
+          </label>
+
+          <p v-if="dummyUsers.length === 0" class="text-xs text-slate-500 font-bold italic px-1">
+            No test users placed yet.
+          </p>
+
+          <div v-else class="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1">
+            <div
+              v-for="d in dummyUsers"
+              :key="d.socketId"
+              class="flex items-center justify-between gap-2 p-2 bg-slate-50 border-2 border-slate-900 rounded-lg"
+            >
+              <div class="flex flex-col min-w-0">
+                <span class="text-xs font-extrabold text-slate-900 truncate font-heading">{{ d.name }}</span>
+                <span class="text-[10px] text-slate-600 font-bold">X:{{ d.position.x }} Y:{{ d.position.y }}</span>
+              </div>
+
+              <button
+                type="button"
+                @click="emit('removeDummy', d.socketId)"
+                class="p-1 rounded bg-rose-100 hover:bg-rose-200 text-rose-800 border border-slate-900 pixel-btn shrink-0"
+                title="Remove Test User"
+              >
+                <Trash2 class="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          @click="emit('placeDummy')"
+          class="w-full bg-purple-300 hover:bg-purple-400 text-slate-950 font-heading text-xs font-extrabold py-2 px-3 rounded-xl border-2 border-slate-900 flex items-center justify-center gap-1.5 pixel-btn shadow-[2px_2px_0px_0px_#0f172a]"
+        >
+          <Plus class="w-4 h-4" /> Place Test User Here
+        </button>
+      </div>
+    </template>
+
     </div>
 
     <!-- Contextual: the tip is pinned, so it should be about the tab you are actually on. -->
@@ -473,8 +545,11 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
       <template v-if="activeCategory === 'build'">
         💡 Click grid cells to paint tiles or place props. Drag objects on the map to move them.
       </template>
-      <template v-else>
+      <template v-else-if="activeCategory === 'zones'">
         💡 Hit "Draw zone on map", then drag a rectangle over the map to set the bounds.
+      </template>
+      <template v-else>
+        💡 Walk to where you want a tester, then hit "Place Test User Here".
       </template>
     </p>
   </div>

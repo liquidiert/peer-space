@@ -187,6 +187,9 @@ export function useWebRTCProximity(
   // standard "unlock autoplay" pattern and fixes the classic "I can see they're talking but
   // hear nothing" symptom that only affects some browsers/devices.
   function unlockBlockedAudioPlayback() {
+    dummyMedia.forEach((media) => {
+      if (media.ctx.state === 'suspended') media.ctx.resume().catch(() => {});
+    });
     const pausedElements = Array.from(remoteAudioElements.values()).filter((audio) => audio.paused);
     if (pausedElements.length === 0) {
       isAudioPlaybackBlocked.value = false;
@@ -1048,6 +1051,7 @@ export function useWebRTCProximity(
   }
 
   function updateAllRemoteVolumes() {
+    syncDummyProximity();
     remoteAudioElements.forEach((audio, socketId) => {
       const targetUser = usersRef.value.find((u) => u.socketId === socketId);
       if (targetUser) {
@@ -1056,6 +1060,157 @@ export function useWebRTCProximity(
         audio.volume = 0;
       }
     });
+  }
+
+  // ==========================================
+  // DUMMY (TEST) USERS
+  // ==========================================
+  // Dummy users exist only in server memory - there is no browser on the other end to
+  // negotiate with, so they can never produce a real peer connection. Instead the admin's
+  // own client synthesises their media locally: a quiet tone for audio and an animated
+  // canvas for video. Both are registered in exactly the same places a real peer's tracks
+  // would be, so proximity volume, the video dock and the per-user volume menu all work on
+  // a dummy without knowing it is fake.
+  type DummyMedia = {
+    ctx: AudioContext;
+    osc: OscillatorNode;
+    gain: GainNode;
+    dest: MediaStreamAudioDestinationNode;
+    canvas: HTMLCanvasElement;
+    videoStream: MediaStream;
+    timer: number;
+  };
+  const dummyMedia = new Map<string, DummyMedia>();
+
+  /** Deliberately soft - this is a test signal, not something to be startled by. */
+  const DUMMY_TONE_GAIN = 0.04;
+
+  function ensureDummyMedia(user: User) {
+    if (dummyMedia.has(user.socketId)) return;
+    if (typeof window === 'undefined') return;
+
+    const AudioCtor: typeof AudioContext | undefined =
+      window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtor) return;
+
+    try {
+      const ctx = new AudioCtor();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const dest = ctx.createMediaStreamDestination();
+
+      osc.type = 'sine';
+      // Derive the pitch from the id so several dummies are distinguishable by ear.
+      let hash = 0;
+      for (const ch of user.socketId) hash = (hash * 31 + ch.charCodeAt(0)) % 997;
+      osc.frequency.value = 180 + (hash % 12) * 20;
+      gain.gain.value = DUMMY_TONE_GAIN;
+      osc.connect(gain);
+      gain.connect(dest);
+      osc.start();
+      // Autoplay policies can start the context suspended; the page-wide unlock handler
+      // resumes it on the next interaction.
+      ctx.resume().catch(() => {});
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 320;
+      canvas.height = 240;
+      const videoStream = (canvas as any).captureStream
+        ? (canvas as HTMLCanvasElement).captureStream(10)
+        : new MediaStream();
+
+      const hue = hash % 360;
+      let frame = 0;
+      const draw = () => {
+        const c = canvas.getContext('2d');
+        if (!c) return;
+        frame += 1;
+        c.fillStyle = `hsl(${hue}, 45%, ${18 + 6 * Math.sin(frame / 6)}%)`;
+        c.fillRect(0, 0, canvas.width, canvas.height);
+        c.fillStyle = `hsl(${hue}, 70%, 60%)`;
+        const barCount = 12;
+        for (let i = 0; i < barCount; i++) {
+          const h = 20 + 60 * Math.abs(Math.sin(frame / 8 + i / 2));
+          c.fillRect(12 + i * 25, canvas.height - 40 - h, 16, h);
+        }
+        c.fillStyle = '#f8fafc';
+        c.font = 'bold 18px sans-serif';
+        c.fillText(user.name, 12, 32);
+        c.font = 'bold 12px sans-serif';
+        c.fillText('TEST SIGNAL', 12, 52);
+      };
+      draw();
+      const timer = window.setInterval(draw, 100);
+
+      dummyMedia.set(user.socketId, { ctx, osc, gain, dest, canvas, videoStream, timer });
+
+      attachRemoteAudioStream(user.socketId, dest.stream);
+      // Proximity decides whether the tone is audible and whether the video tile exists at
+      // all - a freshly placed dummy you are standing away from must start silent/hidden.
+      syncDummyProximity();
+    } catch (err) {
+      console.warn('Could not create test user media:', err);
+    }
+  }
+
+  function removeDummyMedia(socketId: string) {
+    const media = dummyMedia.get(socketId);
+    if (!media) return;
+    dummyMedia.delete(socketId);
+
+    clearInterval(media.timer);
+    try {
+      media.osc.stop();
+    } catch (_) {}
+    media.osc.disconnect();
+    media.gain.disconnect();
+    media.videoStream.getTracks().forEach((t) => t.stop());
+    media.ctx.close().catch(() => {});
+
+    const audio = remoteAudioElements.get(socketId);
+    if (audio) {
+      audio.pause();
+      audio.srcObject = null;
+      remoteAudioElements.delete(socketId);
+    }
+
+    if (remoteVideoStreams.value.has(socketId)) {
+      const m = new Map(remoteVideoStreams.value);
+      m.delete(socketId);
+      remoteVideoStreams.value = m;
+    }
+  }
+
+  /**
+   * A dummy's media is generated locally rather than sent over a peer connection, so nothing
+   * stops at the network edge when you walk away - the element volume alone left the tone
+   * audible and the video tile parked in the dock. This mutes the oscillator at the source
+   * and drops the video stream entirely once out of range, which is the local equivalent of
+   * a real peer removing their outgoing track (see updatePeerVideoConnections).
+   */
+  function syncDummyProximity() {
+    if (dummyMedia.size === 0) return;
+
+    let nextVideo: Map<string, MediaStream> | null = null;
+
+    dummyMedia.forEach((media, socketId) => {
+      const user = usersRef.value.find((u) => u.socketId === socketId);
+      const audible = user ? calculateProximityVolume(user) > 0 : false;
+      const inRange = user ? isWithinProximityRange(user) : false;
+
+      media.gain.gain.value = audible ? DUMMY_TONE_GAIN : 0;
+
+      const hasTile = remoteVideoStreams.value.has(socketId);
+      if (inRange && !hasTile) {
+        nextVideo = nextVideo || new Map(remoteVideoStreams.value);
+        nextVideo.set(socketId, media.videoStream);
+      } else if (!inRange && hasTile) {
+        nextVideo = nextVideo || new Map(remoteVideoStreams.value);
+        nextVideo.delete(socketId);
+      }
+    });
+
+    if (nextVideo) remoteVideoStreams.value = nextVideo;
   }
 
   // Sync peer connections whenever users list updates
@@ -1068,6 +1223,11 @@ export function useWebRTCProximity(
     // Initiate offer to new peers (using socket ID comparison to prevent dual-offer race condition)
     usersRef.value.forEach((otherUser) => {
       if (otherUser.socketId !== myId) {
+        // No real peer on the other end - synthesise their signal locally instead.
+        if (otherUser.isDummy) {
+          ensureDummyMedia(otherUser);
+          return;
+        }
         if (!peerConnections.has(otherUser.socketId)) {
           // Lower socket ID initiates offer to maintain deterministic signaling
           if (myId < otherUser.socketId) {
@@ -1091,6 +1251,12 @@ export function useWebRTCProximity(
     screenPeerConnections.forEach((_, socketId) => {
       if (!currentSocketIds.has(socketId)) {
         removeScreenPeerConnection(socketId);
+      }
+    });
+
+    dummyMedia.forEach((_, socketId) => {
+      if (!usersRef.value.some((u) => u.socketId === socketId && u.isDummy)) {
+        removeDummyMedia(socketId);
       }
     });
 
@@ -1118,6 +1284,7 @@ export function useWebRTCProximity(
     if (localScreenStream.value) {
       localScreenStream.value.getTracks().forEach((track) => track.stop());
     }
+    Array.from(dummyMedia.keys()).forEach(removeDummyMedia);
     peerConnections.forEach((pc) => pc.close());
     peerConnections.clear();
     screenPeerConnections.forEach((pc) => pc.close());

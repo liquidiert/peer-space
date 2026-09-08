@@ -418,7 +418,7 @@ function openUserContextMenu(payload: {
 }) {
     // Clamp so the menu never opens half off-screen when someone is near an edge.
     const MENU_W = 240;
-    const MENU_H = 150;
+    const MENU_H = 210;
     userMenu.value = {
         socketId: payload.socketId,
         x: Math.min(payload.clientX, window.innerWidth - MENU_W - 8),
@@ -428,6 +428,18 @@ function openUserContextMenu(payload: {
 
 function closeUserMenu() {
     userMenu.value = null;
+}
+
+/**
+ * The browser's own context menu has nothing useful to offer over a game canvas, and
+ * right-clicking to open the per-user menu popped it up on top every time. It stays enabled
+ * on text fields, where copy/paste/spellcheck are genuinely wanted, and the avatar handler in
+ * SpatialCanvas keeps calling preventDefault itself so it still works if this ever changes.
+ */
+function suppressNativeContextMenu(e: MouseEvent) {
+    const el = e.target as HTMLElement | null;
+    if (el?.closest("input, textarea, [contenteditable='true']")) return;
+    e.preventDefault();
 }
 
 function dismissPopoversOnOutsideClick(e: MouseEvent) {
@@ -795,11 +807,13 @@ onMounted(() => {
     window.addEventListener("message", handleOAuthMessage);
     window.addEventListener("keydown", handleGlobalHotkeys);
     window.addEventListener("click", dismissPopoversOnOutsideClick);
+    window.addEventListener("contextmenu", suppressNativeContextMenu);
 
     onUnmounted(() => {
         window.removeEventListener("message", handleOAuthMessage);
         window.removeEventListener("keydown", handleGlobalHotkeys);
         window.removeEventListener("click", dismissPopoversOnOutsideClick);
+        window.removeEventListener("contextmenu", suppressNativeContextMenu);
     });
 });
 
@@ -1348,15 +1362,24 @@ function handleToggleBuilderMode() {
         builderMode.value = false;
     }
 }
+// Test ("dummy") users are admin-only and filtered out server side for everyone else, so
+// this list is simply empty for a normal user.
+const dummyUsers = computed(() => users.value.filter((u) => u.isDummy));
+
 function handlePlaceDummy() {
-  if (!socket.value || !currentUser.value?.isAdmin) return;
-  const pos = currentUser.value.position;
-  socket.value.emit('dummy:place', {
-    x: pos.x,
-    y: pos.y,
-    direction: currentUser.value.direction,
-    presenceStatus: 'available',
-  });
+    if (!socket.value || !currentUser.value?.isAdmin) return;
+    const pos = currentUser.value.position;
+    socket.value.emit("dummy:place", {
+        x: pos.x,
+        y: pos.y,
+        direction: currentUser.value.direction,
+        presenceStatus: "available",
+    });
+}
+
+function handleRemoveDummy(dummyId: string) {
+    if (!socket.value || !currentUser.value?.isAdmin) return;
+    socket.value.emit("dummy:remove", { dummyId });
 }
 
 </script>
@@ -1859,6 +1882,7 @@ function handlePlaceDummy() {
                 :privateZones="currentMap.privateZones"
                 :zoneDrawMode="zoneDrawMode"
                 :pendingZone="pendingZone"
+                :dummyUsers="dummyUsers"
                 @setZoneDrawMode="(on) => (zoneDrawMode = on)"
                 @close="builderMode = false"
                 @setBuilderAction="(act) => (builderAction = act)"
@@ -1867,6 +1891,8 @@ function handlePlaceDummy() {
                 @switchMapPreset="handleSwitchMapPreset"
                 @addZone="handleAddZone"
                 @removeZone="handleRemoveZone"
+                @placeDummy="handlePlaceDummy"
+                @removeDummy="handleRemoveDummy"
             />
 
             <!-- Proximity Chat & People Panel -->
@@ -1964,10 +1990,12 @@ function handlePlaceDummy() {
                 >
                     {{ userMenuTarget.name }}
                 </p>
+                <!-- Without an explicit colour this inherits the app root's text-slate-100
+                     and turns into a white glyph on a light grey button. -->
                 <button
                     type="button"
                     @click="closeUserMenu"
-                    class="ml-auto p-0.5 rounded bg-slate-100 hover:bg-slate-200 border-2 border-slate-900 pixel-btn shrink-0"
+                    class="ml-auto p-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-900 border-2 border-slate-900 pixel-btn shrink-0"
                 >
                     <X class="w-3 h-3" />
                 </button>
@@ -2006,6 +2034,21 @@ function handlePlaceDummy() {
                     decides.
                 </p>
             </div>
+
+            <!-- Ringing was only reachable from the people list, which is the long way round
+                 when you already have the person under your cursor. -->
+            <button
+                v-if="userMenuTarget.socketId !== currentUser.socketId"
+                type="button"
+                @click="
+                    handleChimeUser({ socketId: userMenuTarget.socketId });
+                    closeUserMenu();
+                "
+                class="w-full bg-amber-300 hover:bg-amber-400 text-slate-950 font-heading text-xs font-extrabold py-2 px-3 rounded-xl border-2 border-slate-900 flex items-center justify-center gap-1.5 pixel-btn shadow-[2px_2px_0px_0px_#0f172a]"
+            >
+                <BellRing class="w-3.5 h-3.5" /> Ring
+                {{ userMenuTarget.isDummy ? "(test user)" : "" }}
+            </button>
         </div>
 
         <!-- Interactive Object Modal -->

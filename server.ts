@@ -1209,7 +1209,9 @@ async function startServer() {
           },
           isMuted: false,
           isDeafened: false,
-          isSpeaking: false,
+          // Dummies emit a continuous synthetic audio/video signal on the admin's client,
+          // so they should read as permanently speaking.
+          isSpeaking: true,
           isScreenSharing: false,
           isAdmin: true,
           isDummy: true,
