@@ -1,4 +1,4 @@
-# <img src="public/favicon.svg" width="120"/> PeerSpace
+# <img src="public/favicon.svg" width="64"/> PeerSpace
 
 PeerSpace is a real-time 2D spatial virtual office and multiplayer workspace. Features interactive avatars, private meeting zones, proximity video/audio docks, and an interactive Admin Map Builder.
 
