@@ -8,9 +8,13 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - SERVICE_FQDN_PEERSPACE_3000
-      - KEYCLOAK_URL=${KEYCLOAK_URL}
-      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID}
-      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET}
+      # Realm URL as seen by the browser (login redirect).
+      - KEYCLOAK_URL=${KEYCLOAK_URL:-http://localhost:8080/realms/peer-space}
+      # Realm URL as seen from inside the Docker network (token exchange / userinfo).
+      # Point this at KEYCLOAK_URL instead if you use an external Keycloak.
+      - KEYCLOAK_INTERNAL_URL=${KEYCLOAK_INTERNAL_URL:-http://keycloak:8080/realms/peer-space}
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-peer-space}
+      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET:-peer-space-dev-secret}
       - SESSION_SECRET=${SESSION_SECRET}
       - DATA_DIR=/app/data
     volumes:
@@ -24,5 +28,66 @@ services:
       retries: 3
       start_period: 10s
 
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3
+    # --import-realm creates the peer-space realm from keycloak/import on first start and
+    # skips it on later starts (existing realms are never overwritten).
+    command: ["start", "--import-realm"]
+    restart: unless-stopped
+    # Without a limit the JVM sizes its heap from *host* RAM (70%), which can starve
+    # everything else on a small box. With a limit it sizes from the container instead.
+    mem_limit: ${KEYCLOAK_MEM_LIMIT:-1g}
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    environment:
+      - SERVICE_FQDN_KEYCLOAK_8080
+      - KC_BOOTSTRAP_ADMIN_USERNAME=${KEYCLOAK_ADMIN_USER:-admin}
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://keycloak-db:5432/keycloak
+      - KC_DB_USERNAME=keycloak
+      - KC_DB_PASSWORD=${KEYCLOAK_DB_PASSWORD:-keycloak}
+      # Public URL of Keycloak. Tokens are issued for this URL, while
+      # BACKCHANNEL_DYNAMIC lets PeerSpace talk to http://keycloak:8080 internally.
+      - KC_HOSTNAME=${KEYCLOAK_PUBLIC_URL:-http://localhost:8080}
+      - KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true
+      # TLS is expected to be terminated by a reverse proxy in front of Keycloak.
+      - KC_HTTP_ENABLED=true
+      - KC_PROXY_HEADERS=xforwarded
+      - KC_HEALTH_ENABLED=true
+      # Substituted into keycloak/import/peer-space-realm.json on first import.
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-peer-space}
+      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET:-peer-space-dev-secret}
+      - PEERSPACE_URL=${PEERSPACE_URL:-http://localhost:3000}
+    volumes:
+      - ./keycloak/import:/opt/keycloak/data/import:ro
+    expose:
+      - "8080"
+    healthcheck:
+      # The Keycloak image ships without curl/wget, so probe the management port via bash.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"UP\"' <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  keycloak-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    mem_limit: ${KEYCLOAK_DB_MEM_LIMIT:-256m}
+    environment:
+      - POSTGRES_DB=keycloak
+      - POSTGRES_USER=keycloak
+      - POSTGRES_PASSWORD=${KEYCLOAK_DB_PASSWORD:-keycloak}
+    volumes:
+      - keycloak_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   peerspace_data:
+  keycloak_db_data:

@@ -1,0 +1,49 @@
+{
+  "realm": "peer-space",
+  "displayName": "PeerSpace",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "resetPasswordAllowed": true,
+  "groups": [
+    { "name": "admin", "path": "/admin" }
+  ],
+  "clients": [
+    {
+      "clientId": "${KEYCLOAK_CLIENT_ID:peer-space}",
+      "name": "PeerSpace",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KEYCLOAK_CLIENT_SECRET:peer-space-dev-secret}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "rootUrl": "${PEERSPACE_URL:http://localhost:3000}",
+      "baseUrl": "/",
+      "redirectUris": ["${PEERSPACE_URL:http://localhost:3000}/auth/callback"],
+      "webOrigins": ["${PEERSPACE_URL:http://localhost:3000}"],
+      "attributes": {
+        "post.logout.redirect.uris": "${PEERSPACE_URL:http://localhost:3000}/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ]
+}

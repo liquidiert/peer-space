@@ -1,0 +1,11 @@
+# Local development overrides - picked up automatically by `docker compose up`.
+# Publishes PeerSpace and Keycloak on the host so the browser can reach both.
+# Deployments that set their own compose file (e.g. Coolify) ignore this file.
+services:
+  peerspace:
+    ports:
+      - "${PEERSPACE_PORT:-3000}:3000"
+
+  keycloak:
+    ports:
+      - "${KEYCLOAK_PORT:-8080}:8080"

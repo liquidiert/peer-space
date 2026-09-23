@@ -1409,7 +1409,7 @@ function handleRemoveDummy(dummyId: string) {
                 <h1
                     class="text-2xl sm:text-3xl font-black text-slate-950 font-press-start tracking-tight drop-shadow-sm"
                 >
-                    peer-space
+                    PeerSpace
                 </h1>
                 <p
                     class="text-xs text-slate-700 font-extrabold mt-2 mb-6 font-heading"
@@ -1604,13 +1604,13 @@ function handleRemoveDummy(dummyId: string) {
                     <h2
                         class="text-xs font-black text-slate-900 font-press-start tracking-tight leading-none"
                     >
-                        peer-space
+                        PeerSpace
                     </h2>
                     <div class="flex items-center gap-1.5 mt-1">
                         <p
                             class="text-[10px] text-amber-700 font-extrabold font-heading"
                         >
-                            Pixel Office World
+                            Spatial Office
                         </p>
                         <span
                             v-if="currentUser.isAdmin"

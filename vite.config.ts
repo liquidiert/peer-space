@@ -25,8 +25,8 @@ export default defineConfig(() => {
         },
         includeAssets: ['favicon.svg', 'favicon.ico', 'apple-touch-icon.png'],
         manifest: {
-          name: 'peer-space | Spatial Office',
-          short_name: 'peer-space',
+          name: 'PeerSpace | Spatial Office',
+          short_name: 'PeerSpace',
           description: '2D Spatial Virtual Office & Pixel Collaboration Hub',
           start_url: '/',
           display: 'standalone',

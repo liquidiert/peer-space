@@ -1371,11 +1371,18 @@ async function startServer() {
   });
 
   // Keycloak / Google Auth Login URL Endpoint
+  // KEYCLOAK_URL is the realm URL as the *browser* sees it (used for the login redirect).
+  // KEYCLOAK_INTERNAL_URL is optional and only used for server-to-server calls (token
+  // exchange, userinfo) - needed when Keycloak runs in the same Docker network and the
+  // public URL (e.g. http://localhost:8080) is not reachable from inside this container.
+  const keycloakUrl =
+    process.env.KEYCLOAK_URL ||
+    "https://cloak.dev.personalclientcare.com/realms/ins3c";
+  const keycloakInternalUrl = process.env.KEYCLOAK_INTERNAL_URL || keycloakUrl;
+  const keycloakClientId = process.env.KEYCLOAK_CLIENT_ID || "ins3c-login";
+  const keycloakClientSecret = process.env.KEYCLOAK_CLIENT_SECRET || "";
+
   app.get("/api/auth/login-url", (c) => {
-    const keycloakUrl =
-      process.env.KEYCLOAK_URL ||
-      "https://cloak.dev.personalclientcare.com/realms/ins3c";
-    const clientId = process.env.KEYCLOAK_CLIENT_ID || "ins3c-login";
 
     const reqUrl = new URL(c.req.url);
     const rawProto =
@@ -1396,7 +1403,7 @@ async function startServer() {
     const redirectUri = c.req.query("redirect_uri") || computedRedirectUri;
 
     const params = new URLSearchParams({
-      client_id: clientId,
+      client_id: keycloakClientId,
       redirect_uri: redirectUri,
       response_type: "code",
       scope: "openid profile email",
@@ -1413,11 +1420,6 @@ async function startServer() {
   // OAuth Callback Endpoint
   app.get("/auth/callback", async (c) => {
     const code = c.req.query("code");
-    const keycloakUrl =
-      process.env.KEYCLOAK_URL ||
-      "https://cloak.dev.personalclientcare.com/realms/ins3c";
-    const clientId = process.env.KEYCLOAK_CLIENT_ID || "ins3c-login";
-    const clientSecret = process.env.KEYCLOAK_CLIENT_SECRET || "";
 
     if (!code) {
       return c.text("Missing authorization code", 400);
@@ -1442,17 +1444,17 @@ async function startServer() {
 
       const tokenBody = new URLSearchParams({
         grant_type: "authorization_code",
-        client_id: clientId,
+        client_id: keycloakClientId,
         code: code as string,
         redirect_uri: redirectUri,
       });
 
-      if (clientSecret) {
-        tokenBody.append("client_secret", clientSecret);
+      if (keycloakClientSecret) {
+        tokenBody.append("client_secret", keycloakClientSecret);
       }
 
       const tokenRes = await fetch(
-        `${keycloakUrl}/protocol/openid-connect/token`,
+        `${keycloakInternalUrl}/protocol/openid-connect/token`,
         {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -1518,7 +1520,7 @@ async function startServer() {
       if (tokens.access_token) {
         try {
           const userinfoRes = await fetch(
-            `${keycloakUrl}/protocol/openid-connect/userinfo`,
+            `${keycloakInternalUrl}/protocol/openid-connect/userinfo`,
             {
               headers: { Authorization: `Bearer ${tokens.access_token}` },
             },
@@ -1658,7 +1660,7 @@ async function startServer() {
           <body>
             <div class="card">
               <h2>🎉 Login Successful!</h2>
-              <p>Welcome, ${userData.name}! Returning to peer-space...</p>
+              <p>Welcome, ${userData.name}! Returning to PeerSpace...</p>
             </div>
             <script>
               const userData = ${JSON.stringify(userData)};
