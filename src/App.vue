@@ -9,6 +9,7 @@ import MiniMap from "./components/MiniMap.vue";
 import AvatarBuilder from "./components/AvatarBuilder.vue";
 import ObjectModals from "./components/ObjectModals.vue";
 import VideoDock from "./components/VideoDock.vue";
+import SpacePicker from "./components/SpacePicker.vue";
 import {
     Sparkles,
     Compass,
@@ -23,6 +24,7 @@ import {
     Menu,
     Volume2,
     UserRoundCog,
+    ArrowLeftRight,
 } from "lucide-vue-next";
 import { useRegisterSW } from "virtual:pwa-register/vue";
 import type {
@@ -36,6 +38,7 @@ import type {
     StickyNote,
     PresenceStatus,
     PrivateZone,
+    SpaceSummary,
 } from "./types";
 import { createDefaultOfficeMap } from "./mapsData";
 import { useWebRTCProximity } from "./composables/useWebRTCProximity";
@@ -119,6 +122,76 @@ const authenticatedUser = ref<{
 
 /** Explains why the login screen came back, when it came back on its own. */
 const authNotice = ref<string | null>(null);
+
+// Spaces the signed-in user may enter (admins: all of them). The server decides what is in
+// this list and re-checks on join; the client only renders it.
+const spaces = ref<SpaceSummary[]>([]);
+const spacesLoading = ref(false);
+const spacesError = ref<string | null>(null);
+const currentSpace = ref<{ id: string; name: string } | null>(null);
+
+type SpaceAck = { ok: boolean; reason?: string; spaces?: SpaceSummary[] };
+
+const SPACE_ERRORS: Record<string, string> = {
+    unauthenticated: "Your session expired. Please sign in again.",
+    not_allowed: "Only admins can manage spaces.",
+    name_required: "A space needs a name.",
+    no_space: "That space no longer exists.",
+    last_space: "The last remaining space cannot be deleted.",
+    space_occupied: "People are still in that space. Try again once it is empty.",
+};
+
+/** Calls a spaces:* event with our token and applies the returned list. */
+function spaceRequest(event: string, extra: Record<string, unknown> = {}) {
+    const token = authenticatedUser.value?.sessionToken;
+    if (!socket.value || !token) return;
+    spacesLoading.value = true;
+    socket.value.emit(event, { sessionToken: token, ...extra }, (r: SpaceAck) => {
+        spacesLoading.value = false;
+        if (r?.ok && r.spaces) {
+            spaces.value = r.spaces;
+            spacesError.value = null;
+            // A user assigned to exactly one space has nothing to choose - go straight in.
+            // Admins always see the list, since that is where spaces are managed.
+            if (
+                event === "spaces:list" &&
+                !hasJoined.value &&
+                !authenticatedUser.value?.isAdmin &&
+                r.spaces.length === 1
+            ) {
+                handleJoinSpace(r.spaces[0].id);
+            }
+        } else if (r?.reason === "unauthenticated") {
+            authenticatedUser.value = null;
+            authNotice.value = SPACE_ERRORS.unauthenticated;
+        } else {
+            spacesError.value =
+                SPACE_ERRORS[r?.reason ?? ""] ?? "Could not load spaces.";
+        }
+    });
+}
+
+const loadSpaces = () => spaceRequest("spaces:list");
+const handleCreateSpace = (p: {
+    name: string;
+    memberEmails: string[];
+    openToAll: boolean;
+}) => spaceRequest("spaces:create", p);
+const handleUpdateSpace = (p: {
+    spaceId: string;
+    name: string;
+    memberEmails: string[];
+    openToAll: boolean;
+}) => spaceRequest("spaces:update", p);
+const handleDeleteSpace = (spaceId: string) =>
+    spaceRequest("spaces:delete", { spaceId });
+
+// Everything in the world is scoped to a space, so changing space means starting from a clean
+// slate (peer connections, chat, map state). A reload is the reliable way to get that; the
+// stored login puts the user straight back on the picker.
+function handleSwitchSpace() {
+    window.location.reload();
+}
 
 watch(
     authenticatedUser,
@@ -487,6 +560,7 @@ onMounted(() => {
 
     const sk = io();
     socket.value = sk;
+    if (authenticatedUser.value) loadSpaces();
 
     sk.on("auth:expired", () => {
         // Our stored login is no longer valid server-side, so we are not admin - however
@@ -498,9 +572,21 @@ onMounted(() => {
             "Your session expired. Please sign in again to restore your access.";
     });
 
+    sk.on("space:denied", () => {
+        hasJoined.value = false;
+        spacesError.value = "You do not have access to that space.";
+        loadSpaces();
+    });
+
     sk.on(
         "init:state",
-        (data: { currentUser: User; currentMap: GridMap; users: User[] }) => {
+        (data: {
+            currentUser: User;
+            currentMap: GridMap;
+            users: User[];
+            space?: { id: string; name: string };
+        }) => {
+            currentSpace.value = data.space ?? null;
             currentUser.value = data.currentUser;
             currentMap.value = data.currentMap;
             users.value = data.users;
@@ -790,9 +876,10 @@ onMounted(() => {
                 userNameInput.value = u.name;
             }
 
-            // Automatically join workspace if not joined yet
+            // Not in a space yet: fetch the ones this user may enter. That either shows the
+            // picker or, for a user with a single space, joins it directly.
             if (!hasJoined.value) {
-                handleJoinSpace();
+                loadSpaces();
             } else if (socket.value) {
                 currentUser.value.name = u.name || "Member";
                 currentUser.value.isAdmin = Boolean(u.isAdmin);
@@ -823,7 +910,7 @@ onUnmounted(() => {
     }
 });
 
-async function handleJoinSpace() {
+async function handleJoinSpace(spaceId: string) {
     if (!socket.value) return;
     const nameToUse =
         authenticatedUser.value?.name || userNameInput.value || "Member";
@@ -842,6 +929,7 @@ async function handleJoinSpace() {
         // The server verifies this and derives isAdmin/email from it directly - it does not
         // trust the isAdmin/email fields above on their own (see server.ts user:join handler).
         sessionToken: authenticatedUser.value?.sessionToken,
+        spaceId,
         // Resume where we left off last time, if the server decides the tile/map are still valid.
         lastPosition: loadSavedPosition(),
         presenceStatus: presenceStatus.value,
@@ -1480,14 +1568,16 @@ function handleRemoveDummy(dummyId: string) {
                             </button>
                         </div>
 
-                        <form @submit.prevent="handleJoinSpace" class="w-full">
-                            <button
-                                type="submit"
-                                class="w-full bg-indigo-500 hover:bg-indigo-600 text-white px-6 py-3.5 rounded-xl text-xs font-black border-2 border-slate-900 flex items-center justify-center gap-2 transition-all whitespace-nowrap cursor-pointer pixel-btn font-press-start shadow-[3px_3px_0px_0px_#0f172a]"
-                            >
-                                <Sparkles class="w-4 h-4" /> ENTER SPACE
-                            </button>
-                        </form>
+                        <SpacePicker
+                            :spaces="spaces"
+                            :isAdmin="Boolean(authenticatedUser.isAdmin)"
+                            :loading="spacesLoading"
+                            :error="spacesError"
+                            @join="handleJoinSpace"
+                            @create="handleCreateSpace"
+                            @update="handleUpdateSpace"
+                            @delete="handleDeleteSpace"
+                        />
                     </div>
 
                     <div v-else class="flex flex-col gap-3">
@@ -1593,7 +1683,7 @@ function handleRemoveDummy(dummyId: string) {
         >
             <!-- Header Bar & Private Zone Notification Banner -->
             <div
-                class="absolute top-4 left-4 z-30 flex items-center gap-2.5 sm:gap-3 bg-white border-3 border-slate-900 px-3 sm:px-4 py-2 rounded-2xl shadow-[5px_5px_0px_0px_#0f172a]"
+                class="absolute top-4 left-4 z-30 flex items-center gap-3 sm:gap-6 bg-white border-3 border-slate-900 px-3 sm:px-6 py-3 rounded-2xl shadow-[5px_5px_0px_0px_#0f172a]"
             >
                 <div
                     class="w-8 h-8 bg-amber-300 text-slate-950 border-2 border-slate-900 rounded-lg flex items-center justify-center font-black text-xs font-press-start shadow-[2px_2px_0px_0px_#0f172a] shrink-0"
@@ -1601,25 +1691,57 @@ function handleRemoveDummy(dummyId: string) {
                     P
                 </div>
                 <div>
-                    <h2
-                        class="text-xs font-black text-slate-900 font-press-start tracking-tight leading-none"
-                    >
-                        PeerSpace
-                    </h2>
-                    <div class="flex items-center gap-1.5 mt-1">
-                        <p
-                            class="text-[10px] text-amber-700 font-extrabold font-heading"
+                    <div class="flex items-center gap-2.5">
+                        <h2
+                            class="text-xs font-black text-slate-900 font-press-start tracking-tight leading-none"
                         >
-                            Spatial Office
-                        </p>
+                            PeerSpace
+                        </h2>
                         <span
                             v-if="currentUser.isAdmin"
                             class="bg-amber-400 text-slate-950 px-1 py-0.2 rounded text-[8px] font-black border border-slate-900 font-heading uppercase"
                             >Admin</span
                         >
                     </div>
+                    <div class="flex items-center gap-3 mt-2">
+                        <p
+                            class="text-[10px] text-amber-700 font-extrabold font-heading"
+                        >
+                            {{ currentSpace?.name || "Spatial Office" }}
+                        </p>
+                    </div>
                 </div>
 
+                <div class="flex items-center gap-2 sm:ml-auto">
+                <button
+                    v-if="authenticatedUser?.isAdmin || spaces.length > 1"
+                    type="button"
+                    @click="handleSwitchSpace"
+                    title="Switch space"
+                    class="text-[10px] font-black px-2.5 py-1 rounded-lg border-2 border-slate-900 bg-indigo-500 hover:bg-indigo-600 text-white flex items-center gap-1 pixel-btn shadow-[2px_2px_0px_0px_#0f172a] font-heading cursor-pointer"
+                >
+                    <ArrowLeftRight class="w-3 h-3" />
+                    Switch
+                </button>
+                    <!-- Map Builder Quick Access (Visible for Admin Users) -->
+                    <button
+                        v-if="currentUser.isAdmin"
+                        type="button"
+                        @click="handleToggleBuilderMode"
+                        :title="
+                            builderMode
+                                ? 'Close Map Builder (Shift+B)'
+                                : 'Open Map Builder (Admin) (Shift+B)'
+                        "
+                        :class="`text-[10px] font-bold px-2.5 py-1 rounded-lg border-2 border-slate-900 flex items-center gap-1.5 transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] font-heading ${
+                            builderMode
+                                ? 'bg-amber-400 text-slate-950 hover:bg-amber-300'
+                                : 'bg-indigo-100 text-indigo-950 hover:bg-indigo-200'
+                        }`"
+                    >
+                        <Hammer class="w-3.5 h-3.5" />
+                        <span>Map</span>
+                    </button>
                 <!-- App menu: settings that are not per-moment controls, so they do not belong
              in the control bar with mute/camera. -->
                 <div class="relative" data-app-menu>
@@ -1634,12 +1756,11 @@ function handleRemoveDummy(dummyId: string) {
                         }`"
                     >
                         <Menu class="w-3.5 h-3.5" />
-                        <span class="hidden sm:inline">Menu</span>
                     </button>
 
                     <div
                         v-if="appMenuOpen"
-                        class="absolute top-full left-0 mt-2 w-64 bg-white border-3 border-slate-900 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] p-2 flex flex-col gap-1.5 z-50"
+                        class="absolute top-full right-0 mt-2 w-64 bg-white border-3 border-slate-900 rounded-2xl shadow-[6px_6px_0px_0px_#0f172a] p-2 flex flex-col gap-1.5 z-50"
                     >
                         <button
                             type="button"
@@ -1704,27 +1825,7 @@ function handleRemoveDummy(dummyId: string) {
                     </div>
                 </div>
 
-                <!-- Map Builder Quick Access (Visible for Admin Users) -->
-                <button
-                    v-if="currentUser.isAdmin"
-                    type="button"
-                    @click="handleToggleBuilderMode"
-                    :title="
-                        builderMode
-                            ? 'Close Map Builder (Shift+B)'
-                            : 'Open Map Builder (Admin) (Shift+B)'
-                    "
-                    :class="`text-[10px] font-bold px-2.5 py-1 rounded-lg border-2 border-slate-900 flex items-center gap-1.5 transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] font-heading ${
-                        builderMode
-                            ? 'bg-amber-400 text-slate-950 hover:bg-amber-300'
-                            : 'bg-indigo-100 text-indigo-950 hover:bg-indigo-200'
-                    }`"
-                >
-                    <Hammer class="w-3.5 h-3.5" />
-                    <span>{{
-                        builderMode ? "Exit Builder" : "Map Builder"
-                    }}</span>
-                </button>
+                </div>
             </div>
 
             <!-- Private Zone Entrance / Exit Toast Banner -->

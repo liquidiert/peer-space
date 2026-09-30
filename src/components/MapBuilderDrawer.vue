@@ -241,7 +241,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
             type="button"
             @click="emit('switchMapPreset', 'office_default')"
             :class="`px-2.5 py-2 text-xs font-bold rounded-lg border-2 border-slate-900 text-left transition-all pixel-btn ${
-              currentMapId === 'office_default'
+              currentMapId.endsWith('office_default')
                 ? 'bg-amber-300 text-slate-950 shadow-[2px_2px_0px_0px_#0f172a]'
                 : 'bg-slate-100 hover:bg-slate-200 text-slate-900'
             }`"
@@ -252,7 +252,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
             type="button"
             @click="emit('switchMapPreset', 'beach_retreat')"
             :class="`px-2.5 py-2 text-xs font-bold rounded-lg border-2 border-slate-900 text-left transition-all pixel-btn ${
-              currentMapId === 'beach_retreat'
+              currentMapId.endsWith('beach_retreat')
                 ? 'bg-amber-300 text-slate-950 shadow-[2px_2px_0px_0px_#0f172a]'
                 : 'bg-slate-100 hover:bg-slate-200 text-slate-900'
             }`"

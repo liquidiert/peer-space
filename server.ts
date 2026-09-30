@@ -17,6 +17,9 @@ import {
   StickyNote,
   PrivateZone,
   PresenceStatus,
+  Direction,
+  Space,
+  SpaceSummary,
 } from "./src/types";
 import { createDefaultOfficeMap, createBeachRetreatMap } from "./src/mapsData";
 import { initWorkspaceDatabase } from "./src/db";
@@ -37,6 +40,11 @@ import {
   type GameTableGame,
 } from "./src/lib/gameTable";
 import { isTileWalkable } from "./src/lib/pathfinding";
+import {
+  canEnterSpace,
+  normalizeEmails,
+  spacesFor,
+} from "./src/lib/spaceAccess";
 
 async function startServer() {
   const app = new Hono();
@@ -97,18 +105,81 @@ async function startServer() {
     db.saveMap(beachRetreat);
   }
 
-  let currentMapId = db.loadActiveMapId() || defaultOffice.id;
-  if (!maps.has(currentMapId)) {
-    currentMapId = defaultOffice.id;
-  }
-  db.saveActiveMapId(currentMapId);
+  // Spaces: isolated worlds, each owning its maps and its own active map. Users, chat, voice
+  // proximity and map edits never cross a space boundary.
+  const spaces: Map<string, Space> = new Map();
+  const DEFAULT_SPACE_ID = "main";
 
-  // Persistence helper
-  function persistCurrentMap() {
-    const map = maps.get(currentMapId);
-    if (map) {
-      db.saveMap(map);
+  const savedSpaces = db.loadSpaces();
+  if (savedSpaces.length > 0) {
+    savedSpaces.forEach((sp) => spaces.set(sp.id, sp));
+  } else {
+    // First boot on a pre-spaces database (or a fresh one): everything that exists so far
+    // becomes the default space. It is open to all so nobody is locked out by the upgrade;
+    // an admin can restrict it afterwards.
+    const legacyActive = db.loadActiveMapId();
+    const main: Space = {
+      id: DEFAULT_SPACE_ID,
+      name: "Main Space",
+      activeMapId:
+        legacyActive && maps.has(legacyActive)
+          ? legacyActive
+          : defaultOffice.id,
+      memberEmails: [],
+      openToAll: true,
+    };
+    spaces.set(main.id, main);
+    db.saveSpace(main);
+  }
+
+  // Maps saved before spaces existed have no owner; they belong to the default space.
+  const fallbackSpaceId = spaces.has(DEFAULT_SPACE_ID)
+    ? DEFAULT_SPACE_ID
+    : [...spaces.keys()][0];
+  for (const m of maps.values()) {
+    if (!m.spaceId) {
+      m.spaceId = fallbackSpaceId;
+      db.saveMap(m);
     }
+  }
+
+  // Fresh copies of the preset maps for a new space. Map ids are globally unique in the
+  // database, so they are namespaced by space.
+  function seedSpaceMaps(spaceId: string): GridMap[] {
+    return [createDefaultOfficeMap(), createBeachRetreatMap()].map((base) => {
+      const map: GridMap = { ...base, id: `${spaceId}:${base.id}`, spaceId };
+      maps.set(map.id, map);
+      db.saveMap(map);
+      return map;
+    });
+  }
+
+  // A space must always point at one of its own maps.
+  function ensureValidActiveMap(space: Space) {
+    const own = [...maps.values()].filter((m) => m.spaceId === space.id);
+    if (own.some((m) => m.id === space.activeMapId)) return;
+    if (own.length === 0) own.push(...seedSpaceMaps(space.id));
+    space.activeMapId = own[0].id;
+    db.saveSpace(space);
+  }
+  spaces.forEach(ensureValidActiveMap);
+
+  const room = (spaceId: string) => `space:${spaceId}`;
+  const spaceIdOf = (socketId: string) => users.get(socketId)?.spaceId;
+  const usersIn = (spaceId: string | undefined) =>
+    spaceId
+      ? Array.from(users.values()).filter((u) => u.spaceId === spaceId)
+      : [];
+  function spaceMap(spaceId: string | undefined): GridMap | undefined {
+    const space = spaceId ? spaces.get(spaceId) : undefined;
+    return space ? maps.get(space.activeMapId) : undefined;
+  }
+  const spaceMapOf = (socketId: string) => spaceMap(spaceIdOf(socketId));
+  // Emits to everyone in the sender's space, and nobody else.
+  const toSpace = (socketId: string) => io.to(room(spaceIdOf(socketId) ?? ""));
+
+  function persistMap(map: GridMap | undefined) {
+    if (map) db.saveMap(map);
   }
 
   let vite: any;
@@ -196,12 +267,13 @@ async function startServer() {
 
   // Helper: is this tile currently stood on by some other connected user?
   function isOccupiedByOtherUser(
+    spaceId: string | undefined,
     x: number,
     y: number,
     excludeSocketId: string,
     forAdmin = false,
   ): boolean {
-    for (const u of users.values()) {
+    for (const u of usersIn(spaceId)) {
       if (
         u.socketId !== excludeSocketId &&
         u.position.x === x &&
@@ -217,6 +289,7 @@ async function startServer() {
   // Helper: nearest walkable, unoccupied tile to `preferred` - used when a join/resume
   // position would otherwise land a new user directly on top of someone already there.
   function findFreeSpawnTile(
+    spaceId: string | undefined,
     map: GridMap,
     preferred: { x: number; y: number },
     excludeSocketId: string,
@@ -225,6 +298,7 @@ async function startServer() {
     if (
       isTileWalkable(map, preferred.x, preferred.y) &&
       !isOccupiedByOtherUser(
+        spaceId,
         preferred.x,
         preferred.y,
         excludeSocketId,
@@ -241,7 +315,7 @@ async function startServer() {
           const y = preferred.y + dy;
           if (
             isTileWalkable(map, x, y) &&
-            !isOccupiedByOtherUser(x, y, excludeSocketId, forAdmin)
+            !isOccupiedByOtherUser(spaceId, x, y, excludeSocketId, forAdmin)
           ) {
             return { x, y };
           }
@@ -252,11 +326,10 @@ async function startServer() {
   }
 
   // Calculate proximity and emit peer connections list to all users
-  function updateSpatialProximity() {
-    const map = maps.get(currentMapId);
-    if (!map) return;
+  function updateSpatialProximity(spaceId: string | undefined) {
+    if (!spaceMap(spaceId)) return;
 
-    const userList = Array.from(users.values());
+    const userList = usersIn(spaceId);
     const PROXIMITY_TILE_RADIUS = 7; // Maximum tile distance for proximity voice
 
     userList.forEach((userA) => {
@@ -314,25 +387,26 @@ async function startServer() {
   }
 
   // Emit an event only to connected admin users (excluding dummies)
-  function emitToAdmins(eventName: string, data: any) {
-    for (const [sId, u] of users.entries()) {
+  function emitToAdmins(spaceId: string | undefined, eventName: string, data: any) {
+    for (const u of usersIn(spaceId)) {
       if (u.isAdmin && !u.isDummy) {
-        io.to(sId).emit(eventName, data);
+        io.to(u.socketId).emit(eventName, data);
       }
     }
   }
 
   // Broadcast a user-list event, hiding dummies from non-admin viewers
   function broadcastUsersWithFilter(
+    spaceId: string | undefined,
     eventName: string,
     makePayload: (userList: User[]) => any,
   ) {
-    const allUsers = Array.from(users.values());
+    const allUsers = usersIn(spaceId);
     const publicUsers = allUsers.filter((u) => !u.isDummy);
 
-    for (const [sId, u] of users.entries()) {
+    for (const u of allUsers) {
       if (u.isDummy) continue;
-      io.to(sId).emit(
+      io.to(u.socketId).emit(
         eventName,
         makePayload(u.isAdmin ? allUsers : publicUsers),
       );
@@ -342,6 +416,154 @@ async function startServer() {
   // Socket.IO event handlers
   io.on("connection", (socket: Socket) => {
     console.log(`User connected: ${socket.id}`);
+
+    // ==========================================
+    // SPACES (listing, and admin management)
+    // Authenticated per call by the signed session token, since none of this happens after a
+    // user:join - the picker runs before the user is in any space.
+    // ==========================================
+    function summarize(space: Space, admin: boolean): SpaceSummary {
+      return {
+        id: space.id,
+        name: space.name,
+        onlineCount: usersIn(space.id).filter((u) => !u.isDummy).length,
+        ...(admin
+          ? { memberEmails: space.memberEmails, openToAll: space.openToAll }
+          : {}),
+      };
+    }
+
+    function listFor(session: { email: string; isAdmin: boolean }) {
+      return spacesFor(spaces.values(), session).map((sp) =>
+        summarize(sp, session.isAdmin),
+      );
+    }
+
+    type SpaceAck = (r: {
+      ok: boolean;
+      reason?: string;
+      spaces?: SpaceSummary[];
+    }) => void;
+
+    // Shared prologue: verified session, plus an admin check for management calls.
+    function authorize(
+      token: unknown,
+      ack: SpaceAck | undefined,
+      requireAdmin: boolean,
+    ) {
+      const reply = (r: Parameters<SpaceAck>[0]) => {
+        if (typeof ack === "function") ack(r);
+      };
+      const session = verifySessionToken(token);
+      if (!session) {
+        reply({ ok: false, reason: "unauthenticated" });
+        return null;
+      }
+      if (requireAdmin && !session.isAdmin) {
+        reply({ ok: false, reason: "not_allowed" });
+        return null;
+      }
+      return { session, reply };
+    }
+
+    socket.on(
+      "spaces:list",
+      (payload: { sessionToken?: string }, ack?: SpaceAck) => {
+        const auth = authorize(payload?.sessionToken, ack, false);
+        if (!auth) return;
+        auth.reply({ ok: true, spaces: listFor(auth.session) });
+      },
+    );
+
+    socket.on(
+      "spaces:create",
+      (
+        payload: {
+          sessionToken?: string;
+          name?: string;
+          memberEmails?: string[];
+          openToAll?: boolean;
+        },
+        ack?: SpaceAck,
+      ) => {
+        const auth = authorize(payload?.sessionToken, ack, true);
+        if (!auth) return;
+
+        const name = String(payload.name ?? "").trim().slice(0, 60);
+        if (!name) return auth.reply({ ok: false, reason: "name_required" });
+
+        const space: Space = {
+          id: `space_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 6)}`,
+          name,
+          activeMapId: "",
+          memberEmails: normalizeEmails(payload.memberEmails),
+          openToAll: payload.openToAll === true,
+        };
+        space.activeMapId = seedSpaceMaps(space.id)[0].id;
+        spaces.set(space.id, space);
+        db.saveSpace(space);
+        auth.reply({ ok: true, spaces: listFor(auth.session) });
+      },
+    );
+
+    socket.on(
+      "spaces:update",
+      (
+        payload: {
+          sessionToken?: string;
+          spaceId?: string;
+          name?: string;
+          memberEmails?: string[];
+          openToAll?: boolean;
+        },
+        ack?: SpaceAck,
+      ) => {
+        const auth = authorize(payload?.sessionToken, ack, true);
+        if (!auth) return;
+
+        const space = payload.spaceId ? spaces.get(payload.spaceId) : undefined;
+        if (!space) return auth.reply({ ok: false, reason: "no_space" });
+
+        if (typeof payload.name === "string") {
+          const name = payload.name.trim().slice(0, 60);
+          if (name) space.name = name;
+        }
+        if (payload.memberEmails !== undefined) {
+          space.memberEmails = normalizeEmails(payload.memberEmails);
+        }
+        if (typeof payload.openToAll === "boolean") {
+          space.openToAll = payload.openToAll;
+        }
+        db.saveSpace(space);
+        auth.reply({ ok: true, spaces: listFor(auth.session) });
+      },
+    );
+
+    socket.on(
+      "spaces:delete",
+      (payload: { sessionToken?: string; spaceId?: string }, ack?: SpaceAck) => {
+        const auth = authorize(payload?.sessionToken, ack, true);
+        if (!auth) return;
+
+        const space = payload.spaceId ? spaces.get(payload.spaceId) : undefined;
+        if (!space) return auth.reply({ ok: false, reason: "no_space" });
+        if (spaces.size <= 1) return auth.reply({ ok: false, reason: "last_space" });
+        if (usersIn(space.id).some((u) => !u.isDummy))
+          return auth.reply({ ok: false, reason: "space_occupied" });
+
+        // Dummies are admin test users; they go with the space.
+        for (const u of usersIn(space.id)) users.delete(u.socketId);
+        for (const m of [...maps.values()]) {
+          if (m.spaceId === space.id) {
+            maps.delete(m.id);
+            db.deleteMap(m.id);
+          }
+        }
+        spaces.delete(space.id);
+        db.deleteSpace(space.id);
+        auth.reply({ ok: true, spaces: listFor(auth.session) });
+      },
+    );
 
     // Join room
     socket.on(
@@ -355,8 +577,36 @@ async function startServer() {
         sessionToken?: string;
         lastPosition?: { mapId: string; x: number; y: number };
         presenceStatus?: PresenceStatus;
+        spaceId?: string;
       }) => {
-        const map = maps.get(currentMapId) || defaultOffice;
+        // isAdmin and a cross-device stable identity (email) can ONLY come from a verified
+        // Keycloak session token - payload.isAdmin/email are otherwise fully client-controlled
+        // and must never be trusted directly (that was previously a trivial privilege-escalation
+        // hole: any client could just send { isAdmin: true }).
+        const session = verifySessionToken(payload.sessionToken);
+
+        // Space membership is keyed on the verified email, so a join without a valid token can
+        // no longer be treated as a guest. It also means a stale token (expired, or signed with
+        // a secret from a previous server boot) is refused rather than silently downgraded -
+        // which used to make admin look broken while the client still showed the cached badge.
+        if (!session) {
+          console.warn(
+            `[auth] Missing or stale session token from ${socket.id} - expired, or signed with a ` +
+              `previous SESSION_SECRET. Asking the client to sign in again.`,
+          );
+          socket.emit("auth:expired");
+          return;
+        }
+
+        if (users.has(socket.id)) return;
+
+        // Which space to enter is the client's request; whether they may is decided here.
+        const space = payload.spaceId ? spaces.get(payload.spaceId) : undefined;
+        const map = space ? maps.get(space.activeMapId) : undefined;
+        if (!space || !map || !canEnterSpace(space, session)) {
+          socket.emit("space:denied", { spaceId: payload.spaceId ?? null });
+          return;
+        }
 
         // Resume where the browser last left off, as long as it was on this same map and the
         // tile is still walkable (map layout may have changed via the builder since then).
@@ -368,6 +618,7 @@ async function startServer() {
         // Collision detection means two users can no longer share a tile - if the resume/spawn
         // tile is already taken, nudge the new arrival to the nearest free tile instead.
         const startPosition = findFreeSpawnTile(
+          space.id,
           map,
           preferredPosition,
           socket.id,
@@ -379,30 +630,10 @@ async function startServer() {
           startPosition.y,
         );
 
-        // isAdmin and a cross-device stable identity (email) can ONLY come from a verified
-        // Keycloak session token - payload.isAdmin/email are otherwise fully client-controlled
-        // and must never be trusted directly (that was previously a trivial privilege-escalation
-        // hole: any client could just send { isAdmin: true }).
-        const session = verifySessionToken(payload.sessionToken);
-
-        // A token that was *supplied but did not verify* means the client is holding a stale
-        // login - either past the 12h TTL, or signed with a secret from a previous server boot
-        // (which is what happens on every restart whenever SESSION_SECRET is unset). Silently
-        // treating that as "guest" is what made admin look broken rather than expired: the
-        // client still shows the cached Admin badge it persisted to localStorage, while every
-        // admin handler here rejects them. Tell the client so it can re-authenticate instead.
-        if (payload.sessionToken && !session) {
-          console.warn(
-            `[auth] Stale session token from ${socket.id} - expired, or signed with a previous ` +
-              `SESSION_SECRET. Asking the client to sign in again.`,
-          );
-          socket.emit("auth:expired");
-        }
-
-        const isAdmin = session ? session.isAdmin : false;
-        const email = session ? session.email : undefined;
+        const isAdmin = session.isAdmin;
+        const email = session.email || undefined;
         const displayName =
-          session?.name || payload.name || `Guest_${socket.id.substring(0, 4)}`;
+          session.name || payload.name || `Guest_${socket.id.substring(0, 4)}`;
 
         // Prefer a stable identity that survives reloads/reconnects (socket.id is re-generated
         // every connection) - the verified email when authenticated, else the persisted
@@ -443,24 +674,27 @@ async function startServer() {
           currentZoneId: initialZone,
           lastSeen: Date.now(),
           presenceStatus,
+          spaceId: space.id,
         };
 
         users.set(socket.id, newUser);
+        socket.join(room(space.id));
 
         // Send initial map & user state to connected user
+        const inSpace = usersIn(space.id);
         const visibleUsers = newUser.isAdmin
-          ? Array.from(users.values())
-          : Array.from(users.values()).filter((u) => !u.isDummy);
+          ? inSpace
+          : inSpace.filter((u) => !u.isDummy);
         socket.emit("init:state", {
           currentUser: newUser,
           currentMap: map,
           users: visibleUsers,
+          space: { id: space.id, name: space.name },
         });
 
-        // Notify others
-        socket.broadcast.emit("user:joined", newUser);
-
-        updateSpatialProximity();
+        // Notify others in the same space
+        socket.to(room(space.id)).emit("user:joined", newUser);
+        updateSpatialProximity(space.id);
       },
     );
 
@@ -476,7 +710,7 @@ async function startServer() {
         const user = users.get(socket.id);
         if (!user) return;
 
-        const map = maps.get(currentMapId);
+        const map = spaceMapOf(socket.id);
         if (!map) return;
 
         const validDirections = ["up", "down", "left", "right"];
@@ -495,7 +729,7 @@ async function startServer() {
           if (user.direction === data.direction) return;
           user.direction = data.direction;
           user.lastSeen = Date.now();
-          io.emit("user:moved", {
+          toSpace(socket.id).emit("user:moved", {
             userId: socket.id,
             position: user.position,
             direction: user.direction,
@@ -541,7 +775,10 @@ async function startServer() {
         // the mover is holding Ghost mode (client sends `ghost: true` while "g" is held).
         // Authoritative here (not just client-side) so simultaneous moves from two clients
         // can't both land on the same tile via a race.
-        if (!data.ghost && isOccupiedByOtherUser(data.x, data.y, socket.id)) {
+        if (
+          !data.ghost &&
+          isOccupiedByOtherUser(user.spaceId, data.x, data.y, socket.id)
+        ) {
           return turnInPlace(); // blocked
         }
 
@@ -552,14 +789,14 @@ async function startServer() {
         user.lastSeen = Date.now();
 
         // Broadcast move to all users
-        io.emit("user:moved", {
+        toSpace(socket.id).emit("user:moved", {
           userId: socket.id,
           position: user.position,
           direction: user.direction,
           currentZoneId: user.currentZoneId,
         });
 
-        updateSpatialProximity();
+        updateSpatialProximity(spaceIdOf(socket.id));
       },
     );
 
@@ -586,11 +823,13 @@ async function startServer() {
         user.presenceStatus = updates.presenceStatus;
       }
 
-      io.emit("user:updated", user);
+      toSpace(socket.id).emit("user:updated", user);
     });
 
     // Handle WebRTC Signaling
     socket.on("webrtc:signal", (data: { to: string; signal: any }) => {
+      const sid = spaceIdOf(socket.id);
+      if (!sid || spaceIdOf(data?.to) !== sid) return;
       io.to(data.to).emit("webrtc:signal", {
         from: socket.id,
         signal: data.signal,
@@ -615,7 +854,7 @@ async function startServer() {
       if (payload.isSpatial) {
         // Send to users within 8 tiles
         const PROXIMITY_CHAT_RADIUS = 8;
-        users.forEach((otherUser) => {
+        usersIn(user.spaceId).forEach((otherUser) => {
           const dist = Math.hypot(
             user.position.x - otherUser.position.x,
             user.position.y - otherUser.position.y,
@@ -629,7 +868,7 @@ async function startServer() {
         });
       } else {
         // Broadcast global room message
-        io.emit("chat:message", chatMsg);
+        toSpace(socket.id).emit("chat:message", chatMsg);
       }
     });
 
@@ -651,7 +890,11 @@ async function startServer() {
         const sender = users.get(socket.id);
         const target = users.get(payload?.to);
         if (!sender) return reply(false, "not_joined");
-        if (!target || target.socketId === sender.socketId)
+        if (
+          !target ||
+          target.socketId === sender.socketId ||
+          target.spaceId !== sender.spaceId
+        )
           return reply(false, "gone");
         // Dummies are invisible and cannot be interacted with by normal users
         if (target.isDummy && !sender.isAdmin) return reply(false, "gone");
@@ -677,7 +920,7 @@ async function startServer() {
     socket.on(
       "object:whiteboard_stroke",
       (payload: { objectId: string; stroke: WhiteboardStroke }) => {
-        const map = maps.get(currentMapId);
+        const map = spaceMapOf(socket.id);
         if (!map) return;
 
         const obj = map.objects.find((o) => o.id === payload.objectId);
@@ -686,30 +929,30 @@ async function startServer() {
           if (!obj.data.whiteboardStrokes) obj.data.whiteboardStrokes = [];
           obj.data.whiteboardStrokes.push(payload.stroke);
 
-          io.emit("object:whiteboard_updated", {
+          toSpace(socket.id).emit("object:whiteboard_updated", {
             objectId: payload.objectId,
             strokes: obj.data.whiteboardStrokes,
           });
 
-          persistCurrentMap();
+          persistMap(map);
         }
       },
     );
 
     // Clear Whiteboard
     socket.on("object:whiteboard_clear", (payload: { objectId: string }) => {
-      const map = maps.get(currentMapId);
+      const map = spaceMapOf(socket.id);
       if (!map) return;
 
       const obj = map.objects.find((o) => o.id === payload.objectId);
       if (obj && obj.type === "whiteboard") {
         if (obj.data) obj.data.whiteboardStrokes = [];
-        io.emit("object:whiteboard_updated", {
+        toSpace(socket.id).emit("object:whiteboard_updated", {
           objectId: payload.objectId,
           strokes: [],
         });
 
-        persistCurrentMap();
+        persistMap(map);
       }
     });
 
@@ -717,7 +960,7 @@ async function startServer() {
     socket.on(
       "object:add_note",
       (payload: { objectId: string; note: StickyNote }) => {
-        const map = maps.get(currentMapId);
+        const map = spaceMapOf(socket.id);
         if (!map) return;
 
         const author = users.get(socket.id);
@@ -750,12 +993,12 @@ async function startServer() {
           if (!obj.data.notes) obj.data.notes = [];
           obj.data.notes.push(note);
 
-          io.emit("object:notes_updated", {
+          toSpace(socket.id).emit("object:notes_updated", {
             objectId: payload.objectId,
             notes: obj.data.notes,
           });
 
-          persistCurrentMap();
+          persistMap(map);
           return;
         }
 
@@ -769,11 +1012,11 @@ async function startServer() {
             stickyNotes: [note, ...(state.stickyNotes || [])],
           };
 
-          io.emit("map:object_updated", {
+          toSpace(socket.id).emit("map:object_updated", {
             objectId: payload.objectId,
             object: obj,
           });
-          persistCurrentMap();
+          persistMap(map);
         }
       },
     );
@@ -782,7 +1025,7 @@ async function startServer() {
     socket.on(
       "object:game_move",
       (payload: { objectId: string; index: number; symbol: "X" | "O" }) => {
-        const map = maps.get(currentMapId);
+        const map = spaceMapOf(socket.id);
         if (!map) return;
 
         const obj = map.objects.find((o) => o.id === payload.objectId);
@@ -804,12 +1047,12 @@ async function startServer() {
         state.turn = payload.symbol === "X" ? "O" : "X";
         state.winner = findWinner(state.board, specFor(state.game));
 
-        io.emit("object:game_updated", {
+        toSpace(socket.id).emit("object:game_updated", {
           objectId: payload.objectId,
           gameState: state,
         });
 
-        persistCurrentMap();
+        persistMap(map);
       },
     );
 
@@ -817,7 +1060,7 @@ async function startServer() {
     socket.on(
       "object:game_reset",
       (payload: { objectId: string; game?: GameTableGame }) => {
-        const map = maps.get(currentMapId);
+        const map = spaceMapOf(socket.id);
         if (!map) return;
 
         const obj = map.objects.find((o) => o.id === payload.objectId);
@@ -830,12 +1073,12 @@ async function startServer() {
             : current.game;
         obj.data.gameState = createGameState(nextGame);
 
-        io.emit("object:game_updated", {
+        toSpace(socket.id).emit("object:game_updated", {
           objectId: payload.objectId,
           gameState: obj.data.gameState,
         });
 
-        persistCurrentMap();
+        persistMap(map);
       },
     );
 
@@ -864,7 +1107,7 @@ async function startServer() {
           if (typeof ack === "function") ack({ ok, reason });
         };
 
-        const map = maps.get(currentMapId);
+        const map = spaceMapOf(socket.id);
         if (!map) return reply(false, "no_map");
 
         const user = users.get(socket.id);
@@ -881,11 +1124,11 @@ async function startServer() {
           if (!canDeleteNote(user, note)) return reply(false, "not_allowed");
 
           obj.data!.notes = notes.filter((n) => n.id !== payload.noteId);
-          io.emit("object:notes_updated", {
+          toSpace(socket.id).emit("object:notes_updated", {
             objectId: payload.objectId,
             notes: obj.data!.notes,
           });
-          persistCurrentMap();
+          persistMap(map);
           return reply(true);
         }
 
@@ -898,11 +1141,11 @@ async function startServer() {
             return reply(false, "not_allowed");
 
           deskState.stickyNotes = notes.filter((n) => n.id !== payload.noteId);
-          io.emit("map:object_updated", {
+          toSpace(socket.id).emit("map:object_updated", {
             objectId: payload.objectId,
             object: obj,
           });
-          persistCurrentMap();
+          persistMap(map);
           return reply(true);
         }
 
@@ -922,7 +1165,7 @@ async function startServer() {
      * object:delete_note, which do their own authorisation.
      */
     function findDesk(objectId: string): MapObject | null {
-      const map = maps.get(currentMapId);
+      const map = spaceMapOf(socket.id);
       if (!map) return null;
       const obj = map.objects.find((o) => o.id === objectId);
       return obj && (obj.type === "desk" || obj.type === "computer")
@@ -931,8 +1174,8 @@ async function startServer() {
     }
 
     function broadcastDesk(desk: MapObject) {
-      io.emit("map:object_updated", { objectId: desk.id, object: desk });
-      persistCurrentMap();
+      toSpace(socket.id).emit("map:object_updated", { objectId: desk.id, object: desk });
+      persistMap(map);
     }
 
     socket.on("object:desk_claim", (payload: { objectId: string }) => {
@@ -1007,7 +1250,7 @@ async function startServer() {
     socket.on("map:add_zone", (zone: PrivateZone) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
-      const map = maps.get(currentMapId);
+      const map = spaceMapOf(socket.id);
       if (!map) return;
 
       const existingIndex = map.privateZones.findIndex((z) => z.id === zone.id);
@@ -1018,52 +1261,52 @@ async function startServer() {
       }
 
       // Recalculate zone for all users
-      users.forEach((u) => {
+      usersIn(sender.spaceId).forEach((u) => {
         u.currentZoneId = getPrivateZoneId(map, u.position.x, u.position.y);
       });
 
-      io.emit("map:zones_updated", {
+      broadcastUsersWithFilter(sender.spaceId, "map:zones_updated", (userList) => ({
         privateZones: map.privateZones,
-        users: Array.from(users.values()),
-      });
+        users: userList,
+      }));
 
-      updateSpatialProximity();
-      persistCurrentMap();
+      updateSpatialProximity(spaceIdOf(socket.id));
+      persistMap(map);
     });
 
     // Map Builder - Remove Private Zone
     socket.on("map:remove_zone", (zoneId: string) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
-      const map = maps.get(currentMapId);
+      const map = spaceMapOf(socket.id);
       if (!map) return;
 
       map.privateZones = map.privateZones.filter((z) => z.id !== zoneId);
 
       // Recalculate zone for all users
-      users.forEach((u) => {
+      usersIn(sender.spaceId).forEach((u) => {
         u.currentZoneId = getPrivateZoneId(map, u.position.x, u.position.y);
       });
 
-      broadcastUsersWithFilter("map:zones_updated", (userList) => ({
+      broadcastUsersWithFilter(spaceIdOf(socket.id), "map:zones_updated", (userList) => ({
         privateZones: map.privateZones,
         users: userList,
       }));
 
-      updateSpatialProximity();
-      persistCurrentMap();
+      updateSpatialProximity(spaceIdOf(socket.id));
+      persistMap(map);
     });
 
     // Map Builder - Add or Place Object
     socket.on("map:place_object", (newObj: MapObject) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
-      const map = maps.get(currentMapId);
+      const map = spaceMapOf(socket.id);
       if (!map) return;
 
       map.objects.push(newObj);
-      io.emit("map:object_placed", newObj);
-      persistCurrentMap();
+      toSpace(socket.id).emit("map:object_placed", newObj);
+      persistMap(map);
     });
 
     // Map Builder - Move Object
@@ -1072,18 +1315,18 @@ async function startServer() {
       (payload: { objectId: string; x: number; y: number }) => {
         const sender = users.get(socket.id);
         if (!sender?.isAdmin) return;
-        const map = maps.get(currentMapId);
+        const map = spaceMapOf(socket.id);
         if (!map) return;
 
         const obj = map.objects.find((o) => o.id === payload.objectId);
         if (obj) {
           obj.x = payload.x;
           obj.y = payload.y;
-          io.emit("map:object_updated", {
+          toSpace(socket.id).emit("map:object_updated", {
             objectId: payload.objectId,
             object: obj,
           });
-          persistCurrentMap();
+          persistMap(map);
         }
       },
     );
@@ -1092,12 +1335,12 @@ async function startServer() {
     socket.on("map:remove_object", (objectId: string) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
-      const map = maps.get(currentMapId);
+      const map = spaceMapOf(socket.id);
       if (!map) return;
 
       map.objects = map.objects.filter((o) => o.id !== objectId);
-      io.emit("map:object_removed", objectId);
-      persistCurrentMap();
+      toSpace(socket.id).emit("map:object_removed", objectId);
+      persistMap(map);
     });
 
     // Map Builder - Change Tile
@@ -1106,7 +1349,7 @@ async function startServer() {
       (payload: { x: number; y: number; tileType: any }) => {
         const sender = users.get(socket.id);
         if (!sender?.isAdmin) return;
-        const map = maps.get(currentMapId);
+        const map = spaceMapOf(socket.id);
         if (!map) return;
 
         if (
@@ -1116,8 +1359,8 @@ async function startServer() {
           payload.x < map.width
         ) {
           map.tiles[payload.y][payload.x] = payload.tileType;
-          io.emit("map:tile_changed", payload);
-          persistCurrentMap();
+          toSpace(socket.id).emit("map:tile_changed", payload);
+          persistMap(map);
         }
       },
     );
@@ -1126,13 +1369,21 @@ async function startServer() {
     socket.on("map:switch_preset", (mapId: string) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
-      if (maps.has(mapId)) {
-        currentMapId = mapId;
-        const newMap = maps.get(mapId)!;
-        db.saveActiveMapId(currentMapId);
+      const space = sender.spaceId ? spaces.get(sender.spaceId) : undefined;
+      // Only maps that belong to the admin's own space can be switched to. The client asks for
+      // a preset by its base id ("beach_retreat"); a space created after spaces existed owns
+      // namespaced copies of it ("<spaceId>:beach_retreat").
+      const targetId =
+        space && maps.get(mapId)?.spaceId === space.id
+          ? mapId
+          : space && `${space.id}:${mapId}`;
+      if (space && targetId && maps.get(targetId)?.spaceId === space.id) {
+        space.activeMapId = targetId;
+        const newMap = maps.get(targetId)!;
+        db.saveSpace(space);
 
-        // Teleport all current users to spawn
-        users.forEach((u) => {
+        // Teleport everyone in this space to spawn
+        usersIn(space.id).forEach((u) => {
           u.position = { ...newMap.spawnPoint };
           u.currentZoneId = getPrivateZoneId(
             newMap,
@@ -1141,21 +1392,24 @@ async function startServer() {
           );
         });
 
-        broadcastUsersWithFilter("map:switched", (userList) => ({
+        broadcastUsersWithFilter(spaceIdOf(socket.id), "map:switched", (userList) => ({
           currentMap: newMap,
           users: userList,
         }));
 
-        updateSpatialProximity();
+        updateSpatialProximity(spaceIdOf(socket.id));
       }
     });
 
     // Handle Disconnect
     socket.on("disconnect", () => {
       console.log(`User disconnected: ${socket.id}`);
+      const leftSpaceId = spaceIdOf(socket.id);
       users.delete(socket.id);
-      io.emit("user:left", socket.id);
-      updateSpatialProximity();
+      if (leftSpaceId) {
+        io.to(room(leftSpaceId)).emit("user:left", socket.id);
+        updateSpatialProximity(leftSpaceId);
+      }
 
       // Drop any chime cooldown entries involving this socket so the map doesn't grow forever.
       for (const key of lastChimeAt.keys()) {
@@ -1185,7 +1439,7 @@ async function startServer() {
         const sender = users.get(socket.id);
         if (!sender?.isAdmin) return;
 
-        const map = maps.get(currentMapId);
+        const map = spaceMapOf(socket.id);
         if (!map) return;
 
         const dummyId = `dummy_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
@@ -1220,9 +1474,10 @@ async function startServer() {
           presenceStatus: payload.presenceStatus || "available",
         };
 
+        dummyUser.spaceId = sender.spaceId;
         users.set(dummyId, dummyUser);
-        emitToAdmins("user:joined", dummyUser);
-        updateSpatialProximity();
+        emitToAdmins(spaceIdOf(socket.id), "user:joined", dummyUser);
+        updateSpatialProximity(spaceIdOf(socket.id));
       },
     );
 
@@ -1239,22 +1494,22 @@ async function startServer() {
         if (!sender?.isAdmin) return;
 
         const dummy = users.get(payload?.dummyId);
-        if (!dummy || !dummy.isDummy) return;
+        if (!dummy || !dummy.isDummy || dummy.spaceId !== sender.spaceId) return;
 
-        const map = maps.get(currentMapId);
+        const map = spaceMapOf(socket.id);
         if (!map) return;
 
         dummy.position = { x: payload.x, y: payload.y };
         if (payload.direction) dummy.direction = payload.direction;
         dummy.currentZoneId = getPrivateZoneId(map, payload.x, payload.y);
 
-        emitToAdmins("user:moved", {
+        emitToAdmins(spaceIdOf(socket.id), "user:moved", {
           userId: dummy.socketId,
           position: dummy.position,
           direction: dummy.direction,
           currentZoneId: dummy.currentZoneId,
         });
-        updateSpatialProximity();
+        updateSpatialProximity(spaceIdOf(socket.id));
       },
     );
 
@@ -1266,7 +1521,7 @@ async function startServer() {
         if (!sender?.isAdmin) return;
 
         const dummy = users.get(payload?.dummyId);
-        if (!dummy || !dummy.isDummy) return;
+        if (!dummy || !dummy.isDummy || dummy.spaceId !== sender.spaceId) return;
 
         const { updates } = payload;
         if (!updates) return;
@@ -1296,7 +1551,7 @@ async function startServer() {
           dummy.direction = updates.direction;
         }
 
-        emitToAdmins("user:updated", dummy);
+        emitToAdmins(spaceIdOf(socket.id), "user:updated", dummy);
       },
     );
 
@@ -1306,11 +1561,11 @@ async function startServer() {
       if (!sender?.isAdmin) return;
 
       const dummy = users.get(payload?.dummyId);
-      if (!dummy || !dummy.isDummy) return;
+      if (!dummy || !dummy.isDummy || dummy.spaceId !== sender.spaceId) return;
 
       users.delete(payload.dummyId);
-      emitToAdmins("user:left", payload.dummyId);
-      updateSpatialProximity();
+      emitToAdmins(spaceIdOf(socket.id), "user:left", payload.dummyId);
+      updateSpatialProximity(spaceIdOf(socket.id));
     });
 
     // Admin triggers dummy to say something in chat (only visible to admins!)
@@ -1321,7 +1576,7 @@ async function startServer() {
         if (!sender?.isAdmin) return;
 
         const dummy = users.get(payload?.dummyId);
-        if (!dummy || !dummy.isDummy) return;
+        if (!dummy || !dummy.isDummy || dummy.spaceId !== sender.spaceId) return;
         if (!payload.text?.trim()) return;
 
         const chatMsg: ChatMessage = {
@@ -1336,20 +1591,20 @@ async function startServer() {
 
         if (payload.isSpatial) {
           const PROXIMITY_CHAT_RADIUS = 8;
-          for (const [sId, otherUser] of users.entries()) {
+          for (const otherUser of usersIn(dummy.spaceId)) {
             if (!otherUser.isAdmin || otherUser.isDummy) continue;
             const dist = Math.hypot(
               dummy.position.x - otherUser.position.x,
               dummy.position.y - otherUser.position.y,
             );
             if (dist <= PROXIMITY_CHAT_RADIUS) {
-              io.to(sId).emit("chat:message", chatMsg);
+              io.to(otherUser.socketId).emit("chat:message", chatMsg);
             }
           }
         } else {
-          for (const [sId, otherUser] of users.entries()) {
+          for (const otherUser of usersIn(dummy.spaceId)) {
             if (otherUser.isAdmin && !otherUser.isDummy) {
-              io.to(sId).emit("chat:message", chatMsg);
+              io.to(otherUser.socketId).emit("chat:message", chatMsg);
             }
           }
         }
@@ -1366,7 +1621,10 @@ async function startServer() {
     return c.json({
       status: "ok",
       sqlite: db.getDbInfo(),
-      activeMapId: currentMapId,
+      spaces: [...spaces.values()].map((sp) => ({
+        id: sp.id,
+        activeMapId: sp.activeMapId,
+      })),
     });
   });
 

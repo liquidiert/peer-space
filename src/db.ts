@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import type { GridMap } from './types';
+import type { GridMap, Space } from './types';
 
 // Defaults to ./data so it lands on the mounted volume (see docker-compose.yml) instead of
 // the container's ephemeral filesystem - without a persisted path here, every redeploy
@@ -17,6 +17,10 @@ export interface SQLiteDriver {
   loadMaps(): GridMap[];
   saveActiveMapId(mapId: string): void;
   loadActiveMapId(): string | null;
+  saveSpace(space: Space): void;
+  loadSpaces(): Space[];
+  deleteSpace(spaceId: string): void;
+  deleteMap(mapId: string): void;
   getDbInfo(): { driver: string; path: string; totalMaps: number; fileSize: number };
 }
 
@@ -42,7 +46,38 @@ export async function initWorkspaceDatabase(): Promise<SQLiteDriver> {
         )
       `);
 
+      db.run(`
+        CREATE TABLE IF NOT EXISTS workspace_spaces (
+          id TEXT PRIMARY KEY,
+          data TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        )
+      `);
+
       return {
+        saveSpace(space: Space) {
+          db.prepare(`
+            INSERT INTO workspace_spaces (id, data, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+          `).run(space.id, JSON.stringify(space), Date.now());
+        },
+        loadSpaces(): Space[] {
+          const rows: any[] = db.prepare('SELECT data FROM workspace_spaces ORDER BY updated_at ASC').all();
+          const spaces: Space[] = [];
+          for (const row of rows) {
+            try {
+              spaces.push(JSON.parse(row.data));
+            } catch (e) {}
+          }
+          return spaces;
+        },
+        deleteSpace(spaceId: string) {
+          db.prepare('DELETE FROM workspace_spaces WHERE id = ?').run(spaceId);
+        },
+        deleteMap(mapId: string) {
+          db.prepare('DELETE FROM workspace_maps WHERE id = ?').run(mapId);
+        },
         saveMap(map: GridMap) {
           const stmt = db.prepare(`
             INSERT INTO workspace_maps (id, name, data, updated_at)
@@ -117,6 +152,14 @@ export async function initWorkspaceDatabase(): Promise<SQLiteDriver> {
       )
     `);
 
+    db.run(`
+      CREATE TABLE IF NOT EXISTS workspace_spaces (
+        id TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+
     const persistToDisk = () => {
       try {
         const data = db.export();
@@ -132,6 +175,32 @@ export async function initWorkspaceDatabase(): Promise<SQLiteDriver> {
     }
 
     return {
+      saveSpace(space: Space) {
+        db.run(
+          `INSERT OR REPLACE INTO workspace_spaces (id, data, updated_at) VALUES (?, ?, ?)`,
+          [space.id, JSON.stringify(space), Date.now()]
+        );
+        persistToDisk();
+      },
+      loadSpaces(): Space[] {
+        const res = db.exec('SELECT data FROM workspace_spaces ORDER BY updated_at ASC');
+        if (res.length === 0 || !res[0].values) return [];
+        const spaces: Space[] = [];
+        for (const row of res[0].values) {
+          try {
+            spaces.push(JSON.parse(row[0] as string));
+          } catch (e) {}
+        }
+        return spaces;
+      },
+      deleteSpace(spaceId: string) {
+        db.run('DELETE FROM workspace_spaces WHERE id = ?', [spaceId]);
+        persistToDisk();
+      },
+      deleteMap(mapId: string) {
+        db.run('DELETE FROM workspace_maps WHERE id = ?', [mapId]);
+        persistToDisk();
+      },
       saveMap(map: GridMap) {
         db.run(
           `INSERT OR REPLACE INTO workspace_maps (id, name, data, updated_at) VALUES (?, ?, ?, ?)`,

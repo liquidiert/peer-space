@@ -39,6 +39,8 @@ export interface User {
   lastSeen: number;
   presenceStatus: PresenceStatus;
   isDummy?: boolean;
+  /** Which space this user is in. Set by the server; everything is scoped to it. */
+  spaceId?: string;
 }
 
 export type TileType = 
@@ -134,6 +136,8 @@ export interface PrivateZone {
 
 export interface GridMap {
   id: string;
+  /** Owning space. Absent on maps saved before spaces existed (migrated on load). */
+  spaceId?: string;
   name: string;
   width: number;
   height: number;
@@ -157,4 +161,27 @@ export interface WebRTCSignalData {
   from: string;
   to: string;
   signal: any;
+}
+
+/**
+ * A self-contained world: its own maps, its own active map, its own set of people present.
+ * Membership is by verified email; admins can enter every space regardless.
+ */
+export interface Space {
+  id: string;
+  name: string;
+  activeMapId: string;
+  /** Lower-cased emails allowed to enter. */
+  memberEmails: string[];
+  /** Any signed-in user may enter (used for the space migrated from a pre-spaces install). */
+  openToAll: boolean;
+}
+
+/** What the space picker needs. `memberEmails`/`openToAll` are only sent to admins. */
+export interface SpaceSummary {
+  id: string;
+  name: string;
+  onlineCount: number;
+  memberEmails?: string[];
+  openToAll?: boolean;
 }
