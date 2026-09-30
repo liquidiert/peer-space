@@ -1,8 +1,8 @@
 services:
   peerspace:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Built and pushed by .github/workflows/docker-publish.yml on every push to main.
+    image: ${PEERSPACE_IMAGE:-ghcr.io/liquidiert/peer-space:latest}
+    pull_policy: always
     restart: unless-stopped
     environment:
       - NODE_ENV=production
