@@ -1175,7 +1175,7 @@ async function startServer() {
 
     function broadcastDesk(desk: MapObject) {
       toSpace(socket.id).emit("map:object_updated", { objectId: desk.id, object: desk });
-      persistMap(map);
+      persistMap(spaceMapOf(socket.id));
     }
 
     socket.on("object:desk_claim", (payload: { objectId: string }) => {
