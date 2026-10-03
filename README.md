@@ -39,7 +39,7 @@ cp .env.example .env
 echo "SESSION_SECRET=$(openssl rand -hex 32)" >> .env
 
 # 2. Build and start everything
-docker compose up -d --build
+docker compose up -d
 
 # 3. Check the status (Keycloak takes around a minute to become healthy)
 docker compose ps
@@ -63,7 +63,7 @@ The realm starts with no users. To create one:
 > `docker-compose.override.yml` publishes ports 3000 and 8080 on the host. `docker compose` loads it automatically for local use. Platforms such as Coolify ignore it and route traffic through their own proxy.
 
 > [!TIP]
-> Keycloak's memory is capped at 1 GB and Postgres's at 256 MB. If you have more RAM available, raise the caps with `KEYCLOAK_MEM_LIMIT` / `KEYCLOAK_DB_MEM_LIMIT`.
+> Keycloak is tuned for a small box: local cache, a small DB pool and a 256 MB JVM heap, capped at 512 MB (about 370 MB used idle, versus about 540 MB with Keycloak's defaults). It runs from a pre-built image (`keycloak/Dockerfile`, published to GHCR by CI) that starts in about 5 seconds instead of 13. Postgres is capped at 128 MB. With many users or sessions, raise `KEYCLOAK_MEM_LIMIT` together with the heap in `KEYCLOAK_JAVA_HEAP` (its `-Xmx`).
 
 ---
 
@@ -111,7 +111,9 @@ All variables are documented in [`.env.example`](.env.example). The most importa
 | `PEERSPACE_URL` | Public URL of PeerSpace (the client's redirect URI) | `http://localhost:3000` |
 | `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` | Initial admin console account | `admin` / `admin` |
 | `KEYCLOAK_DB_PASSWORD` | Postgres password | `keycloak` |
-| `KEYCLOAK_MEM_LIMIT` / `KEYCLOAK_DB_MEM_LIMIT` | Container memory caps | `1g` / `256m` |
+| `KEYCLOAK_MEM_LIMIT` / `KEYCLOAK_DB_MEM_LIMIT` | Container memory caps | `512m` / `128m` |
+| `KEYCLOAK_JAVA_HEAP` | JVM heap and metaspace options for Keycloak | `-Xms64m -Xmx256m -XX:MaxMetaspaceSize=192m ...` |
+| `KEYCLOAK_DB_POOL_MAX_SIZE` | Max database connections Keycloak opens | `10` |
 
 > [!IMPORTANT]
 > Keycloak reads `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_CLIENT_SECRET` and `PEERSPACE_URL` only on the **first** realm import. Once the realm exists, the database holds these settings. Change them in the Keycloak admin console, or run `docker compose down -v` to wipe the database and re-import (this deletes all users).

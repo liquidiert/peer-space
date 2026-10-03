@@ -11,6 +11,17 @@ permissions:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: app
+            context: .
+            file: Dockerfile
+            image: ghcr.io/${{ github.repository }}
+          - name: keycloak
+            context: keycloak
+            file: keycloak/Dockerfile
+            image: ghcr.io/${{ github.repository }}-keycloak
     steps:
       - uses: actions/checkout@v4
 
@@ -25,17 +36,17 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ matrix.image }}
           tags: |
             type=raw,value=latest
             type=sha
 
       - uses: docker/build-push-action@v6
         with:
-          context: .
-          file: Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
