@@ -30,7 +30,7 @@ services:
 
   keycloak:
     # Optimized image built from keycloak/Dockerfile by .github/workflows/docker-publish.yml.
-    # It has the build-time options (postgres, local cache, health) and the realm import baked
+    # It has the build-time options (postgres, health) and the realm import baked
     # in. Changing those means editing keycloak/Dockerfile, not just the env below.
     image: ${KEYCLOAK_IMAGE:-ghcr.io/liquidiert/peer-space-keycloak:latest}
     pull_policy: always
@@ -58,7 +58,10 @@ services:
       # TLS is expected to be terminated by a reverse proxy in front of Keycloak.
       - KC_HTTP_ENABLED=true
       - KC_PROXY_HEADERS=xforwarded
-      # --- Memory tuning (KC_DB, KC_CACHE=local and KC_HEALTH_ENABLED are baked into the image)
+      # --- Memory tuning (KC_DB and KC_HEALTH_ENABLED are baked into the image)
+      # Single node: no Infinispan cluster / JGroups. This is a runtime option since Keycloak
+      # 26.x, so it must be set here; setting it at build time is silently ignored.
+      - KC_CACHE=local
       # Default pool is up to 100 DB connections, each with buffers on both sides.
       - KC_DB_POOL_INITIAL_SIZE=2
       - KC_DB_POOL_MIN_SIZE=2

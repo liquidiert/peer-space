@@ -3,16 +3,17 @@
 # `start --optimized` instead of re-augmenting Keycloak on every boot (less memory, faster start).
 # These must match the runtime config: changing any of them means rebuilding the image.
 #
-# Use :latest tag to dangerously auto update with new peer-space features.
-FROM quay.io/keycloak/keycloak:latest AS builder
+# Pinned: minor releases move options between build time and runtime (e.g. --cache in 26.x),
+# which silently drops baked settings. Check `kc.sh show-config` before bumping.
+ARG KEYCLOAK_VERSION=26.8
+FROM quay.io/keycloak/keycloak:${KEYCLOAK_VERSION} AS builder
 
 ENV KC_DB=postgres \
-    KC_CACHE=local \
     KC_HEALTH_ENABLED=true
 
 RUN /opt/keycloak/bin/kc.sh build
 
-FROM quay.io/keycloak/keycloak:latest
+FROM quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}
 
 COPY --from=builder /opt/keycloak/ /opt/keycloak/
 # Imported on first start only (`--import-realm`); ${...} placeholders are filled from the
