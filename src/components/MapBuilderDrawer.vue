@@ -370,7 +370,7 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
       <div class="flex flex-col gap-3">
         <div class="p-2.5 bg-indigo-50 border-2 border-slate-900 rounded-xl text-xs text-indigo-950 font-semibold leading-relaxed">
           <p class="font-extrabold flex items-center gap-1 text-indigo-900 font-heading mb-1">
-            <Lock class="w-3.5 h-3.5 text-indigo-600" /> WebRTC Audio Isolation
+            <Lock class="w-3.5 h-3.5 text-indigo-600" /> Audio Isolation
           </p>
           Users inside a private zone hear only others in that same zone. Audio is 100% muted for users outside.
         </div>

@@ -24,6 +24,7 @@ import {
 import { createDefaultOfficeMap, createBeachRetreatMap } from "./src/mapsData";
 import { initWorkspaceDatabase } from "./src/db";
 import { createSessionToken, verifySessionToken } from "./src/lib/session";
+import { validAnnounce } from "./src/lib/media/wire";
 import { canDeleteNote } from "./src/lib/notePermissions";
 import {
   canClaimDesk,
@@ -210,7 +211,7 @@ async function startServer() {
 
   // In local dev, serve HTTPS if mkcert-generated certs are present (certs/dev-cert.pem, certs/dev-key.pem).
   // Mobile browsers only expose getUserMedia (mic/camera) on secure contexts, and a LAN IP over
-  // plain http:// doesn't qualify - so testing WebRTC features from a phone needs this.
+  // plain http:// doesn't qualify - so testing camera/mic features from a phone needs this.
   const devCertPath = path.resolve(__dirname, "certs/dev-cert.pem");
   const devKeyPath = path.resolve(__dirname, "certs/dev-key.pem");
   const useHttps =
@@ -826,14 +827,19 @@ async function startServer() {
       toSpace(socket.id).emit("user:updated", user);
     });
 
-    // Handle WebRTC Signaling
-    socket.on("webrtc:signal", (data: { to: string; signal: any }) => {
-      const sid = spaceIdOf(socket.id);
-      if (!sid || spaceIdOf(data?.to) !== sid) return;
-      io.to(data.to).emit("webrtc:signal", {
-        from: socket.id,
-        signal: data.signal,
-      });
+    // Proximity media runs peer to peer over iroh; the server only publishes each client's
+    // endpoint id so others can dial it. The announce is signed by that endpoint's key over
+    // this socket's id, which every receiving client verifies, so nobody can pass off someone
+    // else's endpoint as theirs. Here we only check its shape and keep ids unique.
+    socket.on("media:announce", (data: unknown) => {
+      const user = users.get(socket.id);
+      if (!user || !validAnnounce(data)) return;
+      const taken = [...users.values()].some(
+        (u) => u.socketId !== socket.id && u.media?.endpointId === data.endpointId,
+      );
+      if (taken) return;
+      user.media = { endpointId: data.endpointId, relay: data.relay, sig: data.sig };
+      toSpace(socket.id).emit("user:updated", user);
     });
 
     // Handle Spatial / Room Chat

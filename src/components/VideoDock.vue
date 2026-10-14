@@ -418,7 +418,7 @@ onMounted(() => {
       <div class="flex items-center gap-2 text-xs font-heading font-bold">
         <GripVertical class="w-3.5 h-3.5 text-slate-400" />
         <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
-        <span>WebRTC Video Feed ({{ activeVideoUsers.length }})</span>
+        <span>Video Feed ({{ activeVideoUsers.length }})</span>
       </div>
       <div class="flex items-center gap-1.5">
         <button

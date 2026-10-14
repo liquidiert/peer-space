@@ -6,6 +6,7 @@ PeerSpace is a real-time 2D spatial virtual office. Walk around as an avatar, me
 - [Quick start (Docker Compose)](#quick-start-docker-compose)
 - [Local development without Docker](#local-development-without-docker)
 - [Configuration](#configuration)
+- [Audio and video](#audio-and-video)
 - [Deployment](#deployment)
 - [Keycloak](#keycloak)
 
@@ -16,7 +17,8 @@ PeerSpace is a real-time 2D spatial virtual office. Walk around as an avatar, me
 | Layer | Technology |
 | :--- | :--- |
 | Frontend | Vue 3, Tailwind CSS, Lucide icons, HTML5 Canvas |
-| Backend | Hono (`@hono/node-server`), Socket.IO, WebRTC signalling |
+| Backend | Hono (`@hono/node-server`), Socket.IO (presence, chat, media endpoint discovery) |
+| Audio/video | [iroh](https://iroh.computer) in the browser via WebAssembly (`crates/peer-media`), WebCodecs (Opus, H.264/VP8) |
 | Persistence | SQLite (`workspace.sqlite` via `bun:sqlite` / `sql.js`) |
 | Auth | OpenID Connect via Keycloak |
 | Tooling | Vite, esbuild, TypeScript, Vitest (runs on Bun or Node.js 18+) |
@@ -101,7 +103,7 @@ All variables are documented in [`.env.example`](.env.example). The most importa
 | `KEYCLOAK_CLIENT_SECRET` | OIDC client secret. **Change this outside local dev.** | `peer-space-dev-secret` |
 | `PORT` | HTTP port inside the container | `3000` |
 | `DATA_DIR` | Where the SQLite database is stored | `/app/data` (volume `peerspace_data`) |
-| `VITE_ICE_SERVERS` / `VITE_TURN_*` | STUN/TURN servers for WebRTC. Baked in at build time. You need TURN if users sit behind restrictive NATs or firewalls. | Google STUN |
+| `VITE_IROH_RELAYS` | Comma-separated `https://` URLs of iroh relays for audio/video. Baked in at build time. See [Audio and video](#audio-and-video). | n0's public relays |
 
 ### Bundled Keycloak
 
@@ -117,6 +119,28 @@ All variables are documented in [`.env.example`](.env.example). The most importa
 
 > [!IMPORTANT]
 > Keycloak reads `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_CLIENT_SECRET` and `PEERSPACE_URL` only on the **first** realm import. Once the realm exists, the database holds these settings. Change them in the Keycloak admin console, or run `docker compose down -v` to wipe the database and re-import (this deletes all users).
+
+---
+
+## Audio and video
+
+Proximity audio, camera and screen share run peer to peer over [iroh](https://iroh.computer), compiled to WebAssembly from [`crates/peer-media`](crates/peer-media). WebRTC is not used.
+
+- Every browser starts an iroh endpoint and announces its endpoint id over Socket.IO (`media:announce`). The announce is signed with the endpoint's key over the socket id, and every client checks it, so nobody can claim someone else's endpoint. Peers then dial each other by id. There is no offer/answer or ICE exchange, and a reconnect is just another dial. The lower endpoint id dials.
+- Browsers can't open UDP sockets, so all media goes through an iroh relay. Without `VITE_IROH_RELAYS` the client uses n0's public relays, which are fine for trying things out. For real use, run your own [`iroh-relay`](https://github.com/n0-computer/iroh/tree/main/iroh-relay) and set `VITE_IROH_RELAYS=https://relay.example.com`.
+- **Audio**: 20 ms Opus frames (32 kb/s, DTX) sent as QUIC datagrams, so a lost packet never holds up the next one. Each peer has a small jitter buffer (60 to 240 ms). Voice only goes to people in earshot who aren't deafened, and a muted mic sends nothing. Browsers without a WebCodecs Opus encoder fall back to 16 kHz mu-law.
+- **Video**: the camera (640×480, 15 fps) and the screen (up to 1080p, 8 fps, tuned for text) are each encoded once and fanned out to all viewers, not once per viewer. The camera only goes to people in range. The screen goes to everyone in the space. Each track has its own ordered QUIC stream with a 3-frame queue. When a viewer's link can't keep up, that viewer's frames are dropped until the next keyframe instead of piling up delay. Other viewers aren't affected. Codec preference: H.264 baseline, then VP8, then VP9.
+- Audio and video need WebCodecs: current Chrome, Edge, Firefox and Safari.
+
+### Rebuilding the wasm module
+
+`src/wasm/` is generated, so don't edit it by hand. After changing `crates/peer-media`, rebuild it and commit the output:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.128   # must match Cargo.toml
+./scripts/build-wasm.sh                            # also needs clang; uses wasm-opt if installed
+```
 
 ---
 

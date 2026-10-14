@@ -41,7 +41,7 @@ import type {
     SpaceSummary,
 } from "./types";
 import { createDefaultOfficeMap } from "./mapsData";
-import { useWebRTCProximity } from "./composables/useWebRTCProximity";
+import { useProximityMedia } from "./composables/useProximityMedia";
 import { findPathAStar, occupiedKeySet } from "./lib/pathfinding";
 import type { GameTableGame } from "./lib/gameTable";
 
@@ -406,7 +406,6 @@ const {
     toggleCamera,
     switchCamera,
     toggleScreenShare,
-    handleSignal,
     syncPeerConnections,
     isVideoOn,
     isScreenSharing,
@@ -423,7 +422,7 @@ const {
     getUserVolume,
     proximityVolumeEnabled,
     setProximityVolumeEnabled,
-} = useWebRTCProximity(socket, currentUser, users, isMuted, isDeafened);
+} = useProximityMedia(socket, currentUser, users, isMuted, isDeafened);
 
 setProximityVolumeEnabled(loadProximityVolumePreference());
 
@@ -605,10 +604,6 @@ onMounted(() => {
     sk.on("user:left", (socketId: string) => {
         users.value = users.value.filter((u) => u.socketId !== socketId);
         syncPeerConnections();
-    });
-
-    sk.on("webrtc:signal", (data: { from: string; signal: any }) => {
-        handleSignal(data);
     });
 
     sk.on(
@@ -935,7 +930,7 @@ async function handleJoinSpace(spaceId: string) {
         presenceStatus: presenceStatus.value,
     });
 
-    // Initialize WebRTC audio stream & voice activity detection
+    // Initialize proximity audio stream & voice activity detection
     await initLocalAudio();
 }
 
@@ -1070,7 +1065,7 @@ function handleChimeUser(data: { socketId: string }) {
 }
 
 // A short two-tone chime via Web Audio - no audio asset needed, and it still fires even
-// if the WebRTC mic/audio stack never initialized (e.g. mic permission was denied).
+// if the mic/audio stack never initialized (e.g. mic permission was denied).
 function playChimeSound() {
     try {
         const AudioCtx =
@@ -2038,7 +2033,7 @@ function handleRemoveDummy(dummyId: string) {
                 @setPresenceStatus="(s: PresenceStatus) => (presenceStatus = s)"
             />
 
-            <!-- Floating WebRTC Video Dock -->
+            <!-- Floating Video Dock -->
             <VideoDock
                 :currentUser="currentUser"
                 :users="users"
