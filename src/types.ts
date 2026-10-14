@@ -1,3 +1,5 @@
+import type { MediaAnnounce } from './lib/media/wire';
+
 export type Direction = 'up' | 'down' | 'left' | 'right';
 
 export type PresenceStatus = 'available' | 'busy' | 'dnd';
@@ -41,6 +43,8 @@ export interface User {
   isDummy?: boolean;
   /** Which space this user is in. Set by the server; everything is scoped to it. */
   spaceId?: string;
+  /** This client's iroh media endpoint, once announced (see useProximityMedia). */
+  media?: MediaAnnounce;
 }
 
 export type TileType = 

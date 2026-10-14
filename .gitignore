@@ -8,3 +8,4 @@ coverage/
 !.env.example
 certs/
 *.sqlite
+crates/peer-media/target/
