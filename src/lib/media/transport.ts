@@ -4,6 +4,8 @@
  * in-memory transport.
  */
 
+import type { MediaConn } from '../../wasm/peer_media.js';
+
 /** Incoming traffic on one peer link. */
 export type LinkEvent =
   | { type: 'datagram'; data: Uint8Array }
@@ -124,7 +126,7 @@ export const createIrohTransport: TransportFactory = async (hooks) => {
     node.relayUrl() ??
     undefined;
 
-  const wrap = (conn: InstanceType<typeof wasm.MediaConn>): PeerLink => ({
+  const wrap = (conn: MediaConn): PeerLink => ({
     remoteId: conn.remoteId(),
     start: (onEvent) => conn.start(onEvent as (ev: unknown) => void),
     sendDatagram: (data) => conn.sendDatagram(data),

@@ -10,10 +10,10 @@ import AvatarBuilder from "./components/AvatarBuilder.vue";
 import ObjectModals from "./components/ObjectModals.vue";
 import VideoDock from "./components/VideoDock.vue";
 import SpacePicker from "./components/SpacePicker.vue";
+import AdminsPanel from "./components/AdminsPanel.vue";
 import {
     Sparkles,
     Compass,
-    LogIn,
     CheckCircle2,
     LogOut,
     ShieldCheck,
@@ -210,18 +210,15 @@ watch(
     { deep: true },
 );
 
-// Handle Keycloak / Google Social Login Popup
-async function handleKeycloakLogin(idp = "google") {
+// Google sign-in popup. The server builds the consent URL; the /auth/callback popup posts the
+// result back to us (see the OAUTH_AUTH_SUCCESS handler below).
+async function handleGoogleLogin() {
     try {
-        const origin = window.location.origin;
-        const redirectUri = `${origin}/auth/callback`;
-        const res = await fetch(
-            `/api/auth/login-url?idp=${idp}&origin=${encodeURIComponent(origin)}&redirect_uri=${encodeURIComponent(redirectUri)}`,
-        );
-        const data = await res.json();
+        const res = await fetch("/api/auth/login-url");
+        const data = await res.json().catch(() => ({}));
 
-        if (!data.url) {
-            alert("Could not construct login URL.");
+        if (!res.ok || !data.url) {
+            alert(data.error || "Could not start Google sign-in.");
             return;
         }
 
@@ -232,16 +229,28 @@ async function handleKeycloakLogin(idp = "google") {
 
         const popup = window.open(
             data.url,
-            "keycloak_oauth_popup",
+            "google_oauth_popup",
             `width=${width},height=${height},left=${left},top=${top},status=no,resizable=yes`,
         );
 
         if (!popup) {
-            alert("Please allow popups to log in via Google / Keycloak.");
+            alert("Please allow popups to sign in with Google.");
         }
     } catch (err) {
-        console.error("Failed to launch Keycloak login:", err);
+        console.error("Failed to launch Google login:", err);
     }
+}
+
+/** Grants or revokes admin for another connected user. The server pushes the result via user:updated. */
+function handleToggleAdmin(payload: { socketId: string; makeAdmin: boolean }) {
+    if (!socket.value || !currentUser.value?.isAdmin) return;
+    socket.value.emit(
+        payload.makeAdmin ? "admin:grant" : "admin:revoke",
+        { socketId: payload.socketId },
+        (r: { ok: boolean; error?: string }) => {
+            if (!r?.ok) alert(r?.error || "Failed");
+        },
+    );
 }
 
 function handleLogout() {
@@ -548,6 +557,7 @@ function handleZoneDrawn(rect: {
     zoneDrawMode.value = false;
 }
 const showAvatarBuilderModal = ref(false);
+const showAdminsPanel = ref(false);
 
 onMounted(() => {
     try {
@@ -639,6 +649,17 @@ onMounted(() => {
     sk.on("user:updated", (user: User) => {
         if (user.socketId === currentUser.value.socketId) {
             currentUser.value = user;
+            // Admin status can change while connected. Assigning a new object lets the
+            // authenticatedUser watcher re-persist the stored login, same as the login handler.
+            if (
+                authenticatedUser.value &&
+                Boolean(authenticatedUser.value.isAdmin) !== Boolean(user.isAdmin)
+            ) {
+                authenticatedUser.value = {
+                    ...authenticatedUser.value,
+                    isAdmin: Boolean(user.isAdmin),
+                };
+            }
         }
         users.value = users.value.map((u) =>
             u.socketId === user.socketId ? user : u,
@@ -851,15 +872,8 @@ onMounted(() => {
     } catch (e) {}
 
     const handleOAuthMessage = (event: MessageEvent) => {
-        const origin = event.origin;
-        const isSameOrigin = origin === window.location.origin;
-        const isAllowedDomain =
-            origin.endsWith(".run.app") ||
-            origin.includes("localhost") ||
-            origin.includes("127.0.0.1") ||
-            origin.includes("personalclientcare.com");
-
-        if (!isSameOrigin && !isAllowedDomain) {
+        // The callback popup is served from this app, so anything from another origin is ignored.
+        if (event.origin !== window.location.origin) {
             return;
         }
 
@@ -1519,7 +1533,7 @@ function handleRemoveDummy(dummyId: string) {
                     <span>{{ authNotice }}</span>
                 </div>
 
-                <!-- Social Keycloak / Google Auth Login & Space Join Section -->
+                <!-- Google Auth Login & Space Join Section -->
                 <div class="mb-2 w-full flex flex-col gap-3">
                     <div v-if="authenticatedUser" class="flex flex-col gap-3">
                         <div
@@ -1587,8 +1601,8 @@ function handleRemoveDummy(dummyId: string) {
                             <p
                                 class="text-[11px] text-slate-700 font-semibold mt-0.5"
                             >
-                                Please log in with Google or Keycloak to enter
-                                the workspace.
+                                Please sign in with Google to enter the
+                                workspace.
                             </p>
                         </div>
 
@@ -1597,7 +1611,7 @@ function handleRemoveDummy(dummyId: string) {
                         >
                             <button
                                 type="button"
-                                @click="handleKeycloakLogin('google')"
+                                @click="handleGoogleLogin"
                                 class="w-full sm:flex-1 bg-white hover:bg-slate-50 text-slate-900 px-3.5 py-3 rounded-xl border-2 border-slate-900 text-xs font-extrabold flex items-center justify-center gap-2 transition-all pixel-btn shadow-[3px_3px_0px_0px_#0f172a] font-heading cursor-pointer"
                             >
                                 <svg
@@ -1621,16 +1635,7 @@ function handleRemoveDummy(dummyId: string) {
                                         d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
                                     />
                                 </svg>
-                                <span>Google Login</span>
-                            </button>
-
-                            <button
-                                type="button"
-                                @click="handleKeycloakLogin('keycloak')"
-                                class="w-full sm:flex-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-950 px-3.5 py-3 rounded-xl border-2 border-slate-900 text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all pixel-btn shadow-[3px_3px_0px_0px_#0f172a] font-heading cursor-pointer"
-                            >
-                                <LogIn class="w-4 h-4 text-indigo-700" />
-                                <span>Keycloak SSO</span>
+                                <span>Sign in with Google</span>
                             </button>
                         </div>
                     </div>
@@ -1718,6 +1723,17 @@ function handleRemoveDummy(dummyId: string) {
                     <ArrowLeftRight class="w-3 h-3" />
                     Switch
                 </button>
+                    <!-- Admin management (Visible for Admin Users) -->
+                    <button
+                        v-if="currentUser.isAdmin"
+                        type="button"
+                        @click="showAdminsPanel = true"
+                        title="Manage admins"
+                        class="text-[10px] font-bold px-2.5 py-1 rounded-lg border-2 border-slate-900 bg-indigo-100 text-indigo-950 hover:bg-indigo-200 flex items-center gap-1.5 transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] font-heading"
+                    >
+                        <ShieldCheck class="w-3.5 h-3.5" />
+                        <span>Admins</span>
+                    </button>
                     <!-- Map Builder Quick Access (Visible for Admin Users) -->
                     <button
                         v-if="currentUser.isAdmin"
@@ -1997,9 +2013,11 @@ function handleRemoveDummy(dummyId: string) {
                 :users="users"
                 :messages="messages"
                 :isOpen="isChatOpen"
+                :canManageAdmins="Boolean(currentUser.isAdmin)"
                 @sendMessage="handleSendMessage"
                 @teleportToUser="handleTeleportToUser"
                 @chimeUser="handleChimeUser"
+                @toggleAdmin="handleToggleAdmin"
                 @close="isChatOpen = false"
             />
 
@@ -2059,6 +2077,18 @@ function handleRemoveDummy(dummyId: string) {
                 @update:avatar="handleUpdateAvatar"
                 :showClose="true"
                 @close="showAvatarBuilderModal = false"
+            />
+        </div>
+
+        <!-- Admin management overlay (admins only) -->
+        <div
+            v-if="showAdminsPanel && currentUser.isAdmin"
+            class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4"
+        >
+            <AdminsPanel
+                :socket="socket"
+                :currentEmail="authenticatedUser?.email"
+                @close="showAdminsPanel = false"
             />
         </div>
 

@@ -11,6 +11,7 @@ import {
   ChevronDown,
   MessageCircle,
   BellRing,
+  ShieldCheck,
 } from 'lucide-vue-next';
 import type { User, ChatMessage } from '../types';
 
@@ -19,12 +20,14 @@ const props = defineProps<{
   users: User[];
   messages: ChatMessage[];
   isOpen: boolean;
+  canManageAdmins: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: 'sendMessage', payload: { text: string; isSpatial: boolean }): void;
   (e: 'teleportToUser', payload: { x: number; y: number }): void;
   (e: 'chimeUser', payload: { socketId: string }): void;
+  (e: 'toggleAdmin', payload: { socketId: string; makeAdmin: boolean }): void;
   (e: 'close'): void;
 }>();
 
@@ -213,6 +216,7 @@ function handleSend() {
               <div class="flex items-center gap-1.5 font-bold text-slate-900">
                 <span>{{ user.name }}</span>
                 <span v-if="user.socketId === currentUser.socketId" class="text-[10px] text-indigo-700 font-bold font-heading">(YOU)</span>
+                <span v-if="user.isAdmin" class="bg-amber-400 text-slate-950 px-1 rounded text-[8px] font-black border border-slate-900 font-heading uppercase">Admin</span>
               </div>
 
               <div class="flex items-center gap-1.5 text-[10px] text-slate-600 font-bold flex-wrap">
@@ -265,6 +269,17 @@ function handleSend() {
               }`"
             >
               <BellRing class="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              v-if="canManageAdmins && user.socketId !== currentUser.socketId && !user.isDummy"
+              type="button"
+              @click="emit('toggleAdmin', { socketId: user.socketId, makeAdmin: !user.isAdmin })"
+              :title="user.isAdmin ? `Remove admin from ${user.name}` : `Make ${user.name} an admin`"
+              class="px-1.5 py-1 bg-amber-100 hover:bg-amber-200 text-slate-950 border-2 border-slate-900 rounded-lg transition-all pixel-btn text-[9px] font-black font-heading flex items-center gap-1"
+            >
+              <ShieldCheck class="w-3 h-3" />
+              {{ user.isAdmin ? 'Remove admin' : 'Make admin' }}
             </button>
 
             <button

@@ -1,6 +1,8 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { getRequestListener } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
+import crypto from "crypto";
 import { createServer } from "http";
 import { createServer as createHttpsServer } from "https";
 import { Server, Socket } from "socket.io";
@@ -23,7 +25,28 @@ import {
 } from "./src/types";
 import { createDefaultOfficeMap, createBeachRetreatMap } from "./src/mapsData";
 import { initWorkspaceDatabase } from "./src/db";
-import { createSessionToken, verifySessionToken } from "./src/lib/session";
+import {
+  createSessionToken,
+  getSessionSecret,
+  verifySessionToken,
+} from "./src/lib/session";
+import {
+  canRevoke,
+  isAdminEmail,
+  listAdmins,
+  normalizeAdminEmail,
+  parseAdminEmails,
+} from "./src/lib/admins";
+import {
+  buildAuthUrl,
+  createPkce,
+  decodeJwtPayload,
+  exchangeCode,
+  openLoginState,
+  randomToken,
+  sealLoginState,
+  validateIdTokenClaims,
+} from "./src/lib/googleAuth";
 import { validAnnounce } from "./src/lib/media/wire";
 import {
   checkBearer,
@@ -63,8 +86,25 @@ async function startServer() {
   // Initialize SQLite persistence driver
   const db = await initWorkspaceDatabase();
 
+  // Admins are ADMIN_EMAILS (configuration, cannot be revoked in the app) plus the admins granted
+  // in the app and stored in the DB. Both are kept as normalized emails. Admin status is always
+  // resolved from a verified email here; nothing the client sends decides it.
+  const envAdmins = parseAdminEmails(process.env.ADMIN_EMAILS);
+  const dbAdmins = new Set(db.listDbAdmins().map((a) => a.email));
+  if (envAdmins.size === 0 && dbAdmins.size === 0) {
+    console.warn(
+      "[admin] no admins configured - set ADMIN_EMAILS or grant an admin from the app.",
+    );
+  }
+  function isAdmin(email: string | undefined | null): boolean {
+    return isAdminEmail(email, envAdmins, dbAdmins);
+  }
+
   // In-memory application state
   const users: Map<string, User> = new Map(); // socket.id -> User
+  // Verified (lower-case) email of each joined socket, from its session token. Kept beside the
+  // users map rather than on User so admin checks and grant/revoke can find a user's email.
+  const socketEmails: Map<string, string> = new Map();
   // Which iroh endpoint each joined socket may use on the self-hosted relay (see relayAccess.ts).
   const relayAccess = new RelayAccessRegistry();
   // Per (from, to) pair cooldown for the chime feature, enforced server-side so a
@@ -332,6 +372,18 @@ async function startServer() {
     }
   }
 
+  // Re-resolves admin status for every joined user with this email after a grant or revoke, and
+  // tells each of their spaces. Dummies are admin test users, never matched by email.
+  function refreshAdminStatus(email: string) {
+    for (const [socketId, userEmail] of socketEmails) {
+      if (userEmail !== email) continue;
+      const target = users.get(socketId);
+      if (!target || target.isDummy) continue;
+      target.isAdmin = isAdmin(email);
+      toSpace(socketId).emit("user:updated", target);
+    }
+  }
+
   // Socket.IO event handlers
   io.on("connection", (socket: Socket) => {
     console.log(`User connected: ${socket.id}`);
@@ -352,9 +404,10 @@ async function startServer() {
       };
     }
 
-    function listFor(session: { email: string; isAdmin: boolean }) {
-      return spacesFor(spaces.values(), session).map((sp) =>
-        summarize(sp, session.isAdmin),
+    function listFor(session: { email: string }) {
+      const admin = isAdmin(session.email);
+      return spacesFor(spaces.values(), { email: session.email, isAdmin: admin }).map(
+        (sp) => summarize(sp, admin),
       );
     }
 
@@ -378,7 +431,7 @@ async function startServer() {
         reply({ ok: false, reason: "unauthenticated" });
         return null;
       }
-      if (requireAdmin && !session.isAdmin) {
+      if (requireAdmin && !isAdmin(session.email)) {
         reply({ ok: false, reason: "not_allowed" });
         return null;
       }
@@ -484,6 +537,94 @@ async function startServer() {
       },
     );
 
+    // ==========================================
+    // ADMIN MANAGEMENT
+    // Admin-only: the caller's joined email must be an admin on the server's list. Each event
+    // replies through its ack with { ok, error?, admins? }.
+    // ==========================================
+    type AdminAck = (r: {
+      ok: boolean;
+      error?: string;
+      admins?: ReturnType<typeof listAdmins>;
+    }) => void;
+
+    // Socket.IO passes the ack as the last argument; find it wherever the client put it.
+    function ackOf(args: unknown[]): AdminAck {
+      const fn = args.find((a) => typeof a === "function") as AdminAck | undefined;
+      return (r) => {
+        if (fn) fn(r);
+      };
+    }
+
+    // The joined admin's email, or null when the socket is not joined or is not an admin.
+    function adminActor(): string | null {
+      if (!users.has(socket.id)) return null;
+      const email = socketEmails.get(socket.id);
+      return isAdmin(email) && email ? email : null;
+    }
+
+    // The account an admin grant/revoke applies to. Either an email, or a socketId whose verified
+    // email the server looks up, so clients never need to be sent other users' emails.
+    type AdminTarget = { ok: true; email: string } | { ok: false; error: string };
+    function adminTarget(args: unknown[]): AdminTarget {
+      const payload = args[0] as
+        | { email?: unknown; socketId?: unknown }
+        | null
+        | undefined;
+      if (typeof payload?.socketId === "string") {
+        const email = socketEmails.get(payload.socketId);
+        if (!email || users.get(payload.socketId)?.isDummy) {
+          return { ok: false, error: "That user has no verified email." };
+        }
+        return { ok: true, email };
+      }
+      const email = normalizeAdminEmail(payload?.email);
+      if (!email) return { ok: false, error: "Not a valid email address." };
+      return { ok: true, email };
+    }
+
+    socket.on("admin:list", (...args: unknown[]) => {
+      const reply = ackOf(args);
+      if (!adminActor()) return reply({ ok: false, error: "not_allowed" });
+      reply({ ok: true, admins: listAdmins(envAdmins, dbAdmins) });
+    });
+
+    socket.on("admin:grant", (...args: unknown[]) => {
+      const reply = ackOf(args);
+      const actor = adminActor();
+      if (!actor) return reply({ ok: false, error: "not_allowed" });
+      const target = adminTarget(args);
+      if (target.ok === false) return reply({ ok: false, error: target.error });
+      const email = target.email;
+
+      db.addDbAdmin(email, actor);
+      dbAdmins.add(email);
+      refreshAdminStatus(email);
+      reply({ ok: true, admins: listAdmins(envAdmins, dbAdmins) });
+    });
+
+    socket.on("admin:revoke", (...args: unknown[]) => {
+      const reply = ackOf(args);
+      const actor = adminActor();
+      if (!actor) return reply({ ok: false, error: "not_allowed" });
+      const target = adminTarget(args);
+      if (target.ok === false) return reply({ ok: false, error: target.error });
+      const email = target.email;
+
+      const check = canRevoke(email, envAdmins);
+      if (check.ok === false) return reply({ ok: false, error: check.reason });
+      // Revoking your own access would lock you out, so an admin cannot do it to themselves.
+      if (email === actor) {
+        return reply({ ok: false, error: "You cannot revoke your own admin access." });
+      }
+
+      const removed = db.removeDbAdmin(email);
+      dbAdmins.delete(email);
+      if (!removed) return reply({ ok: false, error: "Not an app-granted admin." });
+      refreshAdminStatus(email);
+      reply({ ok: true, admins: listAdmins(envAdmins, dbAdmins) });
+    });
+
     // Join room
     socket.on(
       "user:join",
@@ -498,10 +639,11 @@ async function startServer() {
         presenceStatus?: PresenceStatus;
         spaceId?: string;
       }) => {
-        // isAdmin and a cross-device stable identity (email) can ONLY come from a verified
-        // Keycloak session token - payload.isAdmin/email are otherwise fully client-controlled
-        // and must never be trusted directly (that was previously a trivial privilege-escalation
-        // hole: any client could just send { isAdmin: true }).
+        // A cross-device stable identity (email) can ONLY come from a verified session token -
+        // payload.isAdmin/email are otherwise fully client-controlled and must never be trusted
+        // directly (that was previously a trivial privilege-escalation hole: any client could
+        // just send { isAdmin: true }). Admin status is then resolved from that verified email
+        // against the server's admin list.
         const session = verifySessionToken(payload.sessionToken);
 
         // Space membership is keyed on the verified email, so a join without a valid token can
@@ -522,7 +664,11 @@ async function startServer() {
         // Which space to enter is the client's request; whether they may is decided here.
         const space = payload.spaceId ? spaces.get(payload.spaceId) : undefined;
         const map = space ? maps.get(space.activeMapId) : undefined;
-        if (!space || !map || !canEnterSpace(space, session)) {
+        if (
+          !space ||
+          !map ||
+          !canEnterSpace(space, { email: session.email, isAdmin: isAdmin(session.email) })
+        ) {
           socket.emit("space:denied", { spaceId: payload.spaceId ?? null });
           return;
         }
@@ -549,7 +695,7 @@ async function startServer() {
           startPosition.y,
         );
 
-        const isAdmin = session.isAdmin;
+        const admin = isAdmin(session.email);
         const email = session.email || undefined;
         const displayName =
           session.name || payload.name || `Guest_${socket.id.substring(0, 4)}`;
@@ -589,7 +735,7 @@ async function startServer() {
           isDeafened: false,
           isSpeaking: false,
           isScreenSharing: false,
-          isAdmin,
+          isAdmin: admin,
           currentZoneId: initialZone,
           lastSeen: Date.now(),
           presenceStatus,
@@ -597,6 +743,9 @@ async function startServer() {
         };
 
         users.set(socket.id, newUser);
+        if (session.email) {
+          socketEmails.set(socket.id, session.email.trim().toLowerCase());
+        }
         socket.join(room(space.id));
 
         // Send initial map & user state to connected user
@@ -730,7 +879,12 @@ async function startServer() {
         user.isSpeaking = updates.isSpeaking;
       if (typeof updates.isVideoOn === "boolean")
         user.isVideoOn = updates.isVideoOn;
-      if (typeof updates.isAdmin === "boolean" && user.isAdmin)
+      // Admin status comes from the server's admin list. A client may only switch its own admin
+      // flag, and only when its verified email is an admin; it can never grant itself admin.
+      if (
+        typeof updates.isAdmin === "boolean" &&
+        isAdmin(socketEmails.get(socket.id))
+      )
         user.isAdmin = updates.isAdmin;
       if (
         updates.presenceStatus &&
@@ -1334,6 +1488,7 @@ async function startServer() {
       console.log(`User disconnected: ${socket.id}`);
       const leftSpaceId = spaceIdOf(socket.id);
       users.delete(socket.id);
+      socketEmails.delete(socket.id);
       relayAccess.unregister(socket.id);
       if (leftSpaceId) {
         io.to(room(leftSpaceId)).emit("user:left", socket.id);
@@ -1575,20 +1730,31 @@ async function startServer() {
     });
   });
 
-  // Keycloak / Google Auth Login URL Endpoint
-  // KEYCLOAK_URL is the realm URL as the *browser* sees it (used for the login redirect).
-  // KEYCLOAK_INTERNAL_URL is optional and only used for server-to-server calls (token
-  // exchange, userinfo) - needed when Keycloak runs in the same Docker network and the
-  // public URL (e.g. http://localhost:8080) is not reachable from inside this container.
-  const keycloakUrl =
-    process.env.KEYCLOAK_URL ||
-    "https://cloak.dev.personalclientcare.com/realms/ins3c";
-  const keycloakInternalUrl = process.env.KEYCLOAK_INTERNAL_URL || keycloakUrl;
-  const keycloakClientId = process.env.KEYCLOAK_CLIENT_ID || "ins3c-login";
-  const keycloakClientSecret = process.env.KEYCLOAK_CLIENT_SECRET || "";
+  // Google sign-in (OpenID Connect, authorization code flow with PKCE). GOOGLE_CLIENT_ID and
+  // GOOGLE_CLIENT_SECRET come from the Google Cloud OAuth client. PUBLIC_URL, when set, is the
+  // origin users reach the app on (trailing slash stripped); otherwise it is derived per request.
+  const googleClientId = process.env.GOOGLE_CLIENT_ID || "";
+  const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
+  const googleConfigured = !!googleClientId && !!googleClientSecret;
+  if (!googleConfigured) {
+    console.warn(
+      "[auth] GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are not set - Google sign-in is disabled.",
+    );
+  }
+  const publicUrlEnv = (process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
+  let publicOriginEnv = "";
+  if (publicUrlEnv) {
+    try {
+      publicOriginEnv = new URL(publicUrlEnv).origin;
+    } catch {
+      console.warn(`[auth] PUBLIC_URL is not a valid URL - ignoring it.`);
+    }
+  }
 
-  app.get("/api/auth/login-url", (c) => {
-
+  // The origin the browser uses for the app. Used for the redirect URI and as the only
+  // postMessage target origin. Query parameters from the client are never consulted.
+  function publicOrigin(c: Context): string {
+    if (publicOriginEnv) return publicOriginEnv;
     const reqUrl = new URL(c.req.url);
     const rawProto =
       c.req.header("x-forwarded-proto") ||
@@ -1603,292 +1769,247 @@ async function startServer() {
     const host = rawHost.split(",")[0].trim();
     const finalProto =
       host.endsWith(".run.app") || proto === "https" ? "https" : proto;
-    const computedRedirectUri = `${finalProto}://${host}/auth/callback`;
+    return `${finalProto}://${host}`;
+  }
 
-    const redirectUri = c.req.query("redirect_uri") || computedRedirectUri;
+  const escapeHtml = (text: string): string =>
+    text.replace(
+      /[&<>"']/g,
+      (ch) =>
+        (
+          ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }) as Record<string, string>
+        )[ch],
+    );
 
-    const params = new URLSearchParams({
-      client_id: keycloakClientId,
-      redirect_uri: redirectUri,
-      response_type: "code",
-      scope: "openid profile email",
-    });
+  // JSON that is safe to embed inside a <script> element: `<` and the JS line separators are
+  // escaped so no value can close the script tag or break out of the literal.
+  const scriptJson = (value: unknown): string =>
+    JSON.stringify(value)
+      .replace(/</g, "\\u003c")
+      .replace(/\u2028/g, "\\u2028")
+      .replace(/\u2029/g, "\\u2029");
 
-    if (c.req.query("idp") === "google") {
-      params.append("kc_idp_hint", "google");
-    }
+  // Constant-time equality for the OAuth state value.
+  function sameValue(a: string, b: string): boolean {
+    const left = Buffer.from(a);
+    const right = Buffer.from(b);
+    return left.length === right.length && crypto.timingSafeEqual(left, right);
+  }
 
-    const authUrl = `${keycloakUrl}/protocol/openid-connect/auth?${params.toString()}`;
-    return c.json({ url: authUrl, redirectUri });
-  });
-
-  // OAuth Callback Endpoint
-  app.get("/auth/callback", async (c) => {
-    const code = c.req.query("code");
-
-    if (!code) {
-      return c.text("Missing authorization code", 400);
-    }
-
-    try {
-      const reqUrl = new URL(c.req.url);
-      const rawProto =
-        c.req.header("x-forwarded-proto") ||
-        reqUrl.protocol.replace(":", "") ||
-        "https";
-      const proto = rawProto.split(",")[0].trim();
-      const rawHost =
-        c.req.header("x-forwarded-host") ||
-        c.req.header("host") ||
-        reqUrl.host ||
-        "";
-      const host = rawHost.split(",")[0].trim();
-      const finalProto =
-        host.endsWith(".run.app") || proto === "https" ? "https" : proto;
-      const redirectUri = `${finalProto}://${host}/auth/callback`;
-
-      const tokenBody = new URLSearchParams({
-        grant_type: "authorization_code",
-        client_id: keycloakClientId,
-        code: code as string,
-        redirect_uri: redirectUri,
-      });
-
-      if (keycloakClientSecret) {
-        tokenBody.append("client_secret", keycloakClientSecret);
-      }
-
-      const tokenRes = await fetch(
-        `${keycloakInternalUrl}/protocol/openid-connect/token`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: tokenBody.toString(),
-        },
-      );
-
-      if (!tokenRes.ok) {
-        const errorText = await tokenRes.text();
-        console.error(
-          "Keycloak token exchange error:",
-          tokenRes.status,
-          errorText,
-        );
-        return c.html(`
-          <!DOCTYPE html>
-          <html>
-            <head>
-              <title>Authentication Failed</title>
-              <style>
-                body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f87171; color: #0f172a; }
-                .card { background: white; border: 3px solid #0f172a; border-radius: 16px; padding: 24px; box-shadow: 6px 6px 0px #0f172a; text-align: center; max-width: 320px; }
-                h2 { font-size: 18px; margin-top: 0; color: #dc2626; }
-                p { font-size: 12px; font-weight: bold; }
-              </style>
-            </head>
-            <body>
-              <div class="card">
-                <h2>⚠️ Authentication Failed</h2>
-                <p>Could not exchange token with identity provider.</p>
-              </div>
-              <script>
-                if (window.opener) {
-                  window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: 'Token exchange failed' }, '*');
-                  setTimeout(() => { window.close(); }, 2000);
-                }
-              </script>
-            </body>
-          </html>
-        `);
-      }
-
-      const tokens: any = await tokenRes.json();
-
-      const parseJwtPayload = (token?: string) => {
-        if (!token || typeof token !== "string") return null;
-        try {
-          const parts = token.split(".");
-          if (parts.length !== 3) return null;
-          const base64Url = parts[1];
-          const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
-          const jsonStr = Buffer.from(base64, "base64").toString("utf-8");
-          return JSON.parse(jsonStr);
-        } catch {
-          return null;
-        }
-      };
-
-      const idPayload = parseJwtPayload(tokens.id_token);
-      const accessPayload = parseJwtPayload(tokens.access_token);
-      let userinfo: any = null;
-
-      if (tokens.access_token) {
-        try {
-          const userinfoRes = await fetch(
-            `${keycloakInternalUrl}/protocol/openid-connect/userinfo`,
-            {
-              headers: { Authorization: `Bearer ${tokens.access_token}` },
-            },
-          );
-          if (userinfoRes.ok) {
-            userinfo = await userinfoRes.json();
-          }
-        } catch (e) {
-          console.warn("Failed to fetch userinfo from Keycloak:", e);
-        }
-      }
-
-      const sources = [userinfo, idPayload, accessPayload].filter(Boolean);
-
-      const getEmail = () => {
-        for (const s of sources) {
-          if (s.email && typeof s.email === "string" && s.email.trim()) {
-            return s.email.trim();
-          }
-        }
-        return "";
-      };
-
-      const formatName = (str: string) => {
-        if (!str) return "";
-        if (str.includes(" ") || (/[A-Z]/.test(str) && /[a-z]/.test(str)))
-          return str;
-        return str
-          .replace(/[._-]/g, " ")
-          .replace(/\b\w/g, (c) => c.toUpperCase());
-      };
-
-      const resolveName = (): string => {
-        for (const s of sources) {
-          if (
-            s.name &&
-            typeof s.name === "string" &&
-            s.name.trim() &&
-            !["Keycloak User", "Member"].includes(s.name.trim())
-          ) {
-            return s.name.trim();
-          }
-        }
-        for (const s of sources) {
-          if (s.given_name || s.family_name) {
-            const full = `${s.given_name || ""} ${s.family_name || ""}`.trim();
-            if (full && full !== "undefined undefined") return full;
-          }
-        }
-        for (const s of sources) {
-          const uname = s.preferred_username || s.nickname || s.username;
-          if (uname && typeof uname === "string" && uname.trim()) {
-            return formatName(uname.trim());
-          }
-        }
-        const mail = getEmail();
-        if (mail && mail.includes("@")) {
-          const prefix = mail.split("@")[0];
-          if (prefix) return formatName(prefix);
-        }
-        return "Member";
-      };
-
-      const checkIsAdminGroup = (): boolean => {
-        for (const s of sources) {
-          if (!s || typeof s !== "object") continue;
-
-          const matchesAdmin = (val: any): boolean => {
-            if (!val) return false;
-            if (typeof val === "string") {
-              const clean = val.trim().toLowerCase();
-              if (clean === "admin" || clean === "/admin") return true;
-              const parts = clean.split(/[\/\s,;:]+/).filter(Boolean);
-              if (parts.includes("admin")) return true;
-            } else if (typeof val === "object") {
-              if (val.name && matchesAdmin(val.name)) return true;
-              if (val.path && matchesAdmin(val.path)) return true;
-              if (val.id && matchesAdmin(val.id)) return true;
-              if (val.group && matchesAdmin(val.group)) return true;
-            }
-            return false;
-          };
-
-          const recursiveCheck = (obj: any, depth = 0): boolean => {
-            if (!obj || depth > 5) return false;
-            if (typeof obj === "string") return matchesAdmin(obj);
-            if (Array.isArray(obj)) {
-              for (const item of obj) {
-                if (matchesAdmin(item) || recursiveCheck(item, depth + 1))
-                  return true;
-              }
-            } else if (typeof obj === "object") {
-              for (const key of Object.keys(obj)) {
-                const val = obj[key];
-                if (matchesAdmin(val) || recursiveCheck(val, depth + 1))
-                  return true;
-              }
-            }
-            return false;
-          };
-
-          if (recursiveCheck(s)) return true;
-        }
-        return false;
-      };
-
-      const verifiedName = resolveName();
-      const verifiedEmail = getEmail();
-      const verifiedIsAdmin = checkIsAdminGroup();
-
-      const userData = {
-        name: verifiedName,
-        email: verifiedEmail,
-        isAdmin: verifiedIsAdmin,
-        authenticated: true,
-        // Signed by the server after this Keycloak exchange was verified - the socket layer
-        // trusts this token (never raw client-submitted name/email/isAdmin) for identity/admin.
-        sessionToken: createSessionToken({
-          email: verifiedEmail,
-          name: verifiedName,
-          isAdmin: verifiedIsAdmin,
-        }),
-      };
-
-      return c.html(`
+  // Result page for the sign-in popup. Posts the outcome to the opener using the app's own
+  // origin, and falls back to a plain redirect (success) or a back link (error) without one.
+  function authResultPage(
+    origin: string,
+    message:
+      | { type: "OAUTH_AUTH_SUCCESS"; user: Record<string, unknown> }
+      | { type: "OAUTH_AUTH_ERROR"; error: string },
+    view: {
+      ok: boolean;
+      title: string;
+      background: string;
+      heading: string;
+      body: string;
+    },
+  ): string {
+    const closeDelay = view.ok ? 800 : 2000;
+    return `
         <!DOCTYPE html>
         <html>
           <head>
-            <title>Keycloak Auth Callback</title>
+            <title>${escapeHtml(view.title)}</title>
             <style>
-              body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #fbbf24; color: #0f172a; }
+              body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: ${view.background}; color: #0f172a; }
               .card { background: white; border: 3px solid #0f172a; border-radius: 16px; padding: 24px; box-shadow: 6px 6px 0px #0f172a; text-align: center; max-width: 320px; }
-              h2 { font-size: 18px; margin-top: 0; }
+              h2 { font-size: 18px; margin-top: 0; ${view.ok ? "" : "color: #dc2626;"} }
               p { font-size: 13px; font-weight: bold; }
+              a { color: #0f172a; }
             </style>
           </head>
           <body>
             <div class="card">
-              <h2>🎉 Login Successful!</h2>
-              <p>Welcome, ${userData.name}! Returning to PeerSpace...</p>
+              <h2>${escapeHtml(view.heading)}</h2>
+              <p>${escapeHtml(view.body)}</p>
+              ${view.ok ? "" : '<p><a href="/">Back to PeerSpace</a></p>'}
             </div>
             <script>
-              const userData = ${JSON.stringify(userData)};
+              const message = ${scriptJson(message)};
+              const targetOrigin = ${scriptJson(origin)};
               if (window.opener) {
                 try {
-                  window.opener.postMessage({
-                    type: 'OAUTH_AUTH_SUCCESS',
-                    user: userData
-                  }, '*');
+                  window.opener.postMessage(message, targetOrigin);
                 } catch (e) {
                   console.error('Failed to postMessage to opener:', e);
                 }
-                setTimeout(() => { window.close(); }, 800);
-              } else {
-                window.location.href = '/?auth_user=' + encodeURIComponent(JSON.stringify(userData));
+                setTimeout(() => { window.close(); }, ${closeDelay});
+              } else if (message.type === 'OAUTH_AUTH_SUCCESS') {
+                window.location.href = '/?auth_user=' + encodeURIComponent(JSON.stringify(message.user));
               }
             </script>
           </body>
         </html>
-      `);
+      `;
+  }
+
+  // Login URL endpoint: starts the Google authorization request. The PKCE verifier, state and
+  // nonce travel in an encrypted, httpOnly cookie that is only sent to the callback path.
+  app.get("/api/auth/login-url", (c) => {
+    c.header("Cache-Control", "no-store");
+    if (!googleConfigured) {
+      return c.json({ error: "Google sign-in is not configured" }, 503);
+    }
+
+    const origin = publicOrigin(c);
+    const redirectUri = `${origin}/auth/callback`;
+    const { verifier, challenge } = createPkce();
+    const state = randomToken();
+    const nonce = randomToken();
+
+    const sealed = sealLoginState(
+      { state, verifier, nonce, createdAt: Date.now() },
+      getSessionSecret(),
+    );
+    setCookie(c, "ps_login", sealed, {
+      httpOnly: true,
+      sameSite: "Lax",
+      path: "/auth/callback",
+      maxAge: 600,
+      secure: origin.startsWith("https:"),
+    });
+
+    const url = buildAuthUrl({
+      clientId: googleClientId,
+      redirectUri,
+      state,
+      nonce,
+      codeChallenge: challenge,
+    });
+    return c.json({ url, redirectUri });
+  });
+
+  // OAuth callback: verifies the login state, exchanges the code, validates the id_token and
+  // issues the server-signed session token that the socket layer trusts.
+  app.get("/auth/callback", async (c) => {
+    c.header("Cache-Control", "no-store");
+    const sealed = getCookie(c, "ps_login");
+    deleteCookie(c, "ps_login", { path: "/auth/callback" });
+    const origin = publicOrigin(c);
+
+    const failed = (reason: string, error: string) => {
+      console.warn(`[auth] Google sign-in failed: ${reason}`);
+      return c.html(
+        authResultPage(
+          origin,
+          { type: "OAUTH_AUTH_ERROR", error },
+          {
+            ok: false,
+            title: "Sign-in failed",
+            background: "#f87171",
+            heading: "⚠️ Sign-in failed",
+            body: error,
+          },
+        ),
+        400,
+      );
+    };
+
+    try {
+      if (!googleConfigured) {
+        return failed("Google sign-in is not configured", "Google sign-in is not available.");
+      }
+
+      const oauthError = c.req.query("error");
+      if (oauthError) {
+        return failed(
+          `provider returned error "${String(oauthError).slice(0, 64)}"`,
+          "Sign-in was cancelled.",
+        );
+      }
+
+      const code = c.req.query("code");
+      if (!code) {
+        return failed("missing authorization code", "No authorization code was returned.");
+      }
+
+      const login = openLoginState(sealed, getSessionSecret());
+      if (!login) {
+        return failed(
+          "login cookie missing, expired or invalid",
+          "Your sign-in session expired. Please try again.",
+        );
+      }
+
+      const state = c.req.query("state") ?? "";
+      if (!sameValue(state, login.state)) {
+        return failed("state mismatch", "Sign-in could not be verified. Please try again.");
+      }
+
+      let idToken: string;
+      try {
+        ({ idToken } = await exchangeCode({
+          code,
+          verifier: login.verifier,
+          clientId: googleClientId,
+          clientSecret: googleClientSecret,
+          redirectUri: `${origin}/auth/callback`,
+        }));
+      } catch (err) {
+        return failed(
+          `token exchange: ${err instanceof Error ? err.message : "unknown error"}`,
+          "Could not complete sign-in with Google.",
+        );
+      }
+
+      const claims = decodeJwtPayload(idToken);
+      if (!claims) {
+        return failed("id_token is not a decodable JWT", "Could not read your Google account.");
+      }
+      const identity = validateIdTokenClaims(claims, {
+        clientId: googleClientId,
+        nonce: login.nonce,
+      });
+      if ("error" in identity) {
+        return failed(
+          `id_token rejected: ${identity.error}`,
+          "Your Google account could not be verified.",
+        );
+      }
+
+      const email = identity.email.trim().toLowerCase();
+      const name = identity.name || email.split("@")[0] || email;
+      const admin = isAdmin(email);
+      const userData = {
+        name,
+        email,
+        isAdmin: admin,
+        authenticated: true,
+        // Signed by the server after the id_token was verified. The socket layer trusts this
+        // token (never raw client-submitted name/email/isAdmin) for identity; admin status is
+        // resolved from the email on each use.
+        sessionToken: createSessionToken({ email, name, isAdmin: admin }),
+      };
+
+      return c.html(
+        authResultPage(
+          origin,
+          { type: "OAUTH_AUTH_SUCCESS", user: userData },
+          {
+            ok: true,
+            title: "Signing in…",
+            background: "#fbbf24",
+            heading: "🎉 Login successful!",
+            body: `Welcome, ${name}! Returning to PeerSpace...`,
+          },
+        ),
+      );
     } catch (err) {
-      console.error("Keycloak OAuth callback error:", err);
-      return c.text("OAuth callback processing error.", 500);
+      console.error("Google OAuth callback error:", err);
+      return failed("unexpected error", "Something went wrong. Please try again.");
     }
   });
 

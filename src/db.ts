@@ -21,7 +21,17 @@ export interface SQLiteDriver {
   loadSpaces(): Space[];
   deleteSpace(spaceId: string): void;
   deleteMap(mapId: string): void;
+  listDbAdmins(): DbAdmin[];
+  addDbAdmin(email: string, grantedBy: string): void;
+  removeDbAdmin(email: string): boolean;
   getDbInfo(): { driver: string; path: string; totalMaps: number; fileSize: number };
+}
+
+/** A row of the `admins` table: an admin granted in the app (not the ADMIN_EMAILS env list). */
+export interface DbAdmin {
+  email: string;
+  grantedBy: string;
+  grantedAt: number;
 }
 
 export async function initWorkspaceDatabase(): Promise<SQLiteDriver> {
@@ -51,6 +61,14 @@ export async function initWorkspaceDatabase(): Promise<SQLiteDriver> {
           id TEXT PRIMARY KEY,
           data TEXT NOT NULL,
           updated_at INTEGER NOT NULL
+        )
+      `);
+
+      db.run(`
+        CREATE TABLE IF NOT EXISTS admins (
+          email TEXT PRIMARY KEY,
+          granted_by TEXT,
+          granted_at INTEGER NOT NULL
         )
       `);
 
@@ -111,6 +129,22 @@ export async function initWorkspaceDatabase(): Promise<SQLiteDriver> {
           const row: any = db.prepare("SELECT value FROM workspace_active WHERE key = 'current_map_id'").get();
           return row ? row.value : null;
         },
+        listDbAdmins(): DbAdmin[] {
+          const rows: any[] = db.prepare('SELECT email, granted_by, granted_at FROM admins ORDER BY email ASC').all();
+          return rows.map((row) => ({ email: row.email, grantedBy: row.granted_by, grantedAt: row.granted_at }));
+        },
+        addDbAdmin(email: string, grantedBy: string) {
+          // DO NOTHING keeps the original grantor and timestamp when the email is already an admin.
+          db.prepare(`
+            INSERT INTO admins (email, granted_by, granted_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(email) DO NOTHING
+          `).run(email, grantedBy, Date.now());
+        },
+        removeDbAdmin(email: string): boolean {
+          const result: any = db.prepare('DELETE FROM admins WHERE email = ?').run(email);
+          return result.changes > 0;
+        },
         getDbInfo() {
           const stats = fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE) : { size: 0 };
           const mapsCount: any = db.prepare('SELECT COUNT(*) as count FROM workspace_maps').get();
@@ -157,6 +191,14 @@ export async function initWorkspaceDatabase(): Promise<SQLiteDriver> {
         id TEXT PRIMARY KEY,
         data TEXT NOT NULL,
         updated_at INTEGER NOT NULL
+      )
+    `);
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS admins (
+        email TEXT PRIMARY KEY,
+        granted_by TEXT,
+        granted_at INTEGER NOT NULL
       )
     `);
 
@@ -229,6 +271,29 @@ export async function initWorkspaceDatabase(): Promise<SQLiteDriver> {
           return res[0].values[0][0] as string;
         }
         return null;
+      },
+      listDbAdmins(): DbAdmin[] {
+        const res = db.exec('SELECT email, granted_by, granted_at FROM admins ORDER BY email ASC');
+        if (res.length === 0 || !res[0].values) return [];
+        return res[0].values.map((row) => ({
+          email: row[0] as string,
+          grantedBy: row[1] as string,
+          grantedAt: row[2] as number,
+        }));
+      },
+      addDbAdmin(email: string, grantedBy: string) {
+        // DO NOTHING keeps the original grantor and timestamp when the email is already an admin.
+        db.run(
+          `INSERT INTO admins (email, granted_by, granted_at) VALUES (?, ?, ?) ON CONFLICT(email) DO NOTHING`,
+          [email, grantedBy, Date.now()]
+        );
+        persistToDisk();
+      },
+      removeDbAdmin(email: string): boolean {
+        db.run('DELETE FROM admins WHERE email = ?', [email]);
+        const removed = db.getRowsModified() > 0;
+        persistToDisk();
+        return removed;
       },
       getDbInfo() {
         const stats = fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE) : { size: 0 };

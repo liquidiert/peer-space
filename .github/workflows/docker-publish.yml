@@ -18,10 +18,6 @@ jobs:
             context: .
             file: Dockerfile
             image: ghcr.io/${{ github.repository }}
-          - name: keycloak
-            context: keycloak
-            file: keycloak/Dockerfile
-            image: ghcr.io/${{ github.repository }}-keycloak
           - name: relay
             context: relay
             file: relay/Dockerfile

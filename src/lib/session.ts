@@ -1,14 +1,23 @@
 import crypto from 'crypto';
 
-// Signs a compact, server-issued session token after a Keycloak login has been verified
+// Signs a compact, server-issued session token after a Google sign-in has been verified
 // once in the OAuth callback. The socket layer then trusts this token (not raw client input)
-// for identity/isAdmin, since socket.io connections have no built-in auth of their own.
+// for identity, since socket.io connections have no built-in auth of their own. Admin status
+// is not carried as trusted data: the server resolves it from the email on every use.
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 if (!process.env.SESSION_SECRET) {
   console.warn(
     '[session] SESSION_SECRET is not set - using a random secret generated for this process. ' +
       'Every restart/redeploy will invalidate existing sessions. Set SESSION_SECRET in production.'
   );
+}
+
+/**
+ * The server secret used to sign session tokens. Also keys the sealed login-state cookie, so
+ * both share one configured value (SESSION_SECRET) rather than duplicating it.
+ */
+export function getSessionSecret(): string {
+  return SESSION_SECRET;
 }
 
 export interface SessionPayload {

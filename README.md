@@ -8,7 +8,7 @@ PeerSpace is a real-time 2D spatial virtual office. Walk around as an avatar, me
 - [Configuration](#configuration)
 - [Audio and video](#audio-and-video)
 - [Deployment](#deployment)
-- [Keycloak](#keycloak)
+- [Sign-in with Google](#sign-in-with-google)
 
 ---
 
@@ -20,7 +20,7 @@ PeerSpace is a real-time 2D spatial virtual office. Walk around as an avatar, me
 | Backend | Hono (`@hono/node-server`), Socket.IO (presence, chat, media endpoint discovery) |
 | Audio/video | [iroh](https://iroh.computer) in the browser via WebAssembly (`crates/peer-media`), WebCodecs (Opus, H.264/VP8) |
 | Persistence | SQLite (`workspace.sqlite` via `bun:sqlite` / `sql.js`) |
-| Auth | OpenID Connect via Keycloak |
+| Auth | OpenID Connect with Google (direct, no identity broker) |
 | Tooling | Vite, esbuild, TypeScript, Vitest (runs on Bun or Node.js 18+) |
 
 ---
@@ -32,47 +32,32 @@ The compose setup runs everything you need:
 | Service | Purpose | URL |
 | :--- | :--- | :--- |
 | `peerspace` | The app | http://localhost:3000 |
-| `keycloak` | Login / identity provider | http://localhost:8080 |
-| `keycloak-db` | Postgres database for Keycloak | internal only |
 | `iroh-relay` | Relay for audio and video (see [Audio and video](#audio-and-video)) | internal, exposed through your proxy |
 
 ```bash
-# 1. Set a session secret (required, see Configuration)
+# 1. Set a session secret and Google sign-in credentials (see Sign-in with Google)
 cp .env.example .env
 echo "SESSION_SECRET=$(openssl rand -hex 32)" >> .env
+# Then set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and ADMIN_EMAILS in .env
 
 # 2. Build and start everything
 docker compose up -d
 
-# 3. Check the status (Keycloak takes around a minute to become healthy)
+# 3. Check the status
 docker compose ps
-docker compose logs -f keycloak
+docker compose logs -f peerspace
 ```
 
-On the first start Keycloak imports the `peer-space` realm from [`keycloak/import/peer-space-realm.json`](keycloak/import/peer-space-realm.json). The import sets up:
-
-- the `peer-space` OIDC client, with its redirect URI pointing to PeerSpace
-- a `groups` protocol mapper that puts group membership into the tokens
-- an `admin` group
-
-The realm starts with no users. To create one:
-
-1. Open http://localhost:8080 and sign in with `admin` / `admin` (or your `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD`).
-2. Switch to the **peer-space** realm, go to **Users** → **Create new user** and set a password under **Credentials**.
-3. To make the user a PeerSpace admin (map editing), add them to the **admin** group under **Groups**.
-4. Open http://localhost:3000 and log in.
+Open http://localhost:3000 and sign in with Google. Accounts listed in `ADMIN_EMAILS` are admins from their first sign-in.
 
 > [!NOTE]
-> `docker-compose.override.yml` publishes ports 3000 and 8080 on the host. `docker compose` loads it automatically for local use. Platforms such as Coolify ignore it and route traffic through their own proxy.
-
-> [!TIP]
-> Keycloak is tuned for a small box: local cache, a small DB pool and a 256 MB JVM heap, capped at 512 MB (about 370 MB used idle, versus about 540 MB with Keycloak's defaults). It runs from a pre-built image (`keycloak/Dockerfile`, published to GHCR by CI) that starts in about 5 seconds instead of 13. Postgres is capped at 128 MB. With many users or sessions, raise `KEYCLOAK_MEM_LIMIT` together with the heap in `KEYCLOAK_JAVA_HEAP` (its `-Xmx`).
+> `docker-compose.override.yml` publishes port 3000 on the host. `docker compose` loads it automatically for local use. Platforms such as Coolify ignore it and route traffic through their own proxy.
 
 ---
 
 ## Local development without Docker
 
-Prerequisites: [Bun](https://bun.sh) ≥ 1.0 (or Node.js ≥ 18 with npm), plus a reachable Keycloak. The easiest option is to start only the bundled one: `docker compose up -d keycloak`.
+Prerequisites: [Bun](https://bun.sh) ≥ 1.0 (or Node.js ≥ 18 with npm).
 
 ```bash
 bun install
@@ -85,7 +70,7 @@ bun run lint
 bun run test
 ```
 
-Outside Docker the server can't resolve the `keycloak` hostname. Set `KEYCLOAK_URL=http://localhost:8080/realms/peer-space` and leave `KEYCLOAK_INTERNAL_URL` unset, so it falls back to `KEYCLOAK_URL`.
+Sign-in needs a Google OAuth client that allows `http://localhost:3000/auth/callback` (see [Sign-in with Google](#sign-in-with-google)). Put `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `SESSION_SECRET` in `.env`.
 
 ---
 
@@ -97,31 +82,16 @@ All variables are documented in [`.env.example`](.env.example). The most importa
 
 | Variable | Description | Default (compose) |
 | :--- | :--- | :--- |
-| `SESSION_SECRET` | Signs session tokens after login. **Set this.** If it's empty, a random secret is generated at boot and every restart logs everyone out. | – |
-| `KEYCLOAK_URL` | Realm URL as the **browser** sees it | `http://localhost:8080/realms/peer-space` |
-| `KEYCLOAK_INTERNAL_URL` | Realm URL as the **server** sees it (token exchange, userinfo). Defaults to `KEYCLOAK_URL` when unset. | `http://keycloak:8080/realms/peer-space` |
-| `KEYCLOAK_CLIENT_ID` | OIDC client ID | `peer-space` |
-| `KEYCLOAK_CLIENT_SECRET` | OIDC client secret. **Change this outside local dev.** | `peer-space-dev-secret` |
+| `SESSION_SECRET` | Signs session tokens and encrypts the login-state cookie. **Set this.** If it's empty, a random secret is generated at boot and every restart logs everyone out. | – |
+| `GOOGLE_CLIENT_ID` | OAuth client ID (Web application) from Google Cloud Console. Without it, sign-in returns 503. | – |
+| `GOOGLE_CLIENT_SECRET` | OAuth client secret for the same client. Without it, sign-in returns 503. | – |
+| `ADMIN_EMAILS` | Comma or space separated emails that are always admins. They can't be removed in the app. | Empty |
+| `PUBLIC_URL` | Public origin, e.g. `https://space.example.com`. Used for the redirect URI `<PUBLIC_URL>/auth/callback`. If unset, it's derived from `X-Forwarded-Proto` / `X-Forwarded-Host`. | Empty (derived) |
 | `PORT` | HTTP port inside the container | `3000` |
 | `DATA_DIR` | Where the SQLite database is stored | `/app/data` (volume `peerspace_data`) |
 | `IROH_RELAYS` | Comma-separated `https://` URL(s) of the iroh relay as browsers see it, e.g. `https://relay.example.com`. Read at startup (restart after changing it) and served at `GET /api/media-config`. See [Audio and video](#audio-and-video). | Empty (n0's public relays) |
 | `RELAY_ACCESS_TOKEN` | Shared secret that locks the iroh relay to signed-in users. Set the same value for `peerspace` and `iroh-relay` (compose does this). The app serves `/internal/relay-access` only when it is set. See [Self-hosted relay](#self-hosted-relay). | Empty (relay is open) |
 | `VITE_IROH_RELAYS` | Build-time fallback for iroh relays, comma-separated `https://` URLs. Used when `IROH_RELAYS` is unset. Baked in at build time. | n0's public relays |
-
-### Bundled Keycloak
-
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `KEYCLOAK_PUBLIC_URL` | Public base URL of Keycloak. Tokens are issued for this URL. | `http://localhost:8080` |
-| `PEERSPACE_URL` | Public URL of PeerSpace (the client's redirect URI) | `http://localhost:3000` |
-| `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` | Initial admin console account | `admin` / `admin` |
-| `KEYCLOAK_DB_PASSWORD` | Postgres password | `keycloak` |
-| `KEYCLOAK_MEM_LIMIT` / `KEYCLOAK_DB_MEM_LIMIT` | Container memory caps | `512m` / `128m` |
-| `KEYCLOAK_JAVA_HEAP` | JVM heap and metaspace options for Keycloak | `-Xms64m -Xmx256m -XX:MaxMetaspaceSize=192m ...` |
-| `KEYCLOAK_DB_POOL_MAX_SIZE` | Max database connections Keycloak opens | `10` |
-
-> [!IMPORTANT]
-> Keycloak reads `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_CLIENT_SECRET` and `PEERSPACE_URL` only on the **first** realm import. Once the realm exists, the database holds these settings. Change them in the Keycloak admin console, or run `docker compose down -v` to wipe the database and re-import (this deletes all users).
 
 ### Bundled iroh relay
 
@@ -185,33 +155,18 @@ cargo install wasm-bindgen-cli --version 0.2.128   # must match Cargo.toml
 
 ### Docker Compose (e.g. Coolify)
 
-`docker-compose.yml` is ready for production. Put a TLS-terminating reverse proxy in front of `peerspace`, `keycloak` and `iroh-relay` (see [Self-hosted relay](#self-hosted-relay)), then set at least:
+`docker-compose.yml` is ready for production. Put a TLS-terminating reverse proxy in front of `peerspace` and `iroh-relay` (see [Self-hosted relay](#self-hosted-relay)), then set at least:
 
 ```env
 SESSION_SECRET=<openssl rand -hex 32>
-PEERSPACE_URL=https://peerspace.example.com
+PUBLIC_URL=https://space.example.com
 IROH_RELAYS=https://relay.example.com
-KEYCLOAK_PUBLIC_URL=https://auth.example.com
-KEYCLOAK_URL=https://auth.example.com/realms/peer-space
-KEYCLOAK_CLIENT_SECRET=<openssl rand -hex 32>
-KEYCLOAK_ADMIN_PASSWORD=<strong password>
-KEYCLOAK_DB_PASSWORD=<strong password>
+GOOGLE_CLIENT_ID=<client id>
+GOOGLE_CLIENT_SECRET=<client secret>
+ADMIN_EMAILS=you@example.com
 ```
 
-Keycloak trusts `X-Forwarded-*` headers (`KC_PROXY_HEADERS=xforwarded`), so make sure your proxy sets them.
-
-### Using an external Keycloak
-
-To use an existing Keycloak instead of the bundled one, remove the `keycloak` and `keycloak-db` services. Then point both URLs at your realm:
-
-```env
-KEYCLOAK_URL=https://cloak.example.com/realms/<realm>
-KEYCLOAK_INTERNAL_URL=https://cloak.example.com/realms/<realm>
-KEYCLOAK_CLIENT_ID=<client>
-KEYCLOAK_CLIENT_SECRET=<secret>
-```
-
-Configure the client as described in [Admin permissions](#admin-permissions).
+Add `https://space.example.com/auth/callback` as an authorized redirect URI on the Google client (see [Sign-in with Google](#sign-in-with-google)). The proxy must set `X-Forwarded-Proto` and `X-Forwarded-Host` if you leave `PUBLIC_URL` unset.
 
 ### Plain Docker
 
@@ -220,9 +175,10 @@ docker build -t peerspace .
 docker run -d --name peerspace -p 3000:3000 \
   -v peerspace_data:/app/data -e DATA_DIR=/app/data \
   -e SESSION_SECRET="$(openssl rand -hex 32)" \
-  -e KEYCLOAK_URL="https://cloak.example.com/realms/peer-space" \
-  -e KEYCLOAK_CLIENT_ID="peer-space" \
-  -e KEYCLOAK_CLIENT_SECRET="<secret>" \
+  -e PUBLIC_URL="https://space.example.com" \
+  -e GOOGLE_CLIENT_ID="<client id>" \
+  -e GOOGLE_CLIENT_SECRET="<client secret>" \
+  -e ADMIN_EMAILS="you@example.com" \
   peerspace
 ```
 
@@ -242,30 +198,39 @@ curl http://localhost:3000/api/health
 
 ---
 
-## Keycloak
+## Sign-in with Google
 
-### Admin permissions
+PeerSpace signs users in with Google OpenID Connect directly, from the app server. There is no identity broker and no separate login service to run. Any Google account can sign in. Users are identified by their verified Google email address.
 
-PeerSpace scans the OIDC userinfo and token payloads for an `admin` or `/admin` entry in `groups`, `roles`, `realm_access`, `resource_access` or custom claims. Users with that entry get admin rights, including map editing.
+### Create the Google OAuth client
 
-The bundled realm already has this configured. For an external Keycloak, add a group mapper to your client:
+1. Open [Google Cloud Console](https://console.cloud.google.com) and select or create a project.
+2. Go to **APIs & Services** → **OAuth consent screen** and fill it in. Under **Scopes**, add `openid`, `email` and `profile`.
+3. Go to **APIs & Services** → **Credentials** → **Create credentials** → **OAuth client ID** and choose **Web application**.
+4. Under **Authorized redirect URIs**, add `https://<your-domain>/auth/callback`. For local development, also add `http://localhost:3000/auth/callback`.
+5. Copy the client ID and client secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
 
-1. **Clients** → your client → **Client scopes** → the dedicated scope → **Add mapper** → **By configuration** → **Group Membership**
-2. Set **Name** / **Token Claim Name** to `groups`, turn **Full group path** on, and turn **Add to ID token**, **Add to access token** and **Add to userinfo** on.
-3. Create an `admin` group and add your admins to it.
+The redirect URI must match the one PeerSpace builds, which is `<PUBLIC_URL>/auth/callback`. If `PUBLIC_URL` is unset, the origin comes from the `X-Forwarded-Proto` and `X-Forwarded-Host` headers of your proxy. Without `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, sign-in returns 503.
 
-Without the mapper, `groups` contains only Keycloak's default roles (`default-roles-*`, `offline_access`, `uma_authorization`), and no one becomes an admin.
+### Admins
 
-### Identity provider brokering (first broker login)
+Admin rights (map editing and the admin tools) come from two places:
 
-When users log in through an external identity provider (Google Workspace, another OIDC broker, …), you may want to stop Keycloak from creating accounts automatically. To do that, use a **First Broker Login – No Auto User** flow under **Authentication**:
+- **`ADMIN_EMAILS`** lists comma separated emails that are always admins. They can't be removed in the app, so use it for the people who must never be locked out.
+- **In the app**, any admin can grant or revoke admin rights for other users. Use the **Admins** panel, or **Make admin** / **Remove admin** in the people list. Grants are stored in the database (`admins` table).
 
-![Keycloak Authentication Flow Configuration](./assets/auth-flow.png)
+### Security notes
 
-| Step | Execution | Requirement |
-| :--- | :--- | :--- |
-| 1 | **Review Profile** (`first broker login - No auto user review profile config`) | `Required` |
-| 2 | **Detect existing broker user** | `Required` |
-| 3 | **Automatically set existing user** | `Required` |
-| 4 | **first broker login - No auto user User creation or linking** | `Alternative` |
-| 5 | **Create User If Unique** (`first broker login - No auto user create unique user config`) | `Disabled` |
+- Sign-in uses the authorization code flow with PKCE. The `state`, PKCE verifier and `nonce` are kept in an encrypted, HttpOnly login-state cookie, which is encrypted with `SESSION_SECRET`.
+- The ID token is checked for issuer, audience, expiry, `nonce` and `email_verified` before a user is signed in.
+- Any Google account can sign in, including accounts outside your organization. Access to individual spaces is still controlled by space membership.
+- Set `SESSION_SECRET` in production. It signs session tokens and encrypts the login-state cookie.
+
+### Migrating from Keycloak
+
+If you are moving from the earlier Keycloak setup:
+
+- The `keycloak` and `keycloak-db` containers and the `keycloak_db_data` volume are no longer used. After you have verified that sign-in works, remove the volume with `docker volume rm <name>`. Find the name with `docker volume ls | grep keycloak`.
+- Members of the Keycloak `admin` group must be added to `ADMIN_EMAILS`, or granted admin in the app.
+- Users are identified by email, so existing space memberships keep working as long as people sign in with the same Google email address they used in Keycloak.
+- Remove the `KEYCLOAK_*` and `PEERSPACE_URL` variables from your `.env` and deployment settings.
