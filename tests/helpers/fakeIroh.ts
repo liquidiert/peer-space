@@ -3,7 +3,7 @@
  * other by id, links deliver datagrams and stream messages to the other side, and either
  * side can be cut off to model a dropped connection.
  */
-import type { LinkEvent, MediaTransport, PeerLink, TrackOut } from '../../src/lib/media/transport';
+import type { LinkEvent, MediaTransport, PeerLink, TrackOut, TransportHooks } from '../../src/lib/media/transport';
 import { fromHex, toHex } from '../../src/lib/media/wire';
 
 let counter = 0;
@@ -27,6 +27,14 @@ export class FakeLink implements PeerLink {
   datagramsSent: Uint8Array[] = [];
   /** Make every stream refuse sends, like a congested link. */
   congested = false;
+  /**
+   * Queue stream messages in `held` instead of delivering them. Held messages stay queued
+   * after their stream is closed (the real transport drains them), and `releaseHeld` delivers
+   * them later, so tests can reorder streams relative to each other (a control message can
+   * overtake video sent before it).
+   */
+  holdStreams = false;
+  held: Uint8Array[] = [];
 
   constructor(readonly remoteId: string, readonly localId: string) {}
 
@@ -54,6 +62,10 @@ export class FakeLink implements PeerLink {
     return {
       send: (data) => {
         if (!open || this.closed || this.congested) return false;
+        if (this.holdStreams) {
+          this.held.push(data);
+          return true;
+        }
         this.other.deliver({ type: 'message', data });
         return true;
       },
@@ -61,6 +73,17 @@ export class FakeLink implements PeerLink {
         open = false;
       },
     };
+  }
+
+  /** Deliver held messages that match `filter`, in the order they were sent; the rest stay held. */
+  releaseHeld(filter: (data: Uint8Array) => boolean = () => true) {
+    const matching: Uint8Array[] = [];
+    this.held = this.held.filter((data) => {
+      if (!filter(data)) return true;
+      matching.push(data);
+      return false;
+    });
+    for (const data of matching) this.other.deliver({ type: 'message', data });
   }
 
   close() {
@@ -132,9 +155,11 @@ export class FakeNetwork {
 
   /** Transports get ids in creation order, so `order` decides who dials whom. */
   factory(prefix: string) {
-    return async () => {
+    return async (hooks?: TransportHooks) => {
       const t = new FakeTransport(this, newEndpointId(prefix));
       this.endpoints.set(t.id, t);
+      // Like createIrohTransport: the id is known before the transport resolves.
+      hooks?.onEndpointId?.(t.id);
       return t;
     };
   }

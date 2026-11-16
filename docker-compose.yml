@@ -17,6 +17,12 @@ services:
       - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET:-peer-space-dev-secret}
       - SESSION_SECRET=${SESSION_SECRET}
       - DATA_DIR=/app/data
+      # Comma-separated https URL(s) of the iroh relay as seen by browsers, e.g.
+      # https://relay.example.com. Empty means n0's public relays. Read at runtime by the server.
+      - IROH_RELAYS=${IROH_RELAYS:-}
+      # Shared secret that locks the relay to signed-in users. It must be the same value as
+      # on iroh-relay below. Empty means the relay is open. Generate one with: openssl rand -hex 32
+      - RELAY_ACCESS_TOKEN=${RELAY_ACCESS_TOKEN:-}
     volumes:
       - peerspace_data:/app/data
     expose:
@@ -101,6 +107,37 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  iroh-relay:
+    # Built from relay/Dockerfile by .github/workflows/docker-publish.yml. Serves plain HTTP on
+    # 3340 (config: relay/relay.toml). The reverse proxy terminates TLS in front of it.
+    # Set up the domain in your platform:
+    #   - Coolify: give this service its own domain (e.g. relay.example.com) routed to port 3340.
+    #   - Dokploy: add a domain for this service on port 3340 in the UI.
+    # The proxy must allow WebSocket upgrades (Traefik does by default).
+    # Then set IROH_RELAYS=https://<that-domain> on the peerspace service.
+    image: ${IROH_RELAY_IMAGE:-ghcr.io/liquidiert/peer-space-relay:latest}
+    pull_policy: always
+    restart: unless-stopped
+    # The relay is lightweight; this is a hard cap for the whole container.
+    mem_limit: ${IROH_RELAY_MEM_LIMIT:-128m}
+    environment:
+      - SERVICE_FQDN_IROHRELAY_3340
+      # Same shared secret as RELAY_ACCESS_TOKEN on peerspace. Non-empty turns on access control.
+      - IROH_RELAY_HTTP_BEARER_TOKEN=${RELAY_ACCESS_TOKEN:-}
+      # Where the relay asks PeerSpace whether an endpoint may connect. The default uses the
+      # peerspace service name on the internal Docker network. Change it only if the app is elsewhere.
+      - IROH_RELAY_ACCESS_URL=${IROH_RELAY_ACCESS_URL:-http://peerspace:3000/internal/relay-access}
+    expose:
+      - "3340"
+    healthcheck:
+      # The runtime image has no curl/wget, so probe /healthz via bash's /dev/tcp (bash is in
+      # debian:bookworm-slim).
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3340 && printf 'GET /healthz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"ok\"' <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 volumes:
   peerspace_data:

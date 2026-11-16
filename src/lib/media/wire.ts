@@ -51,6 +51,11 @@ export interface ControlPacket {
   kind: 'control';
   op: ControlOp;
   track: VideoTrackKind;
+  /**
+   * On 'stopped': the sender's next video seq when the stream ended. Frames with an earlier
+   * seq belong to the stopped stream, even if they arrive after this message.
+   */
+  seq?: number;
 }
 
 export type MediaPacket = AudioPacket | VideoPacket | ControlPacket;
@@ -90,8 +95,12 @@ export function encodeVideo(p: Omit<VideoPacket, 'kind'>): Uint8Array {
   return out;
 }
 
-export function encodeControl(op: ControlOp, track: VideoTrackKind): Uint8Array {
-  return Uint8Array.of(PACKET_CONTROL, CONTROL_IDS[op], TRACK_IDS[track]);
+export function encodeControl(op: ControlOp, track: VideoTrackKind, seq?: number): Uint8Array {
+  if (seq === undefined) return Uint8Array.of(PACKET_CONTROL, CONTROL_IDS[op], TRACK_IDS[track]);
+  const out = new Uint8Array(7);
+  out.set([PACKET_CONTROL, CONTROL_IDS[op], TRACK_IDS[track]]);
+  new DataView(out.buffer).setUint32(3, seq >>> 0);
+  return out;
 }
 
 /** Parse any media packet. Returns null for anything malformed or unknown. */
@@ -136,7 +145,11 @@ export function decodePacket(bytes: Uint8Array): MediaPacket | null {
     case PACKET_CONTROL: {
       const op = bytes[1] === 1 ? 'keyframe' : bytes[1] === 2 ? 'stopped' : null;
       const track = trackFromId(bytes[2]);
-      return op && track ? { kind: 'control', op, track } : null;
+      if (!op || !track) return null;
+      // The seq trailer is optional: an older client sends 3 bytes and ignores extra bytes
+      // from newer ones, so the trailer is only read when it is there.
+      const seq = bytes.length >= 7 ? view.getUint32(3) : undefined;
+      return seq === undefined ? { kind: 'control', op, track } : { kind: 'control', op, track, seq };
     }
   }
   return null;
@@ -146,6 +159,16 @@ export function decodePacket(bytes: Uint8Array): MediaPacket | null {
 export function seq16After(seq: number, prev: number): boolean {
   const d = (seq - prev) & 0xffff;
   return d !== 0 && d < 0x8000;
+}
+
+/**
+ * True when u32 serial number `a` comes strictly before `b`, allowing for wraparound at 2^32.
+ * Equal values are not before each other; anything more than half the range apart is read
+ * as wrapped, so 0xffffffff comes before 0.
+ */
+export function seqBefore(a: number, b: number): boolean {
+  const d = (b - a) >>> 0;
+  return d !== 0 && d < 0x80000000;
 }
 
 // --- G.711 mu-law, the fallback when the browser has no Opus encoder ---------------------

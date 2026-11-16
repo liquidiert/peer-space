@@ -2,7 +2,14 @@ import { ref, watch, onUnmounted } from 'vue';
 import type { Socket } from 'socket.io-client';
 import type { User } from '../types';
 import { AudioEngine, AudioSender, RemoteAudio } from '../lib/media/audio';
-import { createIrohTransport, type LinkEvent, type MediaTransport, type PeerLink, type TrackOut } from '../lib/media/transport';
+import {
+  createIrohTransport,
+  type LinkEvent,
+  type MediaTransport,
+  type PeerLink,
+  type TrackOut,
+  type TransportHooks,
+} from '../lib/media/transport';
 import {
   CAMERA_PROFILE,
   SCREEN_PROFILE,
@@ -16,6 +23,7 @@ import {
   encodeAudio,
   encodeControl,
   fromHex,
+  seqBefore,
   toHex,
   validAnnounce,
   type AudioCodec,
@@ -63,6 +71,7 @@ interface RemoteAudioLike {
 }
 interface VideoSenderLike {
   readonly subscriberIds: string[];
+  readonly nextSeq: number;
   start(): void;
   has(peerId: string): boolean;
   subscribe(peerId: string, out: TrackOut): void;
@@ -79,14 +88,14 @@ interface VideoReceiverLike {
 
 /** Everything that touches the network or the media stack, swappable for tests. */
 export interface MediaDeps {
-  createTransport: () => Promise<MediaTransport>;
+  createTransport: (hooks?: TransportHooks) => Promise<MediaTransport>;
   createAudioEngine: () => AudioEngineLike;
   createAudioSender: (
     engine: AudioEngineLike,
     onPacket: (codec: AudioCodec, seq: number, payload: Uint8Array) => void
   ) => AudioSenderLike;
   createRemoteAudio: (engine: AudioEngineLike) => RemoteAudioLike;
-  createVideoSender: (kind: VideoTrackKind, track: MediaStreamTrack, profile: VideoProfile) => VideoSenderLike;
+  createVideoSender: (kind: VideoTrackKind, track: MediaStreamTrack, profile: VideoProfile, firstSeq: number) => VideoSenderLike;
   createVideoReceiver: (onKeyframeNeeded: () => void, onFirstFrame: () => void) => VideoReceiverLike;
 }
 
@@ -95,7 +104,7 @@ export const defaultMediaDeps: MediaDeps = {
   createAudioEngine: () => new AudioEngine(),
   createAudioSender: (engine, onPacket) => new AudioSender(engine as AudioEngine, onPacket),
   createRemoteAudio: (engine) => new RemoteAudio(engine as AudioEngine),
-  createVideoSender: (kind, track, profile) => new VideoSender(kind, track, profile),
+  createVideoSender: (kind, track, profile, firstSeq) => new VideoSender(kind, track, profile, firstSeq),
   createVideoReceiver: (onKey, onFirst) => new VideoReceiver(onKey, onFirst),
 };
 
@@ -116,6 +125,13 @@ interface Peer {
   retryTimer: ReturnType<typeof setTimeout> | null;
   retryDelay: number;
   receivers: Map<VideoTrackKind, VideoReceiverLike>;
+  /**
+   * Video packets with a seq before this belong to a stream that was stopped, and are ignored.
+   * Set from the seq watermark on 'stopped'.
+   */
+  videoFloor: Map<VideoTrackKind, number>;
+  /** Seq of the last video packet handed to the current receiver, per track. */
+  lastVideoSeq: Map<VideoTrackKind, number>;
 }
 
 export function useProximityMedia(
@@ -168,7 +184,10 @@ export function useProximityMedia(
   function ensureTransport() {
     if (transportPromise || disposed) return;
     transportPromise = deps
-      .createTransport()
+      .createTransport({
+        // Registers the id with the server before the relay is reached (see createIrohTransport).
+        onEndpointId: (id) => socketRef.value?.emit('media:register', { endpointId: id }),
+      })
       .then((t) => {
         if (disposed) {
           t.close();
@@ -339,11 +358,29 @@ export function useProximityMedia(
       audio.push(packet);
     } else if (packet.kind === 'video') {
       if (ev.type !== 'message') return;
+      // Control overtakes video that was already queued on its stream, so frames from a
+      // stream that has been stopped can arrive after its 'stopped'. Drop them.
+      const floor = peer.videoFloor.get(packet.track);
+      if (floor !== undefined && seqBefore(packet.seq, floor)) return;
+      // Seq only increases within one stream, so going backwards means an older stream's frame.
+      const last = peer.lastVideoSeq.get(packet.track);
+      if (last !== undefined && seqBefore(packet.seq, last)) return;
+      peer.lastVideoSeq.set(packet.track, packet.seq);
       receiverFor(peer, packet.track).push(packet);
     } else if (packet.op === 'keyframe') {
       videoSenders[packet.track]?.requestKeyframe(peer.socketId);
     } else if (packet.op === 'stopped') {
-      dropReceiver(peer, packet.track);
+      if (packet.seq !== undefined) {
+        // Control can also overtake the new stream's keyframe, so a late 'stopped' must not kill
+        // a receiver that is already showing a newer stream. The seq says which stream it ends.
+        const floor = peer.videoFloor.get(packet.track);
+        if (floor === undefined || seqBefore(floor, packet.seq)) peer.videoFloor.set(packet.track, packet.seq);
+        const last = peer.lastVideoSeq.get(packet.track);
+        if (last === undefined || seqBefore(last, packet.seq)) dropReceiver(peer, packet.track);
+      } else {
+        // An older client's 'stopped' carries no seq, so there is nothing to compare against.
+        dropReceiver(peer, packet.track);
+      }
     }
   }
 
@@ -586,10 +623,72 @@ export function useProximityMedia(
     updateAllRemoteVolumes();
   });
 
+  // Zone settle: walking through a small zone must not flip people in and out of it on every
+  // step. Someone who has just entered a private zone only counts as a member once they have
+  // stayed in it for ZONE_SETTLE_MS; until then they are on the open floor at their position.
+  // Leaving a zone is never delayed, and a user first seen already in a zone counts as settled.
+  const ZONE_SETTLE_MS = 1000;
+  const zoneSeen = new Map<string, { zone: string | null; since: number }>();
+  const zoneTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function clearZoneTimer(socketId: string) {
+    const timer = zoneTimers.get(socketId);
+    if (timer !== undefined) clearTimeout(timer);
+    zoneTimers.delete(socketId);
+  }
+
+  /** Record every user's current zone and when they entered it; re-check once a new zone settles. */
+  function noteZones() {
+    const now = Date.now();
+    const people = [currentUserRef.value, ...usersRef.value];
+    const present = new Set<string>();
+    for (const user of people) {
+      if (!user?.socketId) continue;
+      present.add(user.socketId);
+      const zone = user.currentZoneId ?? null;
+      const seen = zoneSeen.get(user.socketId);
+      if (seen && seen.zone === zone) continue;
+
+      // First observation: count as settled already, so joining or reloading has no delay.
+      zoneSeen.set(user.socketId, { zone, since: seen ? now : -Infinity });
+      if (!seen || !zone) {
+        clearZoneTimer(user.socketId);
+        continue;
+      }
+
+      clearZoneTimer(user.socketId);
+      const socketId = user.socketId;
+      zoneTimers.set(
+        socketId,
+        setTimeout(() => {
+          zoneTimers.delete(socketId);
+          updateAllRemoteVolumes();
+          updatePeerVideoConnections();
+        }, ZONE_SETTLE_MS + 20)
+      );
+    }
+    for (const socketId of [...zoneSeen.keys()]) {
+      if (!present.has(socketId)) {
+        zoneSeen.delete(socketId);
+        clearZoneTimer(socketId);
+      }
+    }
+  }
+
+  /** The zone this user is a settled member of, or null if they are on the open floor. */
+  function effectiveZone(user: User): string | null {
+    const zone = user.currentZoneId ?? null;
+    if (!zone) return null;
+    const seen = zoneSeen.get(user.socketId);
+    if (!seen || seen.zone !== zone) return null;
+    return Date.now() - seen.since >= ZONE_SETTLE_MS ? zone : null;
+  }
+
   // Position / User changes -> update volumes and who gets our video
   watch(
     [() => currentUserRef.value.position, () => currentUserRef.value.currentZoneId, usersRef],
     () => {
+      noteZones();
       updateAllRemoteVolumes();
       updatePeerVideoConnections();
       pruneStaleScreenShares();
@@ -603,14 +702,25 @@ export function useProximityMedia(
     () => syncPeerConnections()
   );
 
-  // Shared distance/private-zone gate used by both audio volume and video connection proximity.
-  // Deliberately ignores mute/deafen state - those affect audio only, never whether video connects.
+  /**
+   * Shared distance/private-zone gate used by both audio volume and video connection proximity.
+   * Deliberately ignores mute/deafen state - those affect audio only, never whether video connects.
+   *
+   * Zones use settled membership (see effectiveZone): if either side is a settled member of a
+   * zone, both must be members of that same zone. Otherwise both are on the open floor and the
+   * distance limit applies. A user who has just entered a zone is still on the floor until they
+   * settle, so floor neighbours in range keep hearing them.
+   *
+   * The privacy rule is asymmetric. Leaving a zone takes effect at once, so a user is never
+   * treated as a member once they have physically left, and zone media never reaches someone
+   * who is not in the zone. Entering is delayed, so an unsettled user is not yet a member.
+   */
   function isWithinProximityRange(targetUser: User): boolean {
     const me = currentUserRef.value;
     if (!me || !targetUser) return false;
 
-    const myZone = me.currentZoneId;
-    const targetZone = targetUser.currentZoneId;
+    const myZone = effectiveZone(me);
+    const targetZone = effectiveZone(targetUser);
 
     if (myZone && targetZone) {
       return myZone === targetZone;
@@ -639,7 +749,7 @@ export function useProximityMedia(
     if (!proximityVolumeEnabled.value) return clampVolume(gain);
 
     // Private Zone: both inside the same zone counts as full volume regardless of distance
-    if (me.currentZoneId && targetUser.currentZoneId) return clampVolume(gain);
+    if (effectiveZone(me) && effectiveZone(targetUser)) return clampVolume(gain);
 
     // Both on main open floor -> linear distance attenuation (1.0 at distance 0, 0.0 at MAX_AUDIO_DISTANCE)
     const dist = Math.hypot(me.position.x - targetUser.position.x, me.position.y - targetUser.position.y);
@@ -663,6 +773,8 @@ export function useProximityMedia(
   // VIDEO
   // ==========================================
   const videoSenders: Record<VideoTrackKind, VideoSenderLike | null> = { camera: null, screen: null };
+  // A restarted sender continues the seq so receivers' watermarks never hide it.
+  const nextVideoSeq: Record<VideoTrackKind, number> = { camera: 0, screen: 0 };
   /** Subscriptions whose stream is still being opened, as `${kind}:${socketId}`. */
   const openingStreams = new Set<string>();
 
@@ -703,16 +815,30 @@ export function useProximityMedia(
       receiver.close();
       peer.receivers.delete(kind);
     }
+    peer.lastVideoSeq.delete(kind);
     setTile(kind, peer.socketId, null);
   }
 
   /** Whether `peer` should be receiving our `kind` track right now. */
+  /**
+   * Whether `user` is in the same room as us for screen sharing: the same settled zone, or both
+   * on the open floor (no distance limit there).
+   */
+  function sameRoom(user: User): boolean {
+    const me = currentUserRef.value;
+    if (!me) return false;
+    const myZone = effectiveZone(me);
+    // Still inside a zone but not settled yet: that is not the floor, so the screen stays in.
+    if (me.currentZoneId && !myZone) return false;
+    return myZone === effectiveZone(user);
+  }
+
   function wantsVideo(kind: VideoTrackKind, peer: Peer): boolean {
     if (!peer.link) return false;
     const user = usersRef.value.find((u) => u.socketId === peer.socketId);
     if (!user) return false;
-    // Screen share goes to everyone in the space; camera only to people in range.
-    return kind === 'screen' ? isScreenSharing.value : isVideoOn.value && isWithinProximityRange(user);
+    // Screen share stays in the room it is shared from; camera only goes to people in range.
+    return kind === 'screen' ? isScreenSharing.value && sameRoom(user) : isVideoOn.value && isWithinProximityRange(user);
   }
 
   async function subscribe(kind: VideoTrackKind, peer: Peer) {
@@ -736,7 +862,7 @@ export function useProximityMedia(
     const sender = videoSenders[kind];
     if (!sender?.has(peer.socketId)) return;
     sender.unsubscribe(peer.socketId);
-    peer.control?.send(encodeControl('stopped', kind));
+    peer.control?.send(encodeControl('stopped', kind, sender.nextSeq));
   }
 
   // Start/stop sending each of our video tracks per peer, by proximity (camera) or
@@ -758,8 +884,9 @@ export function useProximityMedia(
     const sender = videoSenders[kind];
     if (!sender) return;
     for (const socketId of sender.subscriberIds) {
-      peers.get(socketId)?.control?.send(encodeControl('stopped', kind));
+      peers.get(socketId)?.control?.send(encodeControl('stopped', kind, sender.nextSeq));
     }
+    nextVideoSeq[kind] = sender.nextSeq;
     sender.stop();
     videoSenders[kind] = null;
   }
@@ -792,7 +919,7 @@ export function useProximityMedia(
 
         const track = stream.getVideoTracks()[0];
         if (track) {
-          videoSenders.camera = deps.createVideoSender('camera', track, CAMERA_PROFILE);
+          videoSenders.camera = deps.createVideoSender('camera', track, CAMERA_PROFILE, nextVideoSeq.camera);
           videoSenders.camera.start();
           updatePeerVideoConnections();
         }
@@ -897,7 +1024,7 @@ export function useProximityMedia(
       });
       if (track) {
         (track as any).contentHint = 'detail';
-        videoSenders.screen = deps.createVideoSender('screen', track, SCREEN_PROFILE);
+        videoSenders.screen = deps.createVideoSender('screen', track, SCREEN_PROFILE, nextVideoSeq.screen);
         videoSenders.screen.start();
         updatePeerVideoConnections();
       }
@@ -1026,6 +1153,7 @@ export function useProximityMedia(
   // Called whenever the user list changes (join, leave, announce). Reconciles the peer set
   // with it: dials new peers, picks up links that arrived early, and tears down departed ones.
   function syncPeerConnections() {
+    noteZones();
     const myId = currentUserRef.value.socketId;
     if (!myId) return;
     ensureTransport();
@@ -1064,6 +1192,8 @@ export function useProximityMedia(
           retryTimer: null,
           retryDelay: RETRY_MIN_MS,
           receivers: new Map(),
+          videoFloor: new Map(),
+          lastVideoSeq: new Map(),
         };
         peers.set(user.socketId, peer);
         setPeerConnectionState(user.socketId, 'connecting');
@@ -1099,6 +1229,8 @@ export function useProximityMedia(
 
   onUnmounted(() => {
     disposed = true;
+    zoneTimers.forEach((timer) => clearTimeout(timer));
+    zoneTimers.clear();
     if (typeof navigator !== 'undefined' && navigator.mediaDevices) {
       navigator.mediaDevices.removeEventListener?.('devicechange', refreshVideoDevices);
     }

@@ -9,6 +9,7 @@ import {
   mulawEncode,
   resample,
   seq16After,
+  seqBefore,
   validAnnounce,
 } from '../src/lib/media/wire';
 import { fitDimensions } from '../src/lib/media/video';
@@ -47,6 +48,26 @@ describe('media wire format', () => {
   it('round-trips control messages', () => {
     expect(decodePacket(encodeControl('keyframe', 'camera'))).toEqual({ kind: 'control', op: 'keyframe', track: 'camera' });
     expect(decodePacket(encodeControl('stopped', 'screen'))).toEqual({ kind: 'control', op: 'stopped', track: 'screen' });
+  });
+
+  it('round-trips a stopped message with the sender\'s seq watermark', () => {
+    const bytes = encodeControl('stopped', 'camera', 0x01020304);
+    expect(bytes).toHaveLength(7);
+    expect(decodePacket(bytes)).toEqual({ kind: 'control', op: 'stopped', track: 'camera', seq: 0x01020304 });
+  });
+
+  it('decodes a stopped message without a seq as having no seq', () => {
+    const p = decodePacket(encodeControl('stopped', 'camera'));
+    expect(p).toEqual({ kind: 'control', op: 'stopped', track: 'camera' });
+    expect((p as { seq?: number }).seq).toBeUndefined();
+  });
+
+  it('orders u32 seq values with wraparound', () => {
+    expect(seqBefore(1, 2)).toBe(true);
+    expect(seqBefore(2, 1)).toBe(false);
+    expect(seqBefore(5, 5)).toBe(false);
+    expect(seqBefore(0xffffffff, 0)).toBe(true);
+    expect(seqBefore(0, 0xffffffff)).toBe(false);
   });
 
   it('rejects malformed and unknown packets instead of throwing', () => {

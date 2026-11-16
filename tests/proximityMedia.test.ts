@@ -111,11 +111,14 @@ describe('proximity media over iroh', () => {
     await settle();
     expect(b.api.remoteVideoStreams.value.has(A)).toBe(true);
 
-    // Into a private zone the other one isn't in: out of range regardless of distance.
+    // Into a private zone the other one isn't in: out of range regardless of distance, once
+    // B has settled in the zone.
+    vi.useFakeTimers();
     room.move(B, 2, 1, 'zone-1');
-    await settle();
+    await vi.advanceTimersByTimeAsync(1100);
     expect(cam.subscriberIds).toEqual([]);
     expect(b.api.remoteVideoStreams.value.has(A)).toBe(false);
+    vi.useRealTimers();
 
     room.move(B, 2, 1, null);
     await settle();

@@ -25,6 +25,12 @@ import { createDefaultOfficeMap, createBeachRetreatMap } from "./src/mapsData";
 import { initWorkspaceDatabase } from "./src/db";
 import { createSessionToken, verifySessionToken } from "./src/lib/session";
 import { validAnnounce } from "./src/lib/media/wire";
+import {
+  checkBearer,
+  isEndpointIdHex,
+  RelayAccessRegistry,
+} from "./src/lib/relayAccess";
+import { parseRelayList } from "./src/lib/media/transport";
 import { canDeleteNote } from "./src/lib/notePermissions";
 import {
   canClaimDesk,
@@ -41,6 +47,7 @@ import {
   type GameTableGame,
 } from "./src/lib/gameTable";
 import { isTileWalkable } from "./src/lib/pathfinding";
+import { privateZoneIdAt } from "./src/lib/privateZones";
 import {
   canEnterSpace,
   normalizeEmails,
@@ -58,6 +65,8 @@ async function startServer() {
 
   // In-memory application state
   const users: Map<string, User> = new Map(); // socket.id -> User
+  // Which iroh endpoint each joined socket may use on the self-hosted relay (see relayAccess.ts).
+  const relayAccess = new RelayAccessRegistry();
   // Per (from, to) pair cooldown for the chime feature, enforced server-side so a
   // misbehaving/hacked client can't spam someone regardless of any client-side disabling.
   const lastChimeAt: Map<string, number> = new Map();
@@ -198,7 +207,7 @@ async function startServer() {
     res: import("http").ServerResponse,
   ) => {
     const url = req.url || "";
-    if (url.startsWith("/api/") || url.startsWith("/auth/")) {
+    if (url.startsWith("/api/") || url.startsWith("/auth/") || url.startsWith("/internal/")) {
       listener(req, res);
     } else if (vite) {
       vite.middlewares(req, res, () => {
@@ -235,36 +244,6 @@ async function startServer() {
       methods: ["GET", "POST"],
     },
   });
-
-  // Helper: Find private zone for coordinates
-  function getPrivateZoneId(map: GridMap, x: number, y: number): string | null {
-    // 1. Explicit private zones
-    for (const zone of map.privateZones) {
-      if (
-        x >= zone.x &&
-        x < zone.x + zone.width &&
-        y >= zone.y &&
-        y < zone.y + zone.height
-      ) {
-        return zone.id;
-      }
-    }
-    // 2. Automatic private zone for 2x1 desks (lower 2x1 standing area y = desk.y + height, and desk tile itself)
-    for (const obj of map.objects) {
-      if (obj.type === "desk") {
-        const deskW = obj.width || 2;
-        const deskH = obj.height || 1;
-        if (
-          x >= obj.x &&
-          x < obj.x + deskW &&
-          (y === obj.y || y === obj.y + deskH)
-        ) {
-          return `desk_zone_${obj.id}`;
-        }
-      }
-    }
-    return null;
-  }
 
   // Helper: is this tile currently stood on by some other connected user?
   function isOccupiedByOtherUser(
@@ -324,67 +303,6 @@ async function startServer() {
       }
     }
     return preferred; // give up - overlap is better than an infinite/failed join
-  }
-
-  // Calculate proximity and emit peer connections list to all users
-  function updateSpatialProximity(spaceId: string | undefined) {
-    if (!spaceMap(spaceId)) return;
-
-    const userList = usersIn(spaceId);
-    const PROXIMITY_TILE_RADIUS = 7; // Maximum tile distance for proximity voice
-
-    userList.forEach((userA) => {
-      // Dummies are completely invisible to non-admins
-      if (userA.isDummy && !userA.isAdmin) return;
-
-      const activePeers: {
-        peerId: string;
-        distance: number;
-        inSameZone: boolean;
-      }[] = [];
-
-      userList.forEach((userB) => {
-        if (userA.socketId === userB.socketId) return;
-
-        // Dummies are completely invisible to non-admins
-        if (userB.isDummy && !userA.isAdmin) return;
-
-        const zoneA = userA.currentZoneId;
-        const zoneB = userB.currentZoneId;
-
-        // Private zone logic:
-        // If either user is in a private zone, they can ONLY connect if they are in the SAME private zone.
-        if (zoneA || zoneB) {
-          if (zoneA && zoneB && zoneA === zoneB) {
-            // Both in same private zone -> Always connected regardless of grid distance!
-            activePeers.push({
-              peerId: userB.socketId,
-              distance: 0,
-              inSameZone: true,
-            });
-          }
-          // If in different zones or one is outside -> no voice connection
-          return;
-        }
-
-        // Neither is in a private zone -> Use Euclidean grid tile proximity
-        const dist = Math.hypot(
-          userA.position.x - userB.position.x,
-          userA.position.y - userB.position.y,
-        );
-        if (dist <= PROXIMITY_TILE_RADIUS) {
-          activePeers.push({
-            peerId: userB.socketId,
-            distance: dist,
-            inSameZone: false,
-          });
-        }
-      });
-
-      io.to(userA.socketId).emit("spatial:proximity_update", {
-        activePeers,
-      });
-    });
   }
 
   // Emit an event only to connected admin users (excluding dummies)
@@ -625,7 +543,7 @@ async function startServer() {
           socket.id,
         );
 
-        const initialZone = getPrivateZoneId(
+        const initialZone = privateZoneIdAt(
           map,
           startPosition.x,
           startPosition.y,
@@ -695,7 +613,6 @@ async function startServer() {
 
         // Notify others in the same space
         socket.to(room(space.id)).emit("user:joined", newUser);
-        updateSpatialProximity(space.id);
       },
     );
 
@@ -786,7 +703,7 @@ async function startServer() {
         // Update position & zone
         user.position = { x: data.x, y: data.y };
         user.direction = data.direction;
-        user.currentZoneId = getPrivateZoneId(map, data.x, data.y);
+        user.currentZoneId = privateZoneIdAt(map, data.x, data.y);
         user.lastSeen = Date.now();
 
         // Broadcast move to all users
@@ -796,8 +713,6 @@ async function startServer() {
           direction: user.direction,
           currentZoneId: user.currentZoneId,
         });
-
-        updateSpatialProximity(spaceIdOf(socket.id));
       },
     );
 
@@ -839,7 +754,18 @@ async function startServer() {
       );
       if (taken) return;
       user.media = { endpointId: data.endpointId, relay: data.relay, sig: data.sig };
+      relayAccess.register(socket.id, data.endpointId);
       toSpace(socket.id).emit("user:updated", user);
+    });
+
+    // The client registers its endpoint id as soon as the endpoint is spawned, before it waits
+    // for the relay: a locked relay admits only ids this server knows, so the announce (which
+    // comes after online()) would be too late. Only joined users (signed in) may register.
+    socket.on("media:register", (data: unknown) => {
+      if (!users.has(socket.id)) return;
+      const endpointId = (data as { endpointId?: unknown } | null)?.endpointId;
+      if (typeof endpointId !== "string") return;
+      relayAccess.register(socket.id, endpointId.toLowerCase());
     });
 
     // Handle Spatial / Room Chat
@@ -1268,7 +1194,7 @@ async function startServer() {
 
       // Recalculate zone for all users
       usersIn(sender.spaceId).forEach((u) => {
-        u.currentZoneId = getPrivateZoneId(map, u.position.x, u.position.y);
+        u.currentZoneId = privateZoneIdAt(map, u.position.x, u.position.y);
       });
 
       broadcastUsersWithFilter(sender.spaceId, "map:zones_updated", (userList) => ({
@@ -1276,7 +1202,6 @@ async function startServer() {
         users: userList,
       }));
 
-      updateSpatialProximity(spaceIdOf(socket.id));
       persistMap(map);
     });
 
@@ -1291,7 +1216,7 @@ async function startServer() {
 
       // Recalculate zone for all users
       usersIn(sender.spaceId).forEach((u) => {
-        u.currentZoneId = getPrivateZoneId(map, u.position.x, u.position.y);
+        u.currentZoneId = privateZoneIdAt(map, u.position.x, u.position.y);
       });
 
       broadcastUsersWithFilter(spaceIdOf(socket.id), "map:zones_updated", (userList) => ({
@@ -1299,7 +1224,6 @@ async function startServer() {
         users: userList,
       }));
 
-      updateSpatialProximity(spaceIdOf(socket.id));
       persistMap(map);
     });
 
@@ -1391,7 +1315,7 @@ async function startServer() {
         // Teleport everyone in this space to spawn
         usersIn(space.id).forEach((u) => {
           u.position = { ...newMap.spawnPoint };
-          u.currentZoneId = getPrivateZoneId(
+          u.currentZoneId = privateZoneIdAt(
             newMap,
             u.position.x,
             u.position.y,
@@ -1402,8 +1326,6 @@ async function startServer() {
           currentMap: newMap,
           users: userList,
         }));
-
-        updateSpatialProximity(spaceIdOf(socket.id));
       }
     });
 
@@ -1412,9 +1334,9 @@ async function startServer() {
       console.log(`User disconnected: ${socket.id}`);
       const leftSpaceId = spaceIdOf(socket.id);
       users.delete(socket.id);
+      relayAccess.unregister(socket.id);
       if (leftSpaceId) {
         io.to(room(leftSpaceId)).emit("user:left", socket.id);
-        updateSpatialProximity(leftSpaceId);
       }
 
       // Drop any chime cooldown entries involving this socket so the map doesn't grow forever.
@@ -1475,7 +1397,7 @@ async function startServer() {
           isScreenSharing: false,
           isAdmin: true,
           isDummy: true,
-          currentZoneId: getPrivateZoneId(map, payload.x, payload.y),
+          currentZoneId: privateZoneIdAt(map, payload.x, payload.y),
           lastSeen: Date.now(),
           presenceStatus: payload.presenceStatus || "available",
         };
@@ -1483,7 +1405,6 @@ async function startServer() {
         dummyUser.spaceId = sender.spaceId;
         users.set(dummyId, dummyUser);
         emitToAdmins(spaceIdOf(socket.id), "user:joined", dummyUser);
-        updateSpatialProximity(spaceIdOf(socket.id));
       },
     );
 
@@ -1507,7 +1428,7 @@ async function startServer() {
 
         dummy.position = { x: payload.x, y: payload.y };
         if (payload.direction) dummy.direction = payload.direction;
-        dummy.currentZoneId = getPrivateZoneId(map, payload.x, payload.y);
+        dummy.currentZoneId = privateZoneIdAt(map, payload.x, payload.y);
 
         emitToAdmins(spaceIdOf(socket.id), "user:moved", {
           userId: dummy.socketId,
@@ -1515,7 +1436,6 @@ async function startServer() {
           direction: dummy.direction,
           currentZoneId: dummy.currentZoneId,
         });
-        updateSpatialProximity(spaceIdOf(socket.id));
       },
     );
 
@@ -1571,7 +1491,6 @@ async function startServer() {
 
       users.delete(payload.dummyId);
       emitToAdmins(spaceIdOf(socket.id), "user:left", payload.dummyId);
-      updateSpatialProximity(spaceIdOf(socket.id));
     });
 
     // Admin triggers dummy to say something in chat (only visible to admins!)
@@ -1621,6 +1540,28 @@ async function startServer() {
   // REST API Endpoints with Hono
   app.get("/api/health", (c) => {
     return c.json({ status: "ok", activeUsers: users.size });
+  });
+
+  // Relay list for proximity audio/video, read once at startup from IROH_RELAYS. Public like
+  // /api/health: relay URLs aren't secret, and the client only asks after joining.
+  const mediaRelays = parseRelayList(process.env.IROH_RELAYS);
+  app.get("/api/media-config", (c) => {
+    return c.json({ relays: mediaRelays });
+  });
+
+  // Access hook for the self-hosted iroh relay (HTTP access mode). The relay POSTs here, with
+  // no body, once per incoming connection, and admits the endpoint only on a 200 "true".
+  // Off unless RELAY_ACCESS_TOKEN is set; the relay must send the same token as a Bearer.
+  const relayAccessToken = process.env.RELAY_ACCESS_TOKEN ?? "";
+  app.post("/internal/relay-access", (c) => {
+    if (!relayAccessToken) return c.text("Not found", 404);
+    if (!checkBearer(c.req.header("Authorization"), relayAccessToken)) {
+      return c.text("Unauthorized", 401);
+    }
+    const nodeId = (c.req.header("X-Iroh-NodeId") ?? "").toLowerCase();
+    const allowed = isEndpointIdHex(nodeId) && relayAccess.allows(nodeId);
+    console.log(`[relay-access] ${allowed ? "allow" : "deny"} ${nodeId.slice(0, 8)}`);
+    return c.text(allowed ? "true" : "false", 200);
   });
 
   app.get("/api/workspace/sqlite-info", (c) => {

@@ -22,6 +22,10 @@ jobs:
             context: keycloak
             file: keycloak/Dockerfile
             image: ghcr.io/${{ github.repository }}-keycloak
+          - name: relay
+            context: relay
+            file: relay/Dockerfile
+            image: ghcr.io/${{ github.repository }}-relay
     steps:
       - uses: actions/checkout@v4
 

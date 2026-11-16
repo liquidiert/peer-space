@@ -34,6 +34,7 @@ The compose setup runs everything you need:
 | `peerspace` | The app | http://localhost:3000 |
 | `keycloak` | Login / identity provider | http://localhost:8080 |
 | `keycloak-db` | Postgres database for Keycloak | internal only |
+| `iroh-relay` | Relay for audio and video (see [Audio and video](#audio-and-video)) | internal, exposed through your proxy |
 
 ```bash
 # 1. Set a session secret (required, see Configuration)
@@ -103,7 +104,9 @@ All variables are documented in [`.env.example`](.env.example). The most importa
 | `KEYCLOAK_CLIENT_SECRET` | OIDC client secret. **Change this outside local dev.** | `peer-space-dev-secret` |
 | `PORT` | HTTP port inside the container | `3000` |
 | `DATA_DIR` | Where the SQLite database is stored | `/app/data` (volume `peerspace_data`) |
-| `VITE_IROH_RELAYS` | Comma-separated `https://` URLs of iroh relays for audio/video. Baked in at build time. See [Audio and video](#audio-and-video). | n0's public relays |
+| `IROH_RELAYS` | Comma-separated `https://` URL(s) of the iroh relay as browsers see it, e.g. `https://relay.example.com`. Read at startup (restart after changing it) and served at `GET /api/media-config`. See [Audio and video](#audio-and-video). | Empty (n0's public relays) |
+| `RELAY_ACCESS_TOKEN` | Shared secret that locks the iroh relay to signed-in users. Set the same value for `peerspace` and `iroh-relay` (compose does this). The app serves `/internal/relay-access` only when it is set. See [Self-hosted relay](#self-hosted-relay). | Empty (relay is open) |
+| `VITE_IROH_RELAYS` | Build-time fallback for iroh relays, comma-separated `https://` URLs. Used when `IROH_RELAYS` is unset. Baked in at build time. | n0's public relays |
 
 ### Bundled Keycloak
 
@@ -120,17 +123,51 @@ All variables are documented in [`.env.example`](.env.example). The most importa
 > [!IMPORTANT]
 > Keycloak reads `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_CLIENT_SECRET` and `PEERSPACE_URL` only on the **first** realm import. Once the realm exists, the database holds these settings. Change them in the Keycloak admin console, or run `docker compose down -v` to wipe the database and re-import (this deletes all users).
 
+### Bundled iroh relay
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `IROH_RELAY_MEM_LIMIT` | Container memory cap for the `iroh-relay` service | `128m` |
+| `IROH_RELAY_ACCESS_URL` | Where the relay checks each endpoint when `RELAY_ACCESS_TOKEN` is set. Must start with `http://` or `https://`. Quotes, backslashes, spaces, brackets, `|` and `&` are not allowed. | `http://peerspace:3000/internal/relay-access` |
+
 ---
 
 ## Audio and video
 
-Proximity audio, camera and screen share run peer to peer over [iroh](https://iroh.computer), compiled to WebAssembly from [`crates/peer-media`](crates/peer-media). WebRTC is not used.
+Proximity audio, camera and screen share run between peers over [iroh](https://iroh.computer), compiled to WebAssembly from [`crates/peer-media`](crates/peer-media). WebRTC is not used.
 
 - Every browser starts an iroh endpoint and announces its endpoint id over Socket.IO (`media:announce`). The announce is signed with the endpoint's key over the socket id, and every client checks it, so nobody can claim someone else's endpoint. Peers then dial each other by id. There is no offer/answer or ICE exchange, and a reconnect is just another dial. The lower endpoint id dials.
-- Browsers can't open UDP sockets, so all media goes through an iroh relay. Without `VITE_IROH_RELAYS` the client uses n0's public relays, which are fine for trying things out. For real use, run your own [`iroh-relay`](https://github.com/n0-computer/iroh/tree/main/iroh-relay) and set `VITE_IROH_RELAYS=https://relay.example.com`.
+- Browsers can't open UDP sockets, so all media goes through an iroh relay. The browser uses the relay from `IROH_RELAYS` (served by the server), then the build-time `VITE_IROH_RELAYS`, then n0's public relays. The public relays are fine for trying things out. For real use, run your own relay as described in [Self-hosted relay](#self-hosted-relay).
 - **Audio**: 20 ms Opus frames (32 kb/s, DTX) sent as QUIC datagrams, so a lost packet never holds up the next one. Each peer has a small jitter buffer (60 to 240 ms). Voice only goes to people in earshot who aren't deafened, and a muted mic sends nothing. Browsers without a WebCodecs Opus encoder fall back to 16 kHz mu-law.
-- **Video**: the camera (640×480, 15 fps) and the screen (up to 1080p, 8 fps, tuned for text) are each encoded once and fanned out to all viewers, not once per viewer. The camera only goes to people in range. The screen goes to everyone in the space. Each track has its own ordered QUIC stream with a 3-frame queue. When a viewer's link can't keep up, that viewer's frames are dropped until the next keyframe instead of piling up delay. Other viewers aren't affected. Codec preference: H.264 baseline, then VP8, then VP9.
+- **Video**: the camera (640×480, 15 fps) and the screen (up to 1080p, 8 fps, tuned for text) are each encoded once and fanned out to all viewers, not once per viewer. The camera only goes to people in range. Screen shares follow zones (see [Zones and proximity](#zones-and-proximity)). Each track has its own ordered QUIC stream with a 3-frame queue. When a viewer's link can't keep up, that viewer's frames are dropped until the next keyframe instead of piling up delay. Other viewers aren't affected. Codec preference: H.264 baseline, then VP8, then VP9.
 - Audio and video need WebCodecs: current Chrome, Edge, Firefox and Safari.
+
+### Self-hosted relay
+
+The compose file includes an `iroh-relay` service. It is built from [`relay/Dockerfile`](relay/Dockerfile) (iroh-relay 1.3.0, which must match the iroh version in [`crates/peer-media/Cargo.lock`](crates/peer-media/Cargo.lock)) and published to `ghcr.io/liquidiert/peer-space-relay` by the existing workflow. It serves plain HTTP on port 3340, configured in [`relay/relay.toml`](relay/relay.toml) (open) or [`relay/relay-locked.toml.in`](relay/relay-locked.toml.in) (access-controlled, see below). Your reverse proxy terminates TLS. QUIC/UDP and metrics are off, so only one port is used.
+
+1. **Coolify:** give the `iroh-relay` service its own domain (e.g. `relay.example.com`) on port 3340. The compose file has `SERVICE_FQDN_IROHRELAY_3340` for this.
+2. **Dokploy:** add a domain for the `iroh-relay` service, port 3340, in the UI.
+3. The proxy must serve that domain over HTTPS and allow WebSocket upgrades (Traefik does by default).
+4. Set `IROH_RELAYS=https://relay.example.com` on `peerspace` and redeploy.
+5. Check it: `https://relay.example.com/healthz` should return `{"status":"ok",...}`.
+
+- Media stays end-to-end encrypted. The relay only forwards packets it can't read.
+- Browsers can't make direct peer-to-peer connections (no UDP), so all media passes through the relay. Bandwidth is the main cost. Each sender→viewer stream is up to about 450 kbit/s for a camera and 1.2 Mbit/s for a screen share, in and out of the relay. For example, 8 people with cameras in one zone come to about 25 Mbit/s in and 25 Mbit/s out. CPU and RAM use is small.
+- The relay is open by default: anyone who knows the URL can relay through it. To lock it, set one shared secret, `RELAY_ACCESS_TOKEN`, in the environment. Compose passes it to both `peerspace` and `iroh-relay`. Generate it with `openssl rand -hex 32`:
+
+  ```env
+  RELAY_ACCESS_TOKEN=<openssl rand -hex 32>
+  ```
+
+- With `RELAY_ACCESS_TOKEN` set, the relay admits only endpoints of users who are currently signed in to PeerSpace. When it is unset, the relay is open. Restart the stack after changing it.
+- The check runs when a connection is made. A user who leaves keeps an open relay connection until it drops.
+
+### Zones and proximity
+
+- Entering a private zone takes effect after you have stayed in it for 1 second. Walking through doesn't connect you to the zone, and you stay connected to nearby people on the floor in the meantime. Leaving a zone takes effect immediately.
+- Screen shares stay in their zone. A share from inside a zone goes only to people settled in that zone. A share on the open floor goes to everyone on the floor, at any distance.
+- Click-to-walk routes avoid passing through private zones (including desk zones) when a reasonable detour exists.
 
 ### Rebuilding the wasm module
 
@@ -148,11 +185,12 @@ cargo install wasm-bindgen-cli --version 0.2.128   # must match Cargo.toml
 
 ### Docker Compose (e.g. Coolify)
 
-`docker-compose.yml` is ready for production. Put a TLS-terminating reverse proxy in front of both `peerspace` and `keycloak`, then set at least:
+`docker-compose.yml` is ready for production. Put a TLS-terminating reverse proxy in front of `peerspace`, `keycloak` and `iroh-relay` (see [Self-hosted relay](#self-hosted-relay)), then set at least:
 
 ```env
 SESSION_SECRET=<openssl rand -hex 32>
 PEERSPACE_URL=https://peerspace.example.com
+IROH_RELAYS=https://relay.example.com
 KEYCLOAK_PUBLIC_URL=https://auth.example.com
 KEYCLOAK_URL=https://auth.example.com/realms/peer-space
 KEYCLOAK_CLIENT_SECRET=<openssl rand -hex 32>

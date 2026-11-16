@@ -127,8 +127,13 @@ export class FakeVideoSender {
   subs = new Map<string, { out: TrackOut; needsKey: boolean }>();
   keyframeRequests: Array<string | undefined> = [];
   stopped = false;
-  private seq = 0;
-  constructor(readonly kind: VideoTrackKind, public track: MediaStreamTrack) {}
+  private seq: number;
+  constructor(readonly kind: VideoTrackKind, public track: MediaStreamTrack, firstSeq = 0) {
+    this.seq = firstSeq;
+  }
+  get nextSeq() {
+    return this.seq;
+  }
   get subscriberIds() {
     return [...this.subs.keys()];
   }
@@ -215,8 +220,8 @@ export function fakeMediaDeps(createTransport: MediaDeps['createTransport']) {
       created.remoteAudio.push(r);
       return r;
     },
-    createVideoSender: (kind, track) => {
-      const s = new FakeVideoSender(kind, track);
+    createVideoSender: (kind, track, _profile, firstSeq) => {
+      const s = new FakeVideoSender(kind, track, firstSeq);
       created.videoSenders.push(s);
       return s;
     },

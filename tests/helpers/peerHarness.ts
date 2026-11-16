@@ -122,7 +122,7 @@ export class Room {
     const { deps, created } = fakeMediaDeps(this.net.factory(prefix));
     let transport: FakeTransport | undefined;
     const createTransport = deps.createTransport;
-    deps.createTransport = async () => (transport = (await createTransport()) as FakeTransport);
+    deps.createTransport = async (hooks) => (transport = (await createTransport(hooks)) as FakeTransport);
 
     const socket = ref<any>({
       id: user.socketId,

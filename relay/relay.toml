@@ -1,0 +1,23 @@
+# iroh relay configuration for PeerSpace browser audio/video.
+# Used by relay/Dockerfile via `--config-path`. Keys checked against iroh-relay 1.3.0
+# (src/main.rs, struct Config).
+
+# Run the relay HTTP server (this is the default; set explicitly so it is visible here).
+enable_relay = true
+
+# Plain HTTP on all IPv4 interfaces, port 3340. The reverse proxy in front of this
+# container (Traefik in Coolify/Dokploy) terminates HTTPS and forwards to this port.
+# The browser connects to https://<relay-domain>/relay, which the proxy turns into a
+# WebSocket upgrade to this server. Because there is no [tls] section, the relay serves
+# plain HTTP and does not try to obtain or load certificates.
+http_bind_addr = "0.0.0.0:3340"
+
+# QUIC address discovery is off (this is the default). Browsers cannot speak QUIC or
+# raw UDP, and QUIC address discovery needs TLS certificates, which this container
+# does not have. Keeping it off means no UDP port has to be opened or published.
+enable_quic_addr_discovery = false
+
+# The metrics server is on by default and would bind a second port (9090). It is not
+# exposed, so it is turned off here. Re-enable it only if you need Prometheus metrics,
+# and keep that port internal.
+enable_metrics = false

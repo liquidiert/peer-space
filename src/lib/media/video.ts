@@ -68,6 +68,93 @@ async function pickConfig(width: number, height: number, profile: VideoProfile, 
 export const hasWebCodecsVideo = () =>
   typeof (globalThis as any).VideoEncoder === 'function' && typeof (globalThis as any).VideoDecoder === 'function';
 
+/**
+ * Decides when the encoder should emit a keyframe. Pure: no DOM or WebCodecs, and every
+ * time-dependent call takes `now` in ms. Keyframes go to every subscriber, so a keyframe that
+ * one congested link needs must not be forced on the whole room on every frame.
+ */
+export class KeyframePolicy {
+  /** Last keyframe the encoder actually emitted; -Infinity so the first frame is a keyframe. */
+  private lastKeyAt = -Infinity;
+  private urgent = false;
+  private requested = false;
+  /** Per-subscriber congestion: backoff length, earliest retry, and whether a trigger is pending. */
+  private congestion = new Map<string, { backoff: number; retryAt: number; pending: boolean }>();
+
+  /**
+   * @param intervalMs regular keyframe period; also caps the congestion backoff.
+   * @param minGapMs shortest spacing between non-urgent keyframes; also the first backoff.
+   */
+  constructor(
+    private intervalMs: number,
+    private minGapMs = 1000
+  ) {}
+
+  /** A keyframe is wanted. Requests coalesce, and wait until minGapMs has passed since the last keyframe. */
+  request(_now: number) {
+    this.requested = true;
+  }
+
+  /** The next frame must be a keyframe, regardless of the gap (encoder configure, track swap). */
+  requestUrgent() {
+    this.urgent = true;
+  }
+
+  /**
+   * A send to this subscriber was refused. Its keyframe trigger is honoured only once the backoff
+   * has run out. Refusals inside an open backoff window are the same episode and don't escalate it.
+   */
+  congested(subId: string, now: number) {
+    let s = this.congestion.get(subId);
+    if (!s) {
+      s = { backoff: 0, retryAt: 0, pending: false };
+      this.congestion.set(subId, s);
+    }
+    if (now >= s.retryAt) {
+      s.backoff = Math.min(this.intervalMs, s.backoff === 0 ? this.minGapMs : s.backoff * 2);
+      s.retryAt = now + s.backoff;
+    }
+    s.pending = true;
+  }
+
+  /** A send to this subscriber succeeded: its backoff and pending trigger reset. */
+  delivered(subId: string) {
+    this.congestion.delete(subId);
+  }
+
+  /** The subscriber was removed: its congestion no longer affects keyframes. */
+  forget(subId: string) {
+    this.congestion.delete(subId);
+  }
+
+  /**
+   * Whether the frame captured at `now` should be a keyframe. Clears the pending flags it
+   * satisfies. A keyframe goes to everyone, so it satisfies every pending congestion trigger too.
+   * Does not record the keyframe: call keyEmitted() when the encoder outputs one.
+   */
+  next(now: number): boolean {
+    const sinceKey = now - this.lastKeyAt;
+    const periodic = sinceKey >= this.intervalMs;
+    const gapOk = sinceKey >= this.minGapMs;
+    let congestionDue = false;
+    for (const s of this.congestion.values()) {
+      if (s.pending && now >= s.retryAt) congestionDue = true;
+    }
+    const key = this.urgent || periodic || (gapOk && (this.requested || congestionDue));
+    if (key) {
+      this.urgent = false;
+      this.requested = false;
+      for (const s of this.congestion.values()) s.pending = false;
+    }
+    return key;
+  }
+
+  /** The encoder emitted a keyframe at `now`. Gaps and the periodic interval are measured from here. */
+  keyEmitted(now: number) {
+    this.lastKeyAt = now;
+  }
+}
+
 interface Subscriber {
   out: TrackOut;
   /** Waiting for a keyframe: just subscribed, or a frame to it was dropped. */
@@ -82,17 +169,30 @@ export class VideoSender {
   private video: HTMLVideoElement | null = null;
   private canvas: HTMLCanvasElement | OffscreenCanvas | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private seq = 0;
-  private lastKeyAt = 0;
-  private keyRequested = true;
+  private seq: number;
+  /**
+   * When to force keyframes. Requests from one congested subscriber must not turn every frame
+   * into a keyframe for everyone, so each subscriber backs off on its own (see KeyframePolicy).
+   */
+  private policy: KeyframePolicy;
   private configuring = false;
   private stopped = false;
 
   constructor(
     readonly kind: VideoTrackKind,
     private track: MediaStreamTrack,
-    private profile: VideoProfile
-  ) {}
+    private profile: VideoProfile,
+    /** Continues the previous sender's numbering, so receivers' watermarks never hide it. */
+    firstSeq = 0
+  ) {
+    this.seq = firstSeq;
+    this.policy = new KeyframePolicy(profile.keyframeIntervalMs);
+  }
+
+  /** The seq the next encoded frame will get. */
+  get nextSeq() {
+    return this.seq;
+  }
 
   start() {
     const video = document.createElement('video');
@@ -108,7 +208,7 @@ export class VideoSender {
   replaceTrack(track: MediaStreamTrack) {
     this.track = track;
     if (this.video) this.video.srcObject = new MediaStream([track]);
-    this.keyRequested = true;
+    this.policy.requestUrgent();
   }
 
   get subscriberIds() {
@@ -122,7 +222,7 @@ export class VideoSender {
   subscribe(peerId: string, out: TrackOut) {
     this.subscribers.get(peerId)?.out.close();
     this.subscribers.set(peerId, { out, needsKey: true });
-    this.keyRequested = true;
+    this.policy.request(performance.now());
   }
 
   unsubscribe(peerId: string) {
@@ -130,13 +230,16 @@ export class VideoSender {
     if (!sub) return;
     sub.out.close();
     this.subscribers.delete(peerId);
+    this.policy.forget(peerId);
   }
 
   /** A receiver lost sync (or its decoder failed) and asks for a fresh keyframe. */
   requestKeyframe(peerId?: string) {
     const sub = peerId ? this.subscribers.get(peerId) : undefined;
+    // A stale request from a peer we no longer send to must not force a keyframe on everyone.
+    if (peerId && !sub) return;
     if (sub) sub.needsKey = true;
-    this.keyRequested = true;
+    this.policy.request(performance.now());
   }
 
   private async ensureEncoder(width: number, height: number) {
@@ -158,7 +261,7 @@ export class VideoSender {
       }
       this.encoder.configure(config);
       this.config = config;
-      this.keyRequested = true;
+      this.policy.requestUrgent();
       if (this.canvas) {
         this.canvas.width = width;
         this.canvas.height = height;
@@ -189,11 +292,7 @@ export class VideoSender {
     ctx.drawImage(video, 0, 0, width, height);
 
     const now = performance.now();
-    const key = this.keyRequested || now - this.lastKeyAt >= this.profile.keyframeIntervalMs;
-    if (key) {
-      this.keyRequested = false;
-      this.lastKeyAt = now;
-    }
+    const key = this.policy.next(now);
     const frame = new VideoFrame(this.canvas as CanvasImageSource, { timestamp: Math.round(now * 1000) });
     this.encoder.encode(frame, { keyFrame: key });
     frame.close();
@@ -203,6 +302,8 @@ export class VideoSender {
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);
     const key = chunk.type === 'key';
+    const now = performance.now();
+    if (key) this.policy.keyEmitted(now);
     const config = this.config!;
     const packet = encodeVideo({
       track: this.kind,
@@ -212,15 +313,16 @@ export class VideoSender {
       config: key ? { codec: config.codec, width: config.width, height: config.height } : undefined,
       payload: data,
     });
-    for (const sub of this.subscribers.values()) {
+    for (const [peerId, sub] of this.subscribers) {
       if (sub.needsKey && !key) continue;
       if (sub.out.send(packet)) {
         sub.needsKey = false;
+        this.policy.delivered(peerId);
       } else {
-        // That link is congested: stop sending deltas it can't decode anyway, and get a
-        // keyframe going so it can rejoin as soon as it has room.
+        // That link is congested: stop sending deltas it can't decode anyway, and get a keyframe
+        // going once its backoff allows. Only this subscriber backs off; the others keep their rate.
         sub.needsKey = true;
-        this.keyRequested = true;
+        this.policy.congested(peerId, now);
       }
     }
   }
