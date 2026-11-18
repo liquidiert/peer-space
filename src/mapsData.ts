@@ -221,7 +221,20 @@ export function createDefaultOfficeMap(): GridMap {
       data: {
         gameState: createGameState()
       }
-    }
+    },
+
+    // Portal to the race track (walkable, outside every private zone, reachable from spawn)
+    {
+      id: 'portal_race_track',
+      type: 'portal',
+      name: 'Race track',
+      x: 18,
+      y: 14,
+      width: 1,
+      height: 1,
+      isBlocking: false,
+      data: { target: 'race_track', label: 'Race track' },
+    },
   ];
 
   return {
@@ -273,4 +286,224 @@ export function createBeachRetreatMap(): GridMap {
     ],
     spawnPoint: { x: 14, y: 10 }
   };
+}
+
+/**
+ * Race track geometry, in grid-corner coordinates (tile (x, y) is centred on x + 0.5). The
+ * circuit is one closed loop: a rounded rectangle whose top straight has a hairpin hooking down
+ * into the infield. The bottom straight is one uninterrupted run between its two corners.
+ */
+const RACE_TRACK_WIDTH = 88;
+const RACE_TRACK_HEIGHT = 64;
+/** Road tiles lie within this distance of the centre line: 3 tiles either side, 6 wide. */
+const RACE_TRACK_ROAD_HALF_WIDTH = 3;
+/** Centre-line extent of the straights (left, right, top, bottom). */
+const TRACK_LEFT = 16;
+const TRACK_RIGHT = 72;
+const TRACK_TOP = 16;
+const TRACK_BOTTOM = 48;
+/** Radius of the four sweeping corners. */
+const CORNER_RADIUS = 8;
+/** Hairpin on the top straight: arms this far apart, tip this far into the infield. */
+const HAIRPIN_X = 36;
+const HAIRPIN_ARM_GAP = 12;
+const HAIRPIN_DEPTH = 6;
+/** Pit area off the track, above the top straight. Spawn and return portal sit inside it. */
+const RACE_TRACK_PIT = { x: 30, y: 2, width: 20, height: 6 };
+/**
+ * Pit lane: the one gap in the tire barrier. A 4-wide strip of pit floor running from the bottom
+ * of the pit down through the run-off to the top straight's road (which it meets at y = 13).
+ */
+const RACE_TRACK_PIT_LANE = { x: 32, y: 8, width: 4, height: 5 };
+/**
+ * Version of this preset. Stored tracks with an older (or no) version are rewritten on boot.
+ * Bump whenever the layout changes.
+ */
+export const RACE_TRACK_VERSION = 4;
+
+/** Points on an arc from angle `from` to `to` (radians; y grows downward on the grid). */
+function arcPoints(
+  cx: number, cy: number, r: number, from: number, to: number, steps: number,
+): [number, number][] {
+  const points: [number, number][] = [];
+  for (let i = 0; i <= steps; i++) {
+    const a = from + ((to - from) * i) / steps;
+    points.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+  }
+  return points;
+}
+
+/** Closed centre line, clockwise on screen, starting at the left straight's top. */
+function raceTrackCentreLine(): [number, number][] {
+  const r = CORNER_RADIUS;
+  const L = TRACK_LEFT;
+  const R = TRACK_RIGHT;
+  const T = TRACK_TOP;
+  const B = TRACK_BOTTOM;
+  const h = HAIRPIN_X;
+  const hr = HAIRPIN_ARM_GAP / 2;
+  const quarter = Math.PI / 2;
+  return [
+    ...arcPoints(L + r, T + r, r, Math.PI, 1.5 * Math.PI, 6), // top-left corner
+    [h, T],
+    ...arcPoints(h + hr, T + HAIRPIN_DEPTH, hr, Math.PI, 0, 12), // hairpin tip
+    [h + HAIRPIN_ARM_GAP, T],
+    ...arcPoints(R - r, T + r, r, 1.5 * Math.PI, 2 * Math.PI, 6), // top-right corner
+    ...arcPoints(R - r, B - r, r, 0, quarter, 6), // bottom-right corner
+    ...arcPoints(L + r, B - r, r, quarter, Math.PI, 6), // bottom-left corner
+  ];
+}
+
+const RACE_TRACK_CENTRE_LINE = raceTrackCentreLine();
+
+function distanceToSegment(
+  px: number, py: number, ax: number, ay: number, bx: number, by: number,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+function isRaceTrackRoad(x: number, y: number): boolean {
+  const px = x + 0.5;
+  const py = y + 0.5;
+  const n = RACE_TRACK_CENTRE_LINE.length;
+  for (let i = 0; i < n; i++) {
+    const [ax, ay] = RACE_TRACK_CENTRE_LINE[i];
+    const [bx, by] = RACE_TRACK_CENTRE_LINE[(i + 1) % n];
+    if (distanceToSegment(px, py, ax, ay, bx, by) <= RACE_TRACK_ROAD_HALF_WIDTH) return true;
+  }
+  return false;
+}
+
+/**
+ * Chebyshev distance from every tile to the nearest concrete tile, by a BFS over the eight
+ * neighbours (each step adds 1, so the BFS depth is the Chebyshev distance). -1 where no road.
+ */
+function distanceToRoad(tiles: TileType[][]): number[][] {
+  const height = tiles.length;
+  const width = tiles[0].length;
+  const dist = tiles.map((row) => row.map(() => -1));
+  const queue: [number, number][] = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (tiles[y][x] === 'floor_concrete') {
+        dist[y][x] = 0;
+        queue.push([x, y]);
+      }
+    }
+  }
+  for (let i = 0; i < queue.length; i++) {
+    const [x, y] = queue[i];
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height || dist[ny][nx] !== -1) continue;
+        dist[ny][nx] = dist[y][x] + 1;
+        queue.push([nx, ny]);
+      }
+    }
+  }
+  return dist;
+}
+
+/**
+ * The tire barrier: every grass tile at Chebyshev distance exactly 2 from the road. The road
+ * edge is then one tile of run-off, then the barrier. Any step (4- or 8-way) changes the distance
+ * by at most 1, so the barrier separates distance 1 from distance 3 with no diagonal leaks. The
+ * pit lane is floor_tile, not grass, so it is never barriered; road, pit and walls are skipped too.
+ */
+function raceTrackBarrierTiles(tiles: TileType[][]): [number, number][] {
+  const dist = distanceToRoad(tiles);
+  const spots: [number, number][] = [];
+  for (let y = 0; y < tiles.length; y++) {
+    for (let x = 0; x < tiles[y].length; x++) {
+      if (tiles[y][x] === 'floor_grass' && dist[y][x] === 2) spots.push([x, y]);
+    }
+  }
+  return spots;
+}
+
+/**
+ * The race track: a grass course with a closed six-wide concrete circuit, a pit area off the
+ * track (where users arrive) and a portal back to the space's main map. Karts are allowed.
+ */
+export function createRaceTrackMap(): GridMap {
+  const width = RACE_TRACK_WIDTH;
+  const height = RACE_TRACK_HEIGHT;
+  const pit = RACE_TRACK_PIT;
+  const lane = RACE_TRACK_PIT_LANE;
+  const inRect = (r: { x: number; y: number; width: number; height: number }, x: number, y: number) =>
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+
+  const tiles: TileType[][] = [];
+  for (let y = 0; y < height; y++) {
+    const row: TileType[] = [];
+    for (let x = 0; x < width; x++) {
+      if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
+        row.push('wall_brick');
+      } else if (inRect(pit, x, y) || inRect(lane, x, y)) {
+        row.push('floor_tile');
+      } else if (isRaceTrackRoad(x, y)) {
+        row.push('floor_concrete');
+      } else {
+        row.push('floor_grass'); // offroad
+      }
+    }
+    tiles.push(row);
+  }
+
+  const objects: MapObject[] = raceTrackBarrierTiles(tiles).map(([x, y], i) => ({
+    id: `tires_${i + 1}`,
+    type: 'tires' as const,
+    name: 'Tire Barrier',
+    x,
+    y,
+    width: 1,
+    height: 1,
+    isBlocking: true,
+  }));
+  objects.push({
+    id: 'portal_main',
+    type: 'portal',
+    name: 'Back to the office',
+    // Far end of the pit from spawn (Chebyshev distance 8), so arriving users don't step on it.
+    x: pit.x + 12,
+    y: pit.y + 2,
+    width: 1,
+    height: 1,
+    isBlocking: false,
+    data: { target: '@main', label: 'Back to the office' },
+  });
+
+  return {
+    id: 'race_track',
+    name: 'Race Track',
+    width,
+    height,
+    tiles,
+    objects,
+    privateZones: [],
+    spawnPoint: { x: pit.x + 4, y: pit.y + 2 },
+    allowKarts: true,
+    mapWideMedia: true,
+    presetVersion: RACE_TRACK_VERSION,
+  };
+}
+
+/**
+ * Whether a stored race track predates the current preset and must be replaced on boot. The size
+ * and the preset version are compared: a stored track with no version predates versioning. The
+ * upgrade rewrites the whole map (id, space and name aside).
+ */
+export function needsRaceTrackUpgrade(map: GridMap): boolean {
+  const preset = createRaceTrackMap();
+  return (
+    map.width !== preset.width ||
+    map.height !== preset.height ||
+    (map.presetVersion ?? 1) !== RACE_TRACK_VERSION
+  );
 }

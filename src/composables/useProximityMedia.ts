@@ -1,6 +1,6 @@
 import { ref, watch, onUnmounted } from 'vue';
 import type { Socket } from 'socket.io-client';
-import type { User } from '../types';
+import type { GridMap, User } from '../types';
 import { AudioEngine, AudioSender, RemoteAudio } from '../lib/media/audio';
 import {
   createIrohTransport,
@@ -140,7 +140,8 @@ export function useProximityMedia(
   usersRef: { value: User[] },
   isMutedRef: { value: boolean },
   isDeafenedRef: { value: boolean },
-  deps: MediaDeps = defaultMediaDeps
+  deps: MediaDeps = defaultMediaDeps,
+  currentMapRef?: { value: GridMap | null | undefined }
 ) {
   const localAudioStream = ref<MediaStream | null>(null);
   const localVideoStream = ref<MediaStream | null>(null);
@@ -334,7 +335,8 @@ export function useProximityMedia(
       if (pendingLinks.get(link.remoteId) === link) pendingLinks.delete(link.remoteId);
       if (!peer) return;
       detachLink(peer, false);
-      if (usersRef.value.some((u) => u.socketId === peer.socketId)) {
+      // A peer who is no longer on our map is not redialled: they are not ours to reach.
+      if (usersRef.value.some((u) => u.socketId === peer.socketId && onMyMap(u))) {
         setPeerConnectionState(peer.socketId, 'disconnected');
         // Only the dialing side rebuilds; the other side waits to be called back.
         peer.retryDelay = RETRY_MIN_MS;
@@ -684,9 +686,15 @@ export function useProximityMedia(
     return Date.now() - seen.since >= ZONE_SETTLE_MS ? zone : null;
   }
 
-  // Position / User changes -> update volumes and who gets our video
+  // Position / User / map changes -> update volumes and who gets our video
   watch(
-    [() => currentUserRef.value.position, () => currentUserRef.value.currentZoneId, usersRef],
+    [
+      () => currentUserRef.value.position,
+      () => currentUserRef.value.currentZoneId,
+      () => currentUserRef.value.mapId,
+      () => currentMapRef?.value?.mapWideMedia,
+      usersRef,
+    ],
     () => {
       noteZones();
       updateAllRemoteVolumes();
@@ -696,11 +704,29 @@ export function useProximityMedia(
     { deep: true }
   );
 
-  // A peer's announce arrives as a plain profile update; (re)connect when one changes.
+  // A peer's announce arrives as a plain profile update; (re)connect when one changes. Map
+  // changes count too: moving to another map at the same coordinates changes no position.
   watch(
-    () => usersRef.value.map((u) => `${u.socketId}:${u.media?.endpointId ?? ''}`).join(','),
+    () =>
+      `${currentUserRef.value.mapId ?? ''}|` +
+      usersRef.value.map((u) => `${u.socketId}:${u.media?.endpointId ?? ''}:${u.mapId ?? ''}`).join(','),
     () => syncPeerConnections()
   );
+
+  /**
+   * Whether `user` is on the same map as us. Maps share one coordinate space, so a user on
+   * another map can sit at the very same x,y: they must never be treated as nearby, and no media
+   * is connected to them. Undefined and null both mean "no map" and so match each other.
+   */
+  function onMyMap(user: User): boolean {
+    const me = currentUserRef.value;
+    return !!me && (user.mapId ?? null) === (me.mapId ?? null);
+  }
+
+  /** Whether the map we are on puts everyone in range of everyone (see GridMap.mapWideMedia). */
+  function isMapWideMedia(): boolean {
+    return !!currentMapRef?.value?.mapWideMedia;
+  }
 
   /**
    * Shared distance/private-zone gate used by both audio volume and video connection proximity.
@@ -709,7 +735,8 @@ export function useProximityMedia(
    * Zones use settled membership (see effectiveZone): if either side is a settled member of a
    * zone, both must be members of that same zone. Otherwise both are on the open floor and the
    * distance limit applies. A user who has just entered a zone is still on the floor until they
-   * settle, so floor neighbours in range keep hearing them.
+   * settle, so floor neighbours in range keep hearing them. On a map with mapWideMedia the distance
+   * limit does not apply on the floor: everyone on the map is in range.
    *
    * The privacy rule is asymmetric. Leaving a zone takes effect at once, so a user is never
    * treated as a member once they have physically left, and zone media never reaches someone
@@ -718,6 +745,8 @@ export function useProximityMedia(
   function isWithinProximityRange(targetUser: User): boolean {
     const me = currentUserRef.value;
     if (!me || !targetUser) return false;
+    // Another map is never in range, whatever its coordinates say (see onMyMap).
+    if (!onMyMap(targetUser)) return false;
 
     const myZone = effectiveZone(me);
     const targetZone = effectiveZone(targetUser);
@@ -727,6 +756,8 @@ export function useProximityMedia(
     } else if (myZone || targetZone) {
       return false;
     }
+
+    if (isMapWideMedia()) return true;
 
     const dist = Math.hypot(me.position.x - targetUser.position.x, me.position.y - targetUser.position.y);
     return dist <= MAX_AUDIO_DISTANCE;
@@ -750,6 +781,9 @@ export function useProximityMedia(
 
     // Private Zone: both inside the same zone counts as full volume regardless of distance
     if (effectiveZone(me) && effectiveZone(targetUser)) return clampVolume(gain);
+
+    // Map-wide media: no distance attenuation on the floor, everyone is as loud as everyone else.
+    if (isMapWideMedia()) return clampVolume(gain);
 
     // Both on main open floor -> linear distance attenuation (1.0 at distance 0, 0.0 at MAX_AUDIO_DISTANCE)
     const dist = Math.hypot(me.position.x - targetUser.position.x, me.position.y - targetUser.position.y);
@@ -827,6 +861,8 @@ export function useProximityMedia(
   function sameRoom(user: User): boolean {
     const me = currentUserRef.value;
     if (!me) return false;
+    // Screen share has no distance limit on the floor, so the map check is what keeps it on-map.
+    if (!onMyMap(user)) return false;
     const myZone = effectiveZone(me);
     // Still inside a zone but not settled yet: that is not the floor, so the screen stays in.
     if (me.currentZoneId && !myZone) return false;
@@ -1159,9 +1195,12 @@ export function useProximityMedia(
     ensureTransport();
     announce();
 
-    const present = new Set(usersRef.value.map((u) => u.socketId));
+    // Only people on our map count as present: anyone elsewhere gets no peer, no dummy media,
+    // and any link we had to them is torn down below.
+    const here = usersRef.value.filter((u) => onMyMap(u));
+    const present = new Set(here.map((u) => u.socketId));
 
-    usersRef.value.forEach((user) => {
+    here.forEach((user) => {
       if (user.socketId === myId) return;
       // No real peer on the other end - synthesise their signal locally instead.
       if (user.isDummy) {
@@ -1217,7 +1256,7 @@ export function useProximityMedia(
     });
 
     dummyMedia.forEach((_, socketId) => {
-      if (!usersRef.value.some((u) => u.socketId === socketId && u.isDummy)) {
+      if (!here.some((u) => u.socketId === socketId && u.isDummy)) {
         removeDummyMedia(socketId);
       }
     });

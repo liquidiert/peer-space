@@ -1,7 +1,7 @@
 import { createApp, nextTick, ref, type Ref } from 'vue';
 import { useProximityMedia } from '../../src/composables/useProximityMedia';
 import { validAnnounce } from '../../src/lib/media/wire';
-import type { User } from '../../src/types';
+import type { GridMap, User } from '../../src/types';
 import { FakeNetwork, type FakeTransport } from './fakeIroh';
 import { fakeMediaDeps } from './fakeMedia';
 
@@ -47,6 +47,7 @@ export interface PeerClient {
   users: Ref<User[]>;
   isMuted: Ref<boolean>;
   isDeafened: Ref<boolean>;
+  currentMap: Ref<GridMap | null>;
   created: ReturnType<typeof fakeMediaDeps>['created'];
   transport: () => FakeTransport | undefined;
   emitted: Array<{ event: string; payload: any }>;
@@ -57,6 +58,20 @@ export class Room {
   readonly net = new FakeNetwork();
   readonly clients = new Map<string, PeerClient>();
   private users: User[] = [];
+  /** Map ids whose GridMap has mapWideMedia set. Everything else is an ordinary map. */
+  private readonly wideMaps = new Set<string>();
+
+  /** Mark a map as mapWideMedia (or not) for every client, as a map reload from the server would. */
+  setMapWide(mapId: string, wide: boolean) {
+    if (wide) this.wideMaps.add(mapId);
+    else this.wideMaps.delete(mapId);
+    for (const c of this.clients.values()) c.currentMap.value = this.mapFor(c.currentUser.value.mapId);
+  }
+
+  private mapFor(mapId: string | undefined): GridMap {
+    const id = mapId ?? '';
+    return { id, name: id, width: 88, height: 64, tiles: [], objects: [], privateZones: [], spawnPoint: { x: 0, y: 0 }, mapWideMedia: this.wideMaps.has(id) } as GridMap;
+  }
 
   /** Join like a browser would: get init:state, everyone else gets user:joined. */
   join(user: User, endpointPrefix: string): PeerClient {
@@ -112,7 +127,10 @@ export class Room {
       if (this.frozen.has(c.socketId)) continue;
       c.users.value = this.users.map((u) => ({ ...u }));
       const me = this.users.find((u) => u.socketId === c.socketId);
-      if (me) c.currentUser.value = { ...me };
+      if (me) {
+        c.currentUser.value = { ...me };
+        c.currentMap.value = this.mapFor(me.mapId);
+      }
       c.api.syncPeerConnections();
     }
   }
@@ -142,11 +160,12 @@ export class Room {
     const users = ref<User[]>(this.users.map((u) => ({ ...u })));
     const isMuted = ref(false);
     const isDeafened = ref(false);
+    const currentMap = ref<GridMap | null>(this.mapFor(user.mapId));
 
     let api!: Composable;
     const app = createApp({
       setup() {
-        api = useProximityMedia(socket as any, currentUser as any, users as any, isMuted as any, isDeafened as any, deps);
+        api = useProximityMedia(socket as any, currentUser as any, users as any, isMuted as any, isDeafened as any, deps, currentMap as any);
         return () => null;
       },
     });
@@ -159,6 +178,7 @@ export class Room {
       users,
       isMuted,
       isDeafened,
+      currentMap,
       created,
       transport: () => transport,
       emitted,
