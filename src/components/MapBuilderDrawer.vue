@@ -152,10 +152,22 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
   { type: "chair", name: "Office Chair", icon: "🪑", width: 1, height: 1, isBlocking: false },
   { type: "conference_table", name: "Conference Table", icon: "🏢", width: 3, height: 2, isBlocking: true },
   { type: "plant", name: "Potted Plant", icon: "🌿", width: 1, height: 1, isBlocking: true },
+  { type: "tires", name: "Tire Barrier", icon: "🛞", width: 1, height: 1, isBlocking: true },
   { type: "whiteboard", name: "Whiteboard", icon: "📋", width: 2, height: 1, isBlocking: true },
   { type: "sticky_notes", name: "Notice Board", icon: "📌", width: 2, height: 1, isBlocking: true },
   { type: "game_table", name: "Arcade Table", icon: "🎮", width: 2, height: 2, isBlocking: true },
   { type: "bookshelf", name: "Bookshelf", icon: "📚", width: 1, height: 2, isBlocking: true },
+  // Walking onto a portal takes the user to its target map. There is no data editor in this
+  // palette yet, so every portal placed from here goes to the race track.
+  {
+    type: "portal",
+    name: "Portal",
+    icon: "🌀",
+    width: 1,
+    height: 1,
+    isBlocking: false,
+    data: { target: "race_track", label: "Race track" },
+  },
 ];
 </script>
 
@@ -258,6 +270,17 @@ const OBJECT_PRESETS: { type: ObjectType; name: string; icon: string; width: num
             }`"
           >
             🌴 Beachside
+          </button>
+          <button
+            type="button"
+            @click="emit('switchMapPreset', 'race_track')"
+            :class="`px-2.5 py-2 text-xs font-bold rounded-lg border-2 border-slate-900 text-left transition-all pixel-btn ${
+              currentMapId.endsWith('race_track')
+                ? 'bg-amber-300 text-slate-950 shadow-[2px_2px_0px_0px_#0f172a]'
+                : 'bg-slate-100 hover:bg-slate-200 text-slate-900'
+            }`"
+          >
+            🏁 Race Track
           </button>
         </div>
       </div>

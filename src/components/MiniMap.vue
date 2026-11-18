@@ -114,7 +114,24 @@ function renderMiniMap() {
 
   // 2. Draw Objects
   (map.objects || []).forEach((obj) => {
-    ctx.fillStyle = obj.isBlocking ? '#1e293b' : '#64748b';
+    if (obj.type === 'portal') {
+      // Portals are a violet dot with a cyan ring, so they stand out from furniture and the
+      // "you are here" marker.
+      const px = (obj.x + 0.5) * scaleX;
+      const py = (obj.y + 0.5) * scaleY;
+      ctx.fillStyle = '#7c3aed';
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#22d3ee';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.stroke();
+      return;
+    }
+    // Tire barriers read as dark grey cells, a shade lighter than other solid furniture.
+    ctx.fillStyle = obj.type === 'tires' ? '#374151' : obj.isBlocking ? '#1e293b' : '#64748b';
     ctx.fillRect(
       Math.floor(obj.x * scaleX),
       Math.floor(obj.y * scaleY),

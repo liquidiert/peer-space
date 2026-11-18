@@ -1,4 +1,5 @@
 import type { MediaAnnounce } from './lib/media/wire';
+import type { KartModel } from './lib/kartModels';
 
 export type Direction = 'up' | 'down' | 'left' | 'right';
 
@@ -45,6 +46,10 @@ export interface User {
   spaceId?: string;
   /** This client's iroh media endpoint, once announced (see useProximityMedia). */
   media?: MediaAnnounce;
+  /** The map this user is on. Each user in a space has their own map (see portals). Set by the server. */
+  mapId?: string;
+  /** Set while driving a kart; null or absent means walking. Cleared whenever the user changes map. */
+  kart?: { heading: number; boost?: boolean; model?: KartModel } | null;
 }
 
 export type TileType = 
@@ -67,7 +72,19 @@ export type ObjectType =
   | 'sticky_notes'
   | 'game_table'
   | 'bookshelf'
-  | 'door';
+  | 'door'
+  | 'portal'
+  | 'tires';
+
+/**
+ * Data on a 'portal' object (1x1, walkable). Stepping onto it moves the user to another map.
+ * `target` is either a preset id ('race_track', 'office_default', 'beach_retreat'), resolved
+ * within the user's own space, or '@main', meaning the space's main (active) map.
+ */
+export interface PortalData {
+  target: string;
+  label?: string;
+}
 
 export interface DeskState {
   claimedByUserId?: string;
@@ -93,7 +110,7 @@ export interface MapObject {
     notes?: StickyNote[];
     gameState?: GameTableState;
     deskState?: DeskState;
-  };
+  } & Partial<PortalData>; // portal objects keep their PortalData here
 }
 
 export interface WhiteboardStroke {
@@ -149,6 +166,15 @@ export interface GridMap {
   objects: MapObject[];
   privateZones: PrivateZone[];
   spawnPoint: UserPosition;
+  /** Whether karts can be driven on this map. */
+  allowKarts?: boolean;
+  /**
+   * Everyone on this map is in media range regardless of distance: audio at full level and camera
+   * video for every other person on the map. Private zones still apply. Used by the race track.
+   */
+  mapWideMedia?: boolean;
+  /** Version of the built-in preset this map was generated from. Absent on maps made before versioning. */
+  presetVersion?: number;
 }
 
 export interface ChatMessage {

@@ -42,6 +42,9 @@ import type {
 } from "./types";
 import { createDefaultOfficeMap } from "./mapsData";
 import { useProximityMedia } from "./composables/useProximityMedia";
+import { useKartDriving } from "./composables/useKartDriving";
+import CarSelector from "./components/CarSelector.vue";
+import { kartBodyColor } from "./lib/kartSprite";
 import { findPathAStar, occupiedKeySet } from "./lib/pathfinding";
 import type { GameTableGame } from "./lib/gameTable";
 
@@ -354,25 +357,62 @@ const users = ref<User[]>([]);
 const currentMap = ref<GridMap>(createDefaultOfficeMap());
 const messages = ref<ChatMessage[]>([]);
 
+/**
+ * Everyone on the map I am on. Maps share one coordinate space, so the space-wide `users` list
+ * can hold people at the same x,y who are on a different map. Anything that reads positions for
+ * proximity, collision or drawing the map uses this instead; the people list keeps `users`.
+ */
+const sameMapUsers = computed(() =>
+    users.value.filter(
+        (u) =>
+            u.socketId === currentUser.value?.socketId ||
+            (u.mapId ?? null) === (currentUser.value?.mapId ?? null),
+    ),
+);
+
 // Remember the last tile we stood on so a reload/re-login resumes there instead of
 // respawning at the map's spawn point (server re-validates this against the live map).
+// The map id is saved with the tile: the server only resumes a position on the same map.
 watch(
-    () => (hasJoined.value ? currentUser.value.position : null),
-    (pos) => {
-        if (!pos || !currentMap.value) return;
-        try {
-            localStorage.setItem(
-                LAST_POSITION_PERSISTENCE_KEY,
-                JSON.stringify({
-                    mapId: currentMap.value.id,
-                    x: pos.x,
-                    y: pos.y,
-                }),
-            );
-        } catch (e) {}
+    () => {
+        const pos = hasJoined.value ? currentUser.value.position : null;
+        if (!pos) return null;
+        return {
+            mapId: currentUser.value.mapId ?? currentMap.value.id,
+            x: pos.x,
+            y: pos.y,
+        };
+    },
+    (saved) => {
+        if (!saved) return;
+        // Throttled: a kart moves the position many times a second. At most one write per
+        // second, with a trailing write so the final position is kept.
+        pendingLastPosition = saved;
+        const wait = LAST_POSITION_WRITE_MS - (Date.now() - lastPositionWriteAt);
+        if (wait <= 0) {
+            flushLastPosition();
+        } else if (positionWriteTimer === null) {
+            positionWriteTimer = setTimeout(flushLastPosition, wait);
+        }
     },
     { deep: true },
 );
+
+const LAST_POSITION_WRITE_MS = 1000;
+let lastPositionWriteAt = 0;
+let pendingLastPosition: { mapId: string; x: number; y: number } | null = null;
+let positionWriteTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushLastPosition() {
+    positionWriteTimer = null;
+    const saved = pendingLastPosition;
+    if (!saved) return;
+    pendingLastPosition = null;
+    lastPositionWriteAt = Date.now();
+    try {
+        localStorage.setItem(LAST_POSITION_PERSISTENCE_KEY, JSON.stringify(saved));
+    } catch (e) {}
+}
 
 // PWA update toast: registerType is 'prompt' (not 'autoUpdate'), so a new service worker
 // installs quietly in the background and we surface it here instead of force-reloading
@@ -431,9 +471,55 @@ const {
     getUserVolume,
     proximityVolumeEnabled,
     setProximityVolumeEnabled,
-} = useProximityMedia(socket, currentUser, users, isMuted, isDeafened);
+} = useProximityMedia(socket, currentUser, sameMapUsers, isMuted, isDeafened, undefined, currentMap);
 
 setProximityVolumeEnabled(loadProximityVolumePreference());
+
+// Karts: while driving, the local simulation owns our position (see useKartDriving).
+const {
+    driving,
+    kartError,
+    kartState,
+    speed: kartSpeed,
+    sliding: kartSliding,
+    boostEnergy: kartBoostEnergy,
+    boosting: kartBoosting,
+    toggleKart,
+    selectedModel: kartModel,
+    selectModel: pickKartModel,
+} = useKartDriving({ socket, currentUser, currentMap, joined: hasJoined });
+
+// Our kart's body colour in the car selector: the same inputs SpatialCanvas uses for the sprite.
+const kartBody = computed(() =>
+    kartBodyColor(currentUser.value.id, currentUser.value.avatar?.outfitColor),
+);
+
+// Hop-in is clicked with the mouse, so blur it: a focused button would take Space and Enter.
+function onHopInClick(e: MouseEvent) {
+    toggleKart();
+    (e.currentTarget as HTMLElement | null)?.blur();
+}
+
+/**
+ * What SpatialCanvas needs to draw our own kart. Sourced from the per-frame simulation, since
+ * currentUser.position only updates at the send cadence.
+ */
+const localKart = computed(() =>
+    driving.value && kartState.value
+        ? {
+              x: kartState.value.x,
+              y: kartState.value.y,
+              heading: kartState.value.heading,
+              sliding: kartSliding.value,
+              boost: kartBoosting.value,
+          }
+        : null,
+);
+
+// Walking is off while driving: a path walk planned on foot would fight the kart.
+watch(driving, (on) => {
+    if (on) stopPathWalking();
+});
 
 // Names of the peers whose connection has been failing long enough to be worth telling the
 // user about, so the warning can say who they've lost rather than just "something is wrong".
@@ -486,9 +572,10 @@ function toggleProximityVolume() {
 // --- Per-user context menu (right-click an avatar) --------------------------------------
 const userMenu = ref<{ socketId: string; x: number; y: number } | null>(null);
 
+// Same-map only: the menu closes if its subject walks through a portal to another map.
 const userMenuTarget = computed(
     () =>
-        users.value.find((u) => u.socketId === userMenu.value?.socketId) ||
+        sameMapUsers.value.find((u) => u.socketId === userMenu.value?.socketId) ||
         null,
 );
 
@@ -623,22 +710,37 @@ onMounted(() => {
             position: { x: number; y: number };
             direction: any;
             currentZoneId: string | null;
+            mapId?: string;
+            heading?: number;
+            boost?: boolean;
         }) => {
-            if (data.userId === currentUser.value.socketId) {
+            // Our own position is simulated locally while driving: the server's echo (or its
+            // rejection of a wall, which replies with our old tile) must not pull the kart back.
+            const isSelf = data.userId === currentUser.value.socketId;
+            const keepLocalPosition = isSelf && Boolean(currentUser.value.kart);
+            if (isSelf) {
                 currentUser.value = {
                     ...currentUser.value,
-                    position: data.position,
-                    direction: data.direction,
+                    ...(keepLocalPosition
+                        ? {}
+                        : { position: data.position, direction: data.direction }),
                     currentZoneId: data.currentZoneId,
+                    ...(data.mapId !== undefined ? { mapId: data.mapId } : {}),
                 };
             }
             users.value = users.value.map((u) => {
                 if (u.socketId === data.userId) {
                     return {
                         ...u,
-                        position: data.position,
-                        direction: data.direction,
+                        ...(keepLocalPosition
+                            ? {}
+                            : { position: data.position, direction: data.direction }),
                         currentZoneId: data.currentZoneId,
+                        ...(data.mapId !== undefined ? { mapId: data.mapId } : {}),
+                        // Someone else's kart: track its heading. Only for karts we already know about.
+                        ...(!isSelf && u.kart && data.heading !== undefined
+                            ? { kart: { ...u.kart, heading: data.heading, boost: data.boost === true } }
+                            : {}),
                     };
                 }
                 return u;
@@ -647,8 +749,21 @@ onMounted(() => {
     );
 
     sk.on("user:updated", (user: User) => {
+        // The entry we keep for ourselves, and in the users list.
+        let next = user;
         if (user.socketId === currentUser.value.socketId) {
-            currentUser.value = user;
+            // Still driving (a profile change, an admin toggle, ...): keep the locally simulated
+            // position and heading rather than snapping back. Otherwise, e.g. after a dismount,
+            // take the server's word, which is the snapped tile.
+            if (user.kart && currentUser.value.kart) {
+                next = {
+                    ...user,
+                    position: currentUser.value.position,
+                    direction: currentUser.value.direction,
+                    kart: currentUser.value.kart,
+                };
+            }
+            currentUser.value = next;
             // Admin status can change while connected. Assigning a new object lets the
             // authenticatedUser watcher re-persist the stored login, same as the login handler.
             if (
@@ -662,7 +777,7 @@ onMounted(() => {
             }
         }
         users.value = users.value.map((u) =>
-            u.socketId === user.socketId ? user : u,
+            u.socketId === user.socketId ? next : u,
         );
     });
 
@@ -840,6 +955,21 @@ onMounted(() => {
         if (me) currentUser.value = me;
     });
 
+    // I stepped through a portal onto another map of this space. The walk I was on (if any)
+    // was planned for the old map's tiles, and anything I had open or selected belongs to it.
+    sk.on("map:entered", (data: { currentMap: GridMap; user: User }) => {
+        stopPathWalking();
+        activeObjectModal.value = null;
+        userMenu.value = null;
+        pendingZone.value = null;
+        zoneDrawMode.value = false;
+        currentMap.value = data.currentMap;
+        currentUser.value = data.user;
+        users.value = users.value.map((u) =>
+            u.socketId === data.user.socketId ? data.user : u,
+        );
+    });
+
     sk.on(
         "map:zones_updated",
         (data: { privateZones: PrivateZone[]; users: User[] }) => {
@@ -964,6 +1094,8 @@ function handleMove(data: {
     ghost?: boolean;
 }) {
     stopPathWalking();
+    // Driving: the kart simulation sends its own user:move; grid steps would fight it.
+    if (driving.value) return;
     if (socket.value && hasJoined.value) {
         socket.value.emit("user:move", data);
     }
@@ -971,6 +1103,8 @@ function handleMove(data: {
 
 function handleNavigateTile(target: { x: number; y: number }, walkToDesk?: boolean) {
     stopPathWalking();
+    // No click-to-move while driving.
+    if (driving.value) return;
     if (
         !currentMap.value ||
         !currentUser.value?.position ||
@@ -983,13 +1117,28 @@ function handleNavigateTile(target: { x: number; y: number }, walkToDesk?: boole
         x: currentUser.value.position.x,
         y: currentUser.value.position.y,
     };
+    // Portals are walkable, but stepping on one takes you to another map. A route may only end
+    // on a portal (the one clicked), never pass over one on the way.
+    const portals = currentMap.value.objects.filter((o) => o.type === "portal");
+    const containsTarget = (o: MapObject) =>
+        target.x >= o.x &&
+        target.x < o.x + (o.width || 1) &&
+        target.y >= o.y &&
+        target.y < o.y + (o.height || 1);
+    const endsOnPortal = portals.some(containsTarget);
+    const passThroughPortals = portals
+        .filter((o) => !containsTarget(o))
+        .map((o) => ({ x: o.x, y: o.y }));
+
     // Route around other users' current tiles (best-effort - someone can still step into the
     // path mid-walk, at which point the server simply rejects that step; see user:move).
-    const occupied = occupiedKeySet(
-        users.value
+    // Only people on this map: users elsewhere are not in the way, whatever their coordinates.
+    const occupied = occupiedKeySet([
+        ...sameMapUsers.value
             .filter((u) => u.socketId !== currentUser.value.socketId)
             .map((u) => u.position),
-    );
+        ...passThroughPortals,
+    ]);
     const path = findPathAStar(currentMap.value, start, target, occupied);
 
     if (path.length === 0) return;
@@ -998,6 +1147,9 @@ function handleNavigateTile(target: { x: number; y: number }, walkToDesk?: boole
     pathWalkInterval = window.setInterval(() => {
         if (stepIdx >= path.length) {
             stopPathWalking();
+            // Ending on a portal: the server has (or is about to) take us to the other map, so
+            // a facing update sent from this map's coordinates would land on the wrong tile.
+            if (endsOnPortal) return;
             const lastMoveTarget = path[stepIdx - 2];
             const currentPos = currentUser.value.position;
             // Walking finished - update avatar rotation to face the target
@@ -1148,6 +1300,9 @@ function goToRinger() {
     );
     dismissIncomingRing();
     if (!ringer) return showNoticeToast("They have left the space.");
+    if ((ringer.mapId ?? null) !== (currentUser.value.mapId ?? null)) {
+        return showNoticeToast(`${ringer.name} is on another map.`);
+    }
     handleNavigateTile({ x: ringer.position.x, y: ringer.position.y });
 }
 
@@ -1966,7 +2121,7 @@ function handleRemoveDummy(dummyId: string) {
             <!-- Spatial Canvas -->
             <SpatialCanvas
                 :currentUser="currentUser"
-                :users="users"
+                :users="sameMapUsers"
                 :currentMap="currentMap"
                 :builderMode="builderMode"
                 :builderAction="builderAction"
@@ -1982,6 +2137,7 @@ function handleRemoveDummy(dummyId: string) {
                 @moveObject="handleMoveObject"
                 @removeObject="handleRemoveObject"
                 @changeTile="handleChangeTile"
+                :localKart="localKart"
             />
 
             <!-- Map Builder Drawer -->
@@ -2024,10 +2180,59 @@ function handleRemoveDummy(dummyId: string) {
             <!-- Interactive Spatial Minimap -->
             <MiniMap
                 :currentMap="currentMap"
-                :users="users"
+                :users="sameMapUsers"
                 :currentUser="currentUser"
                 @navigateTile="handleNavigateTile"
             />
+
+            <!-- Kart HUD: hop in / get out, plus speed while driving. Only on maps that allow karts. -->
+            <div
+                v-if="currentMap.allowKarts"
+                class="fixed bottom-24 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-1.5 select-none"
+            >
+                <div
+                    v-if="driving"
+                    class="bg-white border-2 border-slate-900 rounded-xl px-3 py-1 shadow-[3px_3px_0px_0px_#0f172a] font-heading font-extrabold text-xs text-slate-900 flex items-center gap-2 pointer-events-none"
+                >
+                    <span class="tabular-nums">{{ Math.round(kartSpeed * 10) }} km/h</span>
+                    <!-- Boost meter: fills with energy, orange and pulsing while boosting. -->
+                    <span
+                        class="relative w-16 h-2.5 bg-slate-200 border-2 border-slate-900 rounded-full overflow-hidden"
+                        role="meter"
+                        aria-label="Boost"
+                        aria-valuemin="0"
+                        aria-valuemax="100"
+                        :aria-valuenow="Math.round(kartBoostEnergy * 100)"
+                    >
+                        <span
+                            class="absolute inset-y-0 left-0 transition-[width] duration-100"
+                            :class="kartBoosting ? 'bg-orange-500 animate-pulse' : 'bg-amber-300'"
+                            :style="{ width: Math.round(kartBoostEnergy * 100) + '%' }"
+                        ></span>
+                    </span>
+                    <span class="text-[10px] font-bold text-slate-500 hidden sm:inline">W/S throttle · A/D steer · Space drift · Shift boost</span>
+                </div>
+                <div
+                    v-if="kartError"
+                    class="bg-rose-400 text-slate-950 border-2 border-slate-900 rounded-xl px-3 py-1 text-[11px] font-extrabold font-heading"
+                >
+                    {{ kartError }}
+                </div>
+                <div class="flex items-center gap-2">
+                    <CarSelector
+                        :selected="kartModel"
+                        :bodyColor="kartBody"
+                        @select="pickKartModel"
+                    />
+                    <button
+                        type="button"
+                        @click="onHopInClick"
+                        class="bg-amber-300 hover:bg-amber-400 text-slate-950 border-2 border-slate-900 rounded-xl px-3 py-1.5 pixel-btn shadow-[3px_3px_0px_0px_#0f172a] font-heading font-extrabold text-xs cursor-pointer"
+                    >
+                        {{ driving ? "Get out (K)" : "🏎️ Hop in (K)" }}
+                    </button>
+                </div>
+            </div>
 
             <!-- Floating Bottom Control Bar -->
             <ControlBar

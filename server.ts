@@ -23,7 +23,12 @@ import {
   Space,
   SpaceSummary,
 } from "./src/types";
-import { createDefaultOfficeMap, createBeachRetreatMap } from "./src/mapsData";
+import {
+  createDefaultOfficeMap,
+  createBeachRetreatMap,
+  createRaceTrackMap,
+  needsRaceTrackUpgrade,
+} from "./src/mapsData";
 import { initWorkspaceDatabase } from "./src/db";
 import {
   createSessionToken,
@@ -72,6 +77,19 @@ import {
 import { isTileWalkable } from "./src/lib/pathfinding";
 import { privateZoneIdAt } from "./src/lib/privateZones";
 import {
+  findFreeTileNear,
+  headingFromDirection,
+  isTileBlocked,
+  planPortal,
+  portalAt,
+  resolvePortalTargetId,
+  resolveSpaceMapId,
+  tileAt,
+  validateKartMove,
+} from "./src/lib/portals";
+import { directionFromHeading, normalizeAngle } from "./src/lib/kart";
+import { DEFAULT_KART_MODEL, isKartModel } from "./src/lib/kartModels";
+import {
   canEnterSpace,
   normalizeEmails,
   spacesFor,
@@ -116,6 +134,7 @@ async function startServer() {
   const maps: Map<string, GridMap> = new Map();
   const defaultOffice = createDefaultOfficeMap();
   const beachRetreat = createBeachRetreatMap();
+  const raceTrack = createRaceTrackMap();
 
   /**
    * Drops objects whose type no longer exists.
@@ -151,8 +170,10 @@ async function startServer() {
   } else {
     maps.set(defaultOffice.id, defaultOffice);
     maps.set(beachRetreat.id, beachRetreat);
+    maps.set(raceTrack.id, raceTrack);
     db.saveMap(defaultOffice);
     db.saveMap(beachRetreat);
+    db.saveMap(raceTrack);
   }
 
   // Spaces: isolated worlds, each owning its maps and its own active map. Users, chat, voice
@@ -194,9 +215,10 @@ async function startServer() {
   }
 
   // Fresh copies of the preset maps for a new space. Map ids are globally unique in the
-  // database, so they are namespaced by space.
+  // database, so they are namespaced by space. The race track is last: the first map is the
+  // space's active map.
   function seedSpaceMaps(spaceId: string): GridMap[] {
-    return [createDefaultOfficeMap(), createBeachRetreatMap()].map((base) => {
+    return [createDefaultOfficeMap(), createBeachRetreatMap(), createRaceTrackMap()].map((base) => {
       const map: GridMap = { ...base, id: `${spaceId}:${base.id}`, spaceId };
       maps.set(map.id, map);
       db.saveMap(map);
@@ -214,19 +236,132 @@ async function startServer() {
   }
   spaces.forEach(ensureValidActiveMap);
 
+  // Backfill for spaces that predate the race track and the office portal. Runs on every boot
+  // and changes nothing once applied: a space gets a race track only if it has none, and its
+  // office gets a portal only if it has none (so beach and other maps are never touched).
+  function backfillRaceTrackAndPortals() {
+    for (const space of spaces.values()) {
+      if (!resolveSpaceMapId(space.id, "race_track", (id) => maps.get(id))) {
+        const id = `${space.id}:race_track`;
+        const race: GridMap = { ...createRaceTrackMap(), id, spaceId: space.id };
+        maps.set(id, race);
+        db.saveMap(race);
+        console.log(`[maps] Added race track map "${id}" to space "${space.name}".`);
+      }
+
+      const officeId = resolveSpaceMapId(space.id, "office_default", (id) => maps.get(id));
+      const office = officeId ? maps.get(officeId) : undefined;
+      if (!office || office.objects.some((o) => o.type === "portal")) continue;
+      const portal = planPortal(office, {
+        id: "portal_race_track",
+        name: "Race track",
+        target: "race_track",
+        label: "Race track",
+      });
+      if (!portal) {
+        console.warn(`[maps] No free tile for a race track portal in "${office.id}".`);
+        continue;
+      }
+      office.objects.push(portal);
+      db.saveMap(office);
+      console.log(
+        `[maps] Added race track portal to "${office.id}" (space "${space.name}") at ${portal.x},${portal.y}.`,
+      );
+    }
+  }
+  backfillRaceTrackAndPortals();
+
+  // Race tracks saved at an older size are rewritten to the current preset on boot. The id,
+  // space and name are kept; the layout comes from the preset. Idempotent: a track already at
+  // the preset's size is left alone. No one is connected yet, so no one needs relocating.
+  function upgradeRaceTracks() {
+    const tracks = new Set<GridMap>();
+    for (const space of spaces.values()) {
+      const id = resolveSpaceMapId(space.id, "race_track", (mid) => maps.get(mid));
+      const track = id ? maps.get(id) : undefined;
+      if (track) tracks.add(track);
+    }
+    const bare = maps.get("race_track");
+    if (bare) tracks.add(bare);
+    for (const track of tracks) {
+      if (!needsRaceTrackUpgrade(track)) continue;
+      // A fresh preset per track: the arrays must not be shared between maps.
+      const preset = createRaceTrackMap();
+      Object.assign(track, {
+        width: preset.width,
+        height: preset.height,
+        tiles: preset.tiles,
+        objects: preset.objects,
+        spawnPoint: preset.spawnPoint,
+        allowKarts: preset.allowKarts,
+        mapWideMedia: preset.mapWideMedia,
+        privateZones: preset.privateZones,
+        presetVersion: preset.presetVersion,
+      });
+      db.saveMap(track);
+      const owner = spaces.get(track.spaceId ?? "")?.name ?? track.spaceId;
+      console.log(`[maps] Upgraded race track for space "${owner}" to ${track.width}x${track.height}`);
+    }
+  }
+  upgradeRaceTracks();
+
   const room = (spaceId: string) => `space:${spaceId}`;
+  // One socket room per map. Map edits go only to the people standing on that map, so racers
+  // never hear about office edits and the reverse.
+  const mapRoom = (mapId: string) => `map:${mapId}`;
   const spaceIdOf = (socketId: string) => users.get(socketId)?.spaceId;
   const usersIn = (spaceId: string | undefined) =>
     spaceId
       ? Array.from(users.values()).filter((u) => u.spaceId === spaceId)
       : [];
+  const usersOn = (mapId: string | undefined) =>
+    mapId ? Array.from(users.values()).filter((u) => u.mapId === mapId) : [];
   function spaceMap(spaceId: string | undefined): GridMap | undefined {
     const space = spaceId ? spaces.get(spaceId) : undefined;
     return space ? maps.get(space.activeMapId) : undefined;
   }
-  const spaceMapOf = (socketId: string) => spaceMap(spaceIdOf(socketId));
+  // The map a user is on: their own map, or the space's active map if they have none.
+  function mapOfUser(user: User | undefined): GridMap | undefined {
+    if (!user) return undefined;
+    const own = user.mapId ? maps.get(user.mapId) : undefined;
+    if (own && own.spaceId === user.spaceId) return own;
+    return spaceMap(user.spaceId);
+  }
+  const userMap = (socketId: string) => mapOfUser(users.get(socketId));
+  // Emits to everyone on one map.
+  const toMap = (mapId: string) => io.to(mapRoom(mapId));
   // Emits to everyone in the sender's space, and nobody else.
   const toSpace = (socketId: string) => io.to(room(spaceIdOf(socketId) ?? ""));
+
+  // Puts a user on a map: records it, clears any kart, and moves their socket between map
+  // rooms. Dummies have no socket, so for them only the record changes.
+  function moveUserToMap(user: User, mapId: string) {
+    const previous = user.mapId;
+    user.mapId = mapId;
+    user.kart = null;
+    if (previous === mapId) return;
+    const s = io.sockets.sockets.get(user.socketId);
+    if (!s) return;
+    if (previous) s.leave(mapRoom(previous));
+    s.join(mapRoom(mapId));
+  }
+
+  // The map a portal target names, within one space. '@main' is the active map.
+  function resolveTargetMap(
+    spaceId: string | undefined,
+    target: unknown,
+  ): GridMap | undefined {
+    const space = spaceId ? spaces.get(spaceId) : undefined;
+    if (!space || typeof target !== "string") return undefined;
+    const id = resolvePortalTargetId(space.id, space.activeMapId, target, (x) =>
+      maps.get(x),
+    );
+    return id ? maps.get(id) : undefined;
+  }
+
+  // Portal cooldown per socket: stops a user bouncing between two maps on consecutive moves.
+  const lastPortalAt: Map<string, number> = new Map();
+  const PORTAL_COOLDOWN_MS = 1000;
 
   function persistMap(map: GridMap | undefined) {
     if (map) db.saveMap(map);
@@ -285,20 +420,22 @@ async function startServer() {
     },
   });
 
-  // Helper: is this tile currently stood on by some other connected user?
+  // Helper: is this tile currently stood on by some other user on the same map? Users on other
+  // maps never count. Positions are compared by the tile they round into. With `walkersOnly`,
+  // people driving karts do not count (used when a kart driver steps out onto a tile).
   function isOccupiedByOtherUser(
-    spaceId: string | undefined,
+    mapId: string | undefined,
     x: number,
     y: number,
     excludeSocketId: string,
     forAdmin = false,
+    walkersOnly = false,
   ): boolean {
-    for (const u of usersIn(spaceId)) {
-      if (
-        u.socketId !== excludeSocketId &&
-        u.position.x === x &&
-        u.position.y === y
-      ) {
+    for (const u of usersOn(mapId)) {
+      if (u.socketId === excludeSocketId) continue;
+      if (walkersOnly && u.kart) continue;
+      const tile = tileAt(u.position);
+      if (tile.x === x && tile.y === y) {
         if (u.isDummy && !forAdmin) continue;
         return true;
       }
@@ -308,41 +445,21 @@ async function startServer() {
 
   // Helper: nearest walkable, unoccupied tile to `preferred` - used when a join/resume
   // position would otherwise land a new user directly on top of someone already there.
+  // Never a portal tile, so a user is not dropped onto one without walking onto it.
   function findFreeSpawnTile(
-    spaceId: string | undefined,
     map: GridMap,
     preferred: { x: number; y: number },
     excludeSocketId: string,
     forAdmin = false,
   ): { x: number; y: number } {
-    if (
-      isTileWalkable(map, preferred.x, preferred.y) &&
-      !isOccupiedByOtherUser(
-        spaceId,
-        preferred.x,
-        preferred.y,
-        excludeSocketId,
-        forAdmin,
-      )
-    ) {
-      return preferred;
-    }
-    for (let radius = 1; radius <= 10; radius++) {
-      for (let dx = -radius; dx <= radius; dx++) {
-        for (let dy = -radius; dy <= radius; dy++) {
-          if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue; // ring only
-          const x = preferred.x + dx;
-          const y = preferred.y + dy;
-          if (
-            isTileWalkable(map, x, y) &&
-            !isOccupiedByOtherUser(spaceId, x, y, excludeSocketId, forAdmin)
-          ) {
-            return { x, y };
-          }
-        }
-      }
-    }
-    return preferred; // give up - overlap is better than an infinite/failed join
+    // Give up with the preferred tile: overlap is better than an infinite/failed join.
+    return (
+      findFreeTileNear(map, preferred, {
+        maxRadius: 10,
+        isTaken: (x, y) =>
+          isOccupiedByOtherUser(map.id, x, y, excludeSocketId, forAdmin),
+      }) ?? preferred
+    );
   }
 
   // Emit an event only to connected admin users (excluding dummies)
@@ -354,17 +471,20 @@ async function startServer() {
     }
   }
 
-  // Broadcast a user-list event, hiding dummies from non-admin viewers
+  // Broadcast a user-list event, hiding dummies from non-admin viewers. With `mapId`, only the
+  // people standing on that map are sent it (for map events such as zone changes).
   function broadcastUsersWithFilter(
     spaceId: string | undefined,
     eventName: string,
     makePayload: (userList: User[]) => any,
+    mapId?: string,
   ) {
     const allUsers = usersIn(spaceId);
     const publicUsers = allUsers.filter((u) => !u.isDummy);
 
     for (const u of allUsers) {
       if (u.isDummy) continue;
+      if (mapId !== undefined && u.mapId !== mapId) continue;
       io.to(u.socketId).emit(
         eventName,
         makePayload(u.isAdmin ? allUsers : publicUsers),
@@ -683,7 +803,6 @@ async function startServer() {
         // Collision detection means two users can no longer share a tile - if the resume/spawn
         // tile is already taken, nudge the new arrival to the nearest free tile instead.
         const startPosition = findFreeSpawnTile(
-          space.id,
           map,
           preferredPosition,
           socket.id,
@@ -740,6 +859,8 @@ async function startServer() {
           lastSeen: Date.now(),
           presenceStatus,
           spaceId: space.id,
+          mapId: map.id,
+          kart: null,
         };
 
         users.set(socket.id, newUser);
@@ -747,6 +868,7 @@ async function startServer() {
           socketEmails.set(socket.id, session.email.trim().toLowerCase());
         }
         socket.join(room(space.id));
+        socket.join(mapRoom(map.id));
 
         // Send initial map & user state to connected user
         const inSpace = usersIn(space.id);
@@ -773,15 +895,33 @@ async function startServer() {
         y: number;
         direction: "up" | "down" | "left" | "right";
         ghost?: boolean;
+        /** Kart heading in radians; only read while driving. */
+        heading?: number;
+        boost?: boolean;
       }) => {
         const user = users.get(socket.id);
         if (!user) return;
 
-        const map = spaceMapOf(socket.id);
+        const map = userMap(socket.id);
         if (!map) return;
 
         const validDirections = ["up", "down", "left", "right"];
         if (!validDirections.includes(data.direction)) return;
+        if (!Number.isFinite(data.x) || !Number.isFinite(data.y)) return;
+
+        // A kart only survives on a map that allows karts; anywhere else the user walks again.
+        if (user.kart && !map.allowKarts) user.kart = null;
+
+        // Driving: the heading is taken even when the move is rejected, so a kart can turn
+        // against a wall.
+        const headingBefore = user.kart?.heading;
+        const boostBefore = user.kart?.boost;
+        if (user.kart && Number.isFinite(data.heading)) {
+          user.kart.heading = normalizeAngle(data.heading as number);
+        }
+        if (user.kart) user.kart.boost = data.boost === true;
+        const kartFields = () =>
+          user.kart ? { heading: user.kart.heading, boost: user.kart.boost === true } : {};
 
         /**
          * A blocked move still turns the character to face the way they tried to go.
@@ -793,7 +933,13 @@ async function startServer() {
          * no zone and no collision, so it cannot be used to walk through anything.
          */
         const turnInPlace = () => {
-          if (user.direction === data.direction) return;
+          if (
+            user.direction === data.direction &&
+            user.kart?.heading === headingBefore &&
+            user.kart?.boost === boostBefore
+          ) {
+            return;
+          }
           user.direction = data.direction;
           user.lastSeen = Date.now();
           toSpace(socket.id).emit("user:moved", {
@@ -801,69 +947,146 @@ async function startServer() {
             position: user.position,
             direction: user.direction,
             currentZoneId: user.currentZoneId,
+            mapId: user.mapId,
+            ...kartFields(),
           });
         };
 
-        // Validate bounds
-        if (
-          data.x < 0 ||
-          data.x >= map.width ||
-          data.y < 0 ||
-          data.y >= map.height
-        ) {
-          return turnInPlace();
+        if (user.kart) {
+          // Driving: float positions are fine. Only the tile they round into is checked, and
+          // other users never block a kart.
+          if (!validateKartMove(map, data.x, data.y)) return turnInPlace();
+        } else {
+          // Walking: positions stay on the grid, so a fractional one is refused.
+          if (!Number.isInteger(data.x) || !Number.isInteger(data.y)) return turnInPlace();
+          if (isTileBlocked(map, data.x, data.y)) return turnInPlace(); // wall, water, object, edge
+
+          // Collision with other users on this map - two people can no longer occupy the same
+          // tile, unless the mover is holding Ghost mode (client sends `ghost: true` while "g"
+          // is held). Authoritative here (not just client-side) so simultaneous moves from two
+          // clients can't both land on the same tile via a race.
+          if (
+            !data.ghost &&
+            isOccupiedByOtherUser(user.mapId, data.x, data.y, socket.id)
+          ) {
+            return turnInPlace(); // blocked
+          }
         }
 
-        // Check collision with tile or blocking map objects
-        const targetTile = map.tiles[data.y]?.[data.x];
+        // The tile the move lands on, for zones and portals (positions may be fractional).
+        const tile = tileAt({ x: data.x, y: data.y });
+
+        // Stepping onto a portal takes the user to its map instead of moving them here. A
+        // portal back into the map they are already on is ignored.
+        const portal = portalAt(map, tile.x, tile.y);
         if (
-          targetTile === "wall_brick" ||
-          targetTile === "wall_wood" ||
-          targetTile === "water"
+          portal &&
+          Date.now() - (lastPortalAt.get(socket.id) ?? 0) >= PORTAL_COOLDOWN_MS
         ) {
-          return turnInPlace(); // blocked
-        }
-
-        const blockingObj = map.objects.find((obj) => {
-          if (!obj.isBlocking) return false;
-          return (
-            data.x >= obj.x &&
-            data.x < obj.x + obj.width &&
-            data.y >= obj.y &&
-            data.y < obj.y + obj.height
-          );
-        });
-
-        if (blockingObj) {
-          return turnInPlace(); // blocked
-        }
-
-        // Collision with other users - two people can no longer occupy the same tile, unless
-        // the mover is holding Ghost mode (client sends `ghost: true` while "g" is held).
-        // Authoritative here (not just client-side) so simultaneous moves from two clients
-        // can't both land on the same tile via a race.
-        if (
-          !data.ghost &&
-          isOccupiedByOtherUser(user.spaceId, data.x, data.y, socket.id)
-        ) {
-          return turnInPlace(); // blocked
+          const target = resolveTargetMap(user.spaceId, portal.data?.target);
+          if (target && target.id !== map.id) {
+            enterPortal(user, target);
+            return;
+          }
         }
 
         // Update position & zone
         user.position = { x: data.x, y: data.y };
         user.direction = data.direction;
-        user.currentZoneId = privateZoneIdAt(map, data.x, data.y);
+        user.currentZoneId = privateZoneIdAt(map, tile.x, tile.y);
         user.lastSeen = Date.now();
 
-        // Broadcast move to all users
+        // Broadcast move to all users in the space (clients filter by mapId)
         toSpace(socket.id).emit("user:moved", {
           userId: socket.id,
           position: user.position,
           direction: user.direction,
           currentZoneId: user.currentZoneId,
+          mapId: user.mapId,
+          ...kartFields(),
         });
       },
     );
+
+    // The `model` field of a kart event's payload (the first non-function argument), if sent.
+    const kartModelArg = (args: unknown[]): unknown =>
+      (args.find((a) => a !== null && typeof a === "object") as { model?: unknown } | undefined)?.model;
+
+    // Gets into or out of a kart. Mounting takes the facing as the heading. Dismounting steps the
+    // user onto the nearest free walkable integer tile (not a portal, not a walking user's tile),
+    // facing the kart's heading. Replies through its ack with { ok, error? }.
+    // The `model` in the payload picks the car on mount; unknown or missing ids use the default.
+    socket.on("kart:toggle", (...args: unknown[]) => {
+      const reply = ackOf(args);
+      const user = users.get(socket.id);
+      const map = userMap(socket.id);
+      if (!user || !map) return reply({ ok: false, error: "Join a space first." });
+
+      if (!user.kart) {
+        if (!map.allowKarts) {
+          return reply({ ok: false, error: "Karts are only allowed on the race track." });
+        }
+        const model = kartModelArg(args);
+        user.kart = {
+          heading: headingFromDirection(user.direction),
+          model: isKartModel(model) ? model : DEFAULT_KART_MODEL,
+        };
+      } else {
+        const spot = findFreeTileNear(map, tileAt(user.position), {
+          maxRadius: 10,
+          isTaken: (x, y) => isOccupiedByOtherUser(map.id, x, y, socket.id, false, true),
+        });
+        if (!spot) return reply({ ok: false, error: "No free tile to step out onto." });
+        user.position = { x: spot.x, y: spot.y };
+        user.direction = directionFromHeading(user.kart.heading);
+        user.kart = null;
+        user.currentZoneId = privateZoneIdAt(map, spot.x, spot.y);
+      }
+
+      user.lastSeen = Date.now();
+      toSpace(socket.id).emit("user:updated", user);
+      reply({ ok: true });
+    });
+
+    // Picks the car. While driving the kart switches to it and the space is told; otherwise the
+    // client remembers the choice and sends it with its next kart:toggle.
+    socket.on("kart:select", (...args: unknown[]) => {
+      const reply = ackOf(args);
+      const user = users.get(socket.id);
+      const map = userMap(socket.id);
+      if (!user || !map) return reply({ ok: false, error: "Join a space first." });
+
+      const model = kartModelArg(args);
+      if (!isKartModel(model)) return reply({ ok: false, error: "Unknown car." });
+
+      if (user.kart) {
+        user.kart.model = model;
+        user.lastSeen = Date.now();
+        toSpace(socket.id).emit("user:updated", user);
+      }
+      reply({ ok: true });
+    });
+
+    // Takes a user through a portal to `target`: onto a free tile near that map's spawn, into its
+    // map room, with any kart cleared. The arrival is a user:updated for the space (not a move),
+    // and the user's own socket gets map:entered with the map to render.
+    function enterPortal(user: User, target: GridMap) {
+      const spot =
+        findFreeTileNear(target, target.spawnPoint, {
+          maxRadius: 10,
+          isTaken: (x, y) => isOccupiedByOtherUser(target.id, x, y, user.socketId),
+        }) ?? { ...target.spawnPoint };
+
+      moveUserToMap(user, target.id);
+      user.position = { x: spot.x, y: spot.y };
+      user.direction = "down";
+      user.currentZoneId = privateZoneIdAt(target, spot.x, spot.y);
+      user.lastSeen = Date.now();
+      lastPortalAt.set(user.socketId, Date.now());
+
+      socket.emit("map:entered", { currentMap: target, user });
+      toSpace(socket.id).emit("user:updated", user);
+    }
 
     // Handle User Profile / Status Update
     socket.on("user:update_profile", (updates: Partial<User>) => {
@@ -938,9 +1161,10 @@ async function startServer() {
       };
 
       if (payload.isSpatial) {
-        // Send to users within 8 tiles
+        // Send to users within 8 tiles, on the same map
         const PROXIMITY_CHAT_RADIUS = 8;
         usersIn(user.spaceId).forEach((otherUser) => {
+          if (otherUser.mapId !== user.mapId) return;
           const dist = Math.hypot(
             user.position.x - otherUser.position.x,
             user.position.y - otherUser.position.y,
@@ -1006,7 +1230,7 @@ async function startServer() {
     socket.on(
       "object:whiteboard_stroke",
       (payload: { objectId: string; stroke: WhiteboardStroke }) => {
-        const map = spaceMapOf(socket.id);
+        const map = userMap(socket.id);
         if (!map) return;
 
         const obj = map.objects.find((o) => o.id === payload.objectId);
@@ -1015,7 +1239,7 @@ async function startServer() {
           if (!obj.data.whiteboardStrokes) obj.data.whiteboardStrokes = [];
           obj.data.whiteboardStrokes.push(payload.stroke);
 
-          toSpace(socket.id).emit("object:whiteboard_updated", {
+          toMap(map.id).emit("object:whiteboard_updated", {
             objectId: payload.objectId,
             strokes: obj.data.whiteboardStrokes,
           });
@@ -1027,13 +1251,13 @@ async function startServer() {
 
     // Clear Whiteboard
     socket.on("object:whiteboard_clear", (payload: { objectId: string }) => {
-      const map = spaceMapOf(socket.id);
+      const map = userMap(socket.id);
       if (!map) return;
 
       const obj = map.objects.find((o) => o.id === payload.objectId);
       if (obj && obj.type === "whiteboard") {
         if (obj.data) obj.data.whiteboardStrokes = [];
-        toSpace(socket.id).emit("object:whiteboard_updated", {
+        toMap(map.id).emit("object:whiteboard_updated", {
           objectId: payload.objectId,
           strokes: [],
         });
@@ -1046,7 +1270,7 @@ async function startServer() {
     socket.on(
       "object:add_note",
       (payload: { objectId: string; note: StickyNote }) => {
-        const map = spaceMapOf(socket.id);
+        const map = userMap(socket.id);
         if (!map) return;
 
         const author = users.get(socket.id);
@@ -1079,7 +1303,7 @@ async function startServer() {
           if (!obj.data.notes) obj.data.notes = [];
           obj.data.notes.push(note);
 
-          toSpace(socket.id).emit("object:notes_updated", {
+          toMap(map.id).emit("object:notes_updated", {
             objectId: payload.objectId,
             notes: obj.data.notes,
           });
@@ -1098,7 +1322,7 @@ async function startServer() {
             stickyNotes: [note, ...(state.stickyNotes || [])],
           };
 
-          toSpace(socket.id).emit("map:object_updated", {
+          toMap(map.id).emit("map:object_updated", {
             objectId: payload.objectId,
             object: obj,
           });
@@ -1111,7 +1335,7 @@ async function startServer() {
     socket.on(
       "object:game_move",
       (payload: { objectId: string; index: number; symbol: "X" | "O" }) => {
-        const map = spaceMapOf(socket.id);
+        const map = userMap(socket.id);
         if (!map) return;
 
         const obj = map.objects.find((o) => o.id === payload.objectId);
@@ -1133,7 +1357,7 @@ async function startServer() {
         state.turn = payload.symbol === "X" ? "O" : "X";
         state.winner = findWinner(state.board, specFor(state.game));
 
-        toSpace(socket.id).emit("object:game_updated", {
+        toMap(map.id).emit("object:game_updated", {
           objectId: payload.objectId,
           gameState: state,
         });
@@ -1146,7 +1370,7 @@ async function startServer() {
     socket.on(
       "object:game_reset",
       (payload: { objectId: string; game?: GameTableGame }) => {
-        const map = spaceMapOf(socket.id);
+        const map = userMap(socket.id);
         if (!map) return;
 
         const obj = map.objects.find((o) => o.id === payload.objectId);
@@ -1159,7 +1383,7 @@ async function startServer() {
             : current.game;
         obj.data.gameState = createGameState(nextGame);
 
-        toSpace(socket.id).emit("object:game_updated", {
+        toMap(map.id).emit("object:game_updated", {
           objectId: payload.objectId,
           gameState: obj.data.gameState,
         });
@@ -1193,7 +1417,7 @@ async function startServer() {
           if (typeof ack === "function") ack({ ok, reason });
         };
 
-        const map = spaceMapOf(socket.id);
+        const map = userMap(socket.id);
         if (!map) return reply(false, "no_map");
 
         const user = users.get(socket.id);
@@ -1210,7 +1434,7 @@ async function startServer() {
           if (!canDeleteNote(user, note)) return reply(false, "not_allowed");
 
           obj.data!.notes = notes.filter((n) => n.id !== payload.noteId);
-          toSpace(socket.id).emit("object:notes_updated", {
+          toMap(map.id).emit("object:notes_updated", {
             objectId: payload.objectId,
             notes: obj.data!.notes,
           });
@@ -1227,7 +1451,7 @@ async function startServer() {
             return reply(false, "not_allowed");
 
           deskState.stickyNotes = notes.filter((n) => n.id !== payload.noteId);
-          toSpace(socket.id).emit("map:object_updated", {
+          toMap(map.id).emit("map:object_updated", {
             objectId: payload.objectId,
             object: obj,
           });
@@ -1251,7 +1475,7 @@ async function startServer() {
      * object:delete_note, which do their own authorisation.
      */
     function findDesk(objectId: string): MapObject | null {
-      const map = spaceMapOf(socket.id);
+      const map = userMap(socket.id);
       if (!map) return null;
       const obj = map.objects.find((o) => o.id === objectId);
       return obj && (obj.type === "desk" || obj.type === "computer")
@@ -1260,8 +1484,9 @@ async function startServer() {
     }
 
     function broadcastDesk(desk: MapObject) {
-      toSpace(socket.id).emit("map:object_updated", { objectId: desk.id, object: desk });
-      persistMap(spaceMapOf(socket.id));
+      const map = userMap(socket.id);
+      if (map) toMap(map.id).emit("map:object_updated", { objectId: desk.id, object: desk });
+      persistMap(map);
     }
 
     socket.on("object:desk_claim", (payload: { objectId: string }) => {
@@ -1336,7 +1561,7 @@ async function startServer() {
     socket.on("map:add_zone", (zone: PrivateZone) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
-      const map = spaceMapOf(socket.id);
+      const map = userMap(socket.id);
       if (!map) return;
 
       const existingIndex = map.privateZones.findIndex((z) => z.id === zone.id);
@@ -1346,15 +1571,15 @@ async function startServer() {
         map.privateZones.push(zone);
       }
 
-      // Recalculate zone for all users
-      usersIn(sender.spaceId).forEach((u) => {
+      // Recalculate zone for everyone on this map
+      usersOn(map.id).forEach((u) => {
         u.currentZoneId = privateZoneIdAt(map, u.position.x, u.position.y);
       });
 
       broadcastUsersWithFilter(sender.spaceId, "map:zones_updated", (userList) => ({
         privateZones: map.privateZones,
         users: userList,
-      }));
+      }), map.id);
 
       persistMap(map);
     });
@@ -1363,20 +1588,20 @@ async function startServer() {
     socket.on("map:remove_zone", (zoneId: string) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
-      const map = spaceMapOf(socket.id);
+      const map = userMap(socket.id);
       if (!map) return;
 
       map.privateZones = map.privateZones.filter((z) => z.id !== zoneId);
 
-      // Recalculate zone for all users
-      usersIn(sender.spaceId).forEach((u) => {
+      // Recalculate zone for everyone on this map
+      usersOn(map.id).forEach((u) => {
         u.currentZoneId = privateZoneIdAt(map, u.position.x, u.position.y);
       });
 
       broadcastUsersWithFilter(spaceIdOf(socket.id), "map:zones_updated", (userList) => ({
         privateZones: map.privateZones,
         users: userList,
-      }));
+      }), map.id);
 
       persistMap(map);
     });
@@ -1385,11 +1610,11 @@ async function startServer() {
     socket.on("map:place_object", (newObj: MapObject) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
-      const map = spaceMapOf(socket.id);
+      const map = userMap(socket.id);
       if (!map) return;
 
       map.objects.push(newObj);
-      toSpace(socket.id).emit("map:object_placed", newObj);
+      toMap(map.id).emit("map:object_placed", newObj);
       persistMap(map);
     });
 
@@ -1399,14 +1624,14 @@ async function startServer() {
       (payload: { objectId: string; x: number; y: number }) => {
         const sender = users.get(socket.id);
         if (!sender?.isAdmin) return;
-        const map = spaceMapOf(socket.id);
+        const map = userMap(socket.id);
         if (!map) return;
 
         const obj = map.objects.find((o) => o.id === payload.objectId);
         if (obj) {
           obj.x = payload.x;
           obj.y = payload.y;
-          toSpace(socket.id).emit("map:object_updated", {
+          toMap(map.id).emit("map:object_updated", {
             objectId: payload.objectId,
             object: obj,
           });
@@ -1419,11 +1644,11 @@ async function startServer() {
     socket.on("map:remove_object", (objectId: string) => {
       const sender = users.get(socket.id);
       if (!sender?.isAdmin) return;
-      const map = spaceMapOf(socket.id);
+      const map = userMap(socket.id);
       if (!map) return;
 
       map.objects = map.objects.filter((o) => o.id !== objectId);
-      toSpace(socket.id).emit("map:object_removed", objectId);
+      toMap(map.id).emit("map:object_removed", objectId);
       persistMap(map);
     });
 
@@ -1433,7 +1658,7 @@ async function startServer() {
       (payload: { x: number; y: number; tileType: any }) => {
         const sender = users.get(socket.id);
         if (!sender?.isAdmin) return;
-        const map = spaceMapOf(socket.id);
+        const map = userMap(socket.id);
         if (!map) return;
 
         if (
@@ -1443,7 +1668,7 @@ async function startServer() {
           payload.x < map.width
         ) {
           map.tiles[payload.y][payload.x] = payload.tileType;
-          toSpace(socket.id).emit("map:tile_changed", payload);
+          toMap(map.id).emit("map:tile_changed", payload);
           persistMap(map);
         }
       },
@@ -1456,17 +1681,16 @@ async function startServer() {
       const space = sender.spaceId ? spaces.get(sender.spaceId) : undefined;
       // Only maps that belong to the admin's own space can be switched to. The client asks for
       // a preset by its base id ("beach_retreat"); a space created after spaces existed owns
-      // namespaced copies of it ("<spaceId>:beach_retreat").
-      const targetId =
-        space && maps.get(mapId)?.spaceId === space.id
-          ? mapId
-          : space && `${space.id}:${mapId}`;
-      if (space && targetId && maps.get(targetId)?.spaceId === space.id) {
+      // namespaced copies of it ("<spaceId>:beach_retreat"). See resolveSpaceMapId.
+      const targetId = space
+        ? resolveSpaceMapId(space.id, mapId, (id) => maps.get(id))
+        : null;
+      if (space && targetId) {
         space.activeMapId = targetId;
         const newMap = maps.get(targetId)!;
         db.saveSpace(space);
 
-        // Teleport everyone in this space to spawn
+        // Teleport everyone in this space to spawn, onto the new map
         usersIn(space.id).forEach((u) => {
           u.position = { ...newMap.spawnPoint };
           u.currentZoneId = privateZoneIdAt(
@@ -1474,6 +1698,7 @@ async function startServer() {
             u.position.x,
             u.position.y,
           );
+          moveUserToMap(u, newMap.id);
         });
 
         broadcastUsersWithFilter(spaceIdOf(socket.id), "map:switched", (userList) => ({
@@ -1489,6 +1714,7 @@ async function startServer() {
       const leftSpaceId = spaceIdOf(socket.id);
       users.delete(socket.id);
       socketEmails.delete(socket.id);
+      lastPortalAt.delete(socket.id);
       relayAccess.unregister(socket.id);
       if (leftSpaceId) {
         io.to(room(leftSpaceId)).emit("user:left", socket.id);
@@ -1522,7 +1748,7 @@ async function startServer() {
         const sender = users.get(socket.id);
         if (!sender?.isAdmin) return;
 
-        const map = spaceMapOf(socket.id);
+        const map = userMap(socket.id);
         if (!map) return;
 
         const dummyId = `dummy_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
@@ -1558,6 +1784,7 @@ async function startServer() {
         };
 
         dummyUser.spaceId = sender.spaceId;
+        dummyUser.mapId = map.id;
         users.set(dummyId, dummyUser);
         emitToAdmins(spaceIdOf(socket.id), "user:joined", dummyUser);
       },
@@ -1578,7 +1805,8 @@ async function startServer() {
         const dummy = users.get(payload?.dummyId);
         if (!dummy || !dummy.isDummy || dummy.spaceId !== sender.spaceId) return;
 
-        const map = spaceMapOf(socket.id);
+        // The dummy is on its own map, which is not necessarily the admin's.
+        const map = mapOfUser(dummy);
         if (!map) return;
 
         dummy.position = { x: payload.x, y: payload.y };
@@ -1590,6 +1818,7 @@ async function startServer() {
           position: dummy.position,
           direction: dummy.direction,
           currentZoneId: dummy.currentZoneId,
+          mapId: dummy.mapId,
         });
       },
     );
@@ -1673,6 +1902,7 @@ async function startServer() {
           const PROXIMITY_CHAT_RADIUS = 8;
           for (const otherUser of usersIn(dummy.spaceId)) {
             if (!otherUser.isAdmin || otherUser.isDummy) continue;
+            if (otherUser.mapId !== dummy.mapId) continue;
             const dist = Math.hypot(
               dummy.position.x - otherUser.position.x,
               dummy.position.y - otherUser.position.y,

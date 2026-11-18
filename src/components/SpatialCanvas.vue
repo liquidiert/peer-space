@@ -2,8 +2,23 @@
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { ChevronUp, ChevronDown, ChevronLeft, ChevronRight } from "lucide-vue-next";
 import type { User, GridMap, MapObject, TileType } from "../types";
+import type { KartModel } from "../lib/kartModels";
 import { ACCENT, mixHex, type Ramp } from "../lib/pixelArt";
 import { AV_H, AV_INK as AVATAR_INK, AV_W, drawAvatarSprite } from "../lib/avatarSprite";
+import { directionFromHeading, lerpAngle, normalizeAngle } from "../lib/kart";
+import { drawKart, drawKartBoost, kartBodyColor } from "../lib/kartSprite";
+import {
+  ZOOM_DEFAULT,
+  ZOOM_STORAGE_KEY,
+  anchoredScroll,
+  centreScroll,
+  clampZoom,
+  halfViewInset,
+  mapPxFromClient,
+  parseStoredZoom,
+  tileFromClient,
+  zoomFactorFromWheel,
+} from "../lib/camera";
 
 const props = defineProps<{
   currentUser: User;
@@ -15,6 +30,11 @@ const props = defineProps<{
   selectedObject: MapObject | null;
   /** Drag on the map to describe a private zone rectangle, instead of typing coordinates. */
   zoneDrawMode?: boolean;
+  /**
+   * Our own kart while driving, sourced from the per-frame simulation: the exact tile position
+   * (currentUser.position only updates at the send cadence), the heading, and whether we skid.
+   */
+  localKart?: { x: number; y: number; heading: number; sliding: boolean; boost: boolean } | null;
 }>();
 
 const emit = defineEmits<{
@@ -31,7 +51,29 @@ const emit = defineEmits<{
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const scrollContainerRef = ref<HTMLDivElement | null>(null);
+/** Wraps the map; driving pads it so the kart can be centred at the edges (see setCameraInset). */
+const contentRef = ref<HTMLDivElement | null>(null);
 const CELL_SIZE = 48; // Each spatial tile is 48x48px
+
+// Map zoom (desktop mouse wheel). The canvas keeps its internal resolution; only its CSS size
+// scales, so every pointer conversion has to go through the laid-out rect (see clientToTile).
+function loadStoredZoom(): number {
+  try {
+    return parseStoredZoom(localStorage.getItem(ZOOM_STORAGE_KEY));
+  } catch (_) {
+    return ZOOM_DEFAULT;
+  }
+}
+const zoom = ref(loadStoredZoom());
+function storeZoom(value: number) {
+  try {
+    localStorage.setItem(ZOOM_STORAGE_KEY, String(value));
+  } catch (_) {}
+}
+
+/** Current padding added to the scroll content while driving (CSS px, per side). */
+let insetX = 0;
+let insetY = 0;
 
 // Object Drag & Drop State in Builder Mode
 const isDraggingObject = ref(false);
@@ -84,46 +126,172 @@ function updateIsMobile() {
 /** How much map to keep visible ahead of the avatar before the desktop camera nudges. */
 const EDGE_MARGIN = CELL_SIZE * 3;
 
+/**
+ * Where the canvas's top-left corner sits in the container's scroll space. This is not 0: the
+ * container's padding, the centring margin and any driving inset all move it. Scroll targets must
+ * be computed from this, not from 0.
+ */
+function canvasOriginInScroll(container: HTMLElement, canvas: HTMLElement) {
+  const c = container.getBoundingClientRect();
+  const r = canvas.getBoundingClientRect();
+  return {
+    left: r.left - c.left - container.clientLeft + container.scrollLeft,
+    top: r.top - c.top - container.clientTop + container.scrollTop,
+  };
+}
+
+/**
+ * While driving, the scrollable content is padded by half the view on each side, so the kart can
+ * be centred even next to a map edge (scrolling clamps at the content edges). Toggling the padding
+ * moves the canvas on screen, so the scroll is shifted by the same amount to keep the view still.
+ */
+function setCameraInset(x: number, y: number) {
+  const container = scrollContainerRef.value;
+  const content = contentRef.value;
+  const canvas = canvasRef.value;
+  if (!container || !content || !canvas) return;
+  if (x === insetX && y === insetY) return;
+
+  const before = canvasOriginInScroll(container, canvas);
+  content.style.padding = `${y}px ${x}px`;
+  insetX = x;
+  insetY = y;
+  const after = canvasOriginInScroll(container, canvas);
+  container.scrollLeft += after.left - before.left;
+  container.scrollTop += after.top - before.top;
+}
+
+function clampScroll(value: number, max: number): number {
+  return Math.max(0, Math.min(max, value));
+}
+
 function followCamera() {
   const container = scrollContainerRef.value;
-  if (!container) return;
+  const canvas = canvasRef.value;
+  if (!container || !canvas) return;
+
+  // Inset first: it moves the canvas origin, and the origin is measured below.
+  const driving = Boolean(props.currentUser.kart);
+  if (driving) setCameraInset(halfViewInset(container.clientWidth), halfViewInset(container.clientHeight));
+  else setCameraInset(0, 0);
 
   const displayPos = displayPosMap.get(props.currentUser.socketId);
   const tileX = displayPos?.x ?? props.currentUser.position?.x ?? 0;
   const tileY = displayPos?.y ?? props.currentUser.position?.y ?? 0;
-  const px = (tileX + 0.5) * CELL_SIZE;
-  const py = (tileY + 0.5) * CELL_SIZE;
+  // Tile centre in base (unzoomed) px, relative to the canvas origin.
+  const targetX = (tileX + 0.5) * CELL_SIZE;
+  const targetY = (tileY + 0.5) * CELL_SIZE;
 
-  if (isMobile.value) {
-    // Phones show only a handful of tiles, so the avatar is kept centred on both axes.
-    container.scrollTo({
-      left: px - container.clientWidth / 2,
-      top: py - container.clientHeight / 2,
-      behavior: 'auto',
-    });
+  const zoomNow = zoom.value;
+  const origin = canvasOriginInScroll(container, canvas);
+  const viewW = container.clientWidth;
+  const viewH = container.clientHeight;
+  const maxLeft = Math.max(0, container.scrollWidth - viewW);
+  const maxTop = Math.max(0, container.scrollHeight - viewH);
+
+  if (driving || isMobile.value) {
+    // Hard-centre on both axes. Driving needs it on desktop too: the kart has to stay in view
+    // while the player steers. Phones show only a handful of tiles, so they always centre.
+    const left = clampScroll(centreScroll(targetX, viewW, origin.left, zoomNow), maxLeft);
+    const top = clampScroll(centreScroll(targetY, viewH, origin.top, zoomNow), maxTop);
+    if (Math.round(left) !== Math.round(container.scrollLeft) || Math.round(top) !== Math.round(container.scrollTop)) {
+      container.scrollTo({ left, top, behavior: 'auto' });
+    }
     return;
   }
 
-  // Desktop follows horizontally only: the map is wider than most windows but generally
-  // fits vertically. It is also a dead-zone follow rather than a re-centre - this runs every
-  // animation frame, so hard-centring would make the map impossible to scroll by hand, and
-  // would yank the view on every single step.
+  // Desktop walking follows horizontally only: the map is wider than most windows but generally
+  // fits vertically. It is a dead-zone follow rather than a re-centre - this runs every animation
+  // frame, so hard-centring would make the map impossible to scroll by hand.
+  const avatarX = origin.left + targetX * zoomNow;
   const viewLeft = container.scrollLeft;
-  const viewRight = viewLeft + container.clientWidth;
+  const viewRight = viewLeft + viewW;
 
   let targetLeft = viewLeft;
-  if (px < viewLeft + EDGE_MARGIN) {
-    targetLeft = px - EDGE_MARGIN;
-  } else if (px > viewRight - EDGE_MARGIN) {
-    targetLeft = px - container.clientWidth + EDGE_MARGIN;
+  if (avatarX < viewLeft + EDGE_MARGIN) {
+    targetLeft = avatarX - EDGE_MARGIN;
+  } else if (avatarX > viewRight - EDGE_MARGIN) {
+    targetLeft = avatarX - viewW + EDGE_MARGIN;
   }
-
-  const maxLeft = Math.max(0, container.scrollWidth - container.clientWidth);
-  targetLeft = Math.max(0, Math.min(maxLeft, targetLeft));
+  targetLeft = clampScroll(targetLeft, maxLeft);
   // Omitting `top` leaves the vertical scroll exactly where the user put it.
   if (Math.round(targetLeft) !== Math.round(viewLeft)) {
     container.scrollTo({ left: targetLeft, behavior: 'auto' });
   }
+}
+
+/** Set the map's zoom and resize the canvas's CSS box right away, so the caller can read the new layout. */
+function setZoom(next: number) {
+  zoom.value = clampZoom(next);
+  storeZoom(zoom.value);
+  applyCanvasSize();
+}
+
+/** CSS size of the canvas = internal size * zoom. Only writes when the value changes. */
+function applyCanvasSize() {
+  const canvas = canvasRef.value;
+  const map = props.currentMap;
+  if (!canvas || !map) return;
+  const w = `${map.width * CELL_SIZE * zoom.value}px`;
+  const h = `${map.height * CELL_SIZE * zoom.value}px`;
+  if (canvas.style.width !== w) canvas.style.width = w;
+  if (canvas.style.height !== h) canvas.style.height = h;
+}
+
+/**
+ * Mouse wheel zooms the map on desktop. Walking keeps the map point under the cursor fixed;
+ * driving keeps the kart centred instead (followCamera does that).
+ */
+function handleWheel(e: WheelEvent) {
+  const target = e.target as HTMLElement | null;
+  if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
+  if (isMobile.value) return;
+  e.preventDefault();
+
+  const container = scrollContainerRef.value;
+  const canvas = canvasRef.value;
+  if (!container || !canvas || !props.currentMap) return;
+
+  const oldZoom = zoom.value;
+  const newZoom = clampZoom(oldZoom * zoomFactorFromWheel(e.deltaY, e.deltaMode, container.clientHeight));
+  if (newZoom === oldZoom) return;
+
+  const cRect = container.getBoundingClientRect();
+  const anchorX = e.clientX - cRect.left - container.clientLeft;
+  const anchorY = e.clientY - cRect.top - container.clientTop;
+  const oldLeft = container.scrollLeft;
+  const oldTop = container.scrollTop;
+  const before = canvasOriginInScroll(container, canvas);
+
+  // Synchronous: the new CSS size and the new scroll are applied before the next paint, so the
+  // zoom does not flash the old scroll position.
+  setZoom(newZoom);
+  const after = canvasOriginInScroll(container, canvas);
+
+  if (props.currentUser.kart) {
+    followCamera();
+    return;
+  }
+  container.scrollTo({
+    left: anchoredScroll(oldLeft, anchorX, oldZoom, newZoom, before.left, after.left),
+    top: anchoredScroll(oldTop, anchorY, oldZoom, newZoom, before.top, after.top),
+    behavior: 'auto',
+  });
+}
+
+/**
+ * The tile under a pointer event. Maps through the canvas's laid-out rect, which already includes
+ * zoom, so it is right at any zoom level. Returns (-1, -1) if the canvas is not laid out yet.
+ */
+function clientToTile(e: { clientX: number; clientY: number }): { x: number; y: number } {
+  const canvas = canvasRef.value;
+  const map = props.currentMap;
+  if (!canvas || !map) return { x: -1, y: -1 };
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: tileFromClient(e.clientX, rect.left, rect.width, map.width),
+    y: tileFromClient(e.clientY, rect.top, rect.height, map.height),
+  };
 }
 
 // ============================================================================
@@ -903,7 +1071,131 @@ function getTerrain(map: GridMap): HTMLCanvasElement {
 // Objects
 // ============================================================================
 
+/**
+ * A portal is a flat swirl on the floor, not furniture, so it gets no contact shadow. It is
+ * animated from Date.now() like the water; objects are redrawn every frame (they are not part
+ * of the terrain cache), so this moves without any extra bookkeeping.
+ */
+function renderPortal(ctx: CanvasRenderingContext2D, obj: MapObject) {
+  const cx = (obj.x + (obj.width || 1) / 2) * CELL_SIZE;
+  const cy = (obj.y + (obj.height || 1) / 2) * CELL_SIZE;
+  const r = CELL_SIZE * 0.42;
+  const t = Date.now() / 1000;
+  const TAU = Math.PI * 2;
+
+  ctx.save();
+  ctx.lineCap = 'round';
+
+  // Soft violet-to-cyan glow pooled on the floor.
+  const glow = ctx.createRadialGradient(cx, cy, 2, cx, cy, r * 1.2);
+  glow.addColorStop(0, 'rgba(192, 132, 252, 0.55)');
+  glow.addColorStop(0.6, 'rgba(34, 211, 238, 0.25)');
+  glow.addColorStop(1, 'rgba(34, 211, 238, 0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 1.2, 0, TAU);
+  ctx.fill();
+
+  // Three concentric rings spinning in alternating directions, each as two opposite arcs.
+  for (let i = 0; i < 3; i++) {
+    const radius = r * (1 - i * 0.26);
+    const spin = (i % 2 === 0 ? 1 : -1) * (2.4 - i * 0.5);
+    const start = t * spin + i * 2.1;
+    ctx.strokeStyle = i === 1 ? '#67e8f9' : '#c084fc';
+    ctx.lineWidth = 3 - i * 0.6;
+    for (const offset of [0, Math.PI]) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, start + offset, start + offset + Math.PI * 0.7);
+      ctx.stroke();
+    }
+  }
+
+  // Bright dot at the centre.
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 2.5 + Math.sin(t * 4) * 0.8, 0, TAU);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+/** Floating name over a portal, drawn after the avatars so it is never hidden behind them. */
+function renderPortalLabel(ctx: CanvasRenderingContext2D, obj: MapObject) {
+  const label = obj.data?.label || obj.name || 'Portal';
+  const cx = (obj.x + (obj.width || 1) / 2) * CELL_SIZE;
+  const top = obj.y * CELL_SIZE;
+
+  ctx.save();
+  ctx.font = 'bold 11px "Silkscreen", cursive';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const boxW = ctx.measureText(label).width + 14;
+  const boxH = 18;
+  const bx = cx - boxW / 2;
+  const by = top - boxH - 6;
+  ctx.fillStyle = '#1e1b4b';
+  ctx.fillRect(bx, by, boxW, boxH);
+  ctx.strokeStyle = '#c084fc';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(bx, by, boxW, boxH);
+  ctx.fillStyle = '#f5f3ff';
+  ctx.fillText(label, cx, by + boxH / 2 + 1);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------------------
+// Tire barrier sprite
+// ---------------------------------------------------------------------------
+// A stack of tires seen from above, filling the tile. Barriers are numerous (hundreds on the race
+// track) and objects are redrawn every frame, so each colour variant is rasterised once into an
+// offscreen tile and blitted. The painted band alternates red and white by tile parity, like the
+// striped barriers on real circuits.
+
+const TIRE_SIDEWALL = '#111827';
+const TIRE_TREAD = '#1f2937';
+const TIRE_TREAD_HI = '#374151';
+const TIRE_RIM = '#4b5563';
+const TIRE_HUB = '#6b7280';
+const TIRE_HUB_HI = '#9ca3af';
+const TIRE_BANDS = ['#b91c1c', '#e5e7eb'] as const;
+
+let tireSprites: HTMLCanvasElement[] | null = null;
+
+function drawTireSprite(band: string): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = CELL_SIZE;
+  canvas.height = CELL_SIZE;
+  const tctx = canvas.getContext('2d')!;
+  const centre = ART / 2;
+  for (let py = 0; py < ART; py++) {
+    for (let px = 0; px < ART; px++) {
+      // Distance of this art pixel's centre from the middle of the tile.
+      const d = Math.hypot(px + 0.5 - centre, py + 0.5 - centre);
+      let colour: string | null;
+      if (d > 7.2) colour = null; // beyond the stack: the floor shows through the corners
+      else if (d > 6.2) colour = TIRE_SIDEWALL;
+      else if (d > 4.8) colour = px + py <= 14 ? TIRE_TREAD_HI : TIRE_TREAD; // lit from top-left
+      else if (d > 3.8) colour = band;
+      else if (d > 2.2) colour = TIRE_RIM;
+      else if (d > 1.0) colour = TIRE_HUB;
+      else colour = TIRE_HUB_HI;
+      if (colour) fx(tctx, 0, 0, px, py, 1, 1, colour);
+    }
+  }
+  return canvas;
+}
+
+function tireSprite(x: number, y: number): HTMLCanvasElement {
+  if (!tireSprites) tireSprites = TIRE_BANDS.map((band) => drawTireSprite(band));
+  return tireSprites[(x + y) & 1];
+}
+
 function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
+  if (obj.type === 'portal') {
+    renderPortal(ctx, obj);
+    return;
+  }
+
   const ox = obj.x * CELL_SIZE;
   const oy = obj.y * CELL_SIZE;
   const W = (obj.width || 1) * ART; // object width in art pixels
@@ -914,11 +1206,19 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
   // Contact shadow. Two bands rather than one flat block: a tight, darker core right under
   // the object and a wider soft skirt, which is what sits a sprite *on* the floor instead of
   // hovering it over a grey rectangle. Matches the light direction used everywhere else.
-  fx(ctx, ox, oy, 1, H - 2, W - 1, 2, 'rgba(20, 26, 44, 0.38)');
-  fx(ctx, ox, oy, 2, H, W - 1, 1, 'rgba(20, 26, 44, 0.16)');
-  fx(ctx, ox, oy, W - 2, 2, 2, H - 2, 'rgba(20, 26, 44, 0.22)');
+  // Tire barriers fill their tile, so they have no visible floor shadow and skip it.
+  if (obj.type !== 'tires') {
+    fx(ctx, ox, oy, 1, H - 2, W - 1, 2, 'rgba(20, 26, 44, 0.38)');
+    fx(ctx, ox, oy, 2, H, W - 1, 1, 'rgba(20, 26, 44, 0.16)');
+    fx(ctx, ox, oy, W - 2, 2, 2, H - 2, 'rgba(20, 26, 44, 0.22)');
+  }
 
   switch (obj.type) {
+    case 'tires': {
+      ctx.drawImage(tireSprite(obj.x, obj.y), ox, oy);
+      break;
+    }
+
     case 'desk': {
       const isClaimed = !!obj.data?.deskState?.claimedByUserId;
       const wood: Ramp = isClaimed ? PALETTE.amber : PALETTE.oak;
@@ -1360,8 +1660,52 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
 }
 
 // Interpolated user positions map for smooth animated movement
-const displayPosMap = new Map<string, { x: number; y: number; isMoving: boolean }>();
+interface DisplayPos {
+  x: number;
+  y: number;
+  isMoving: boolean;
+  /** Displayed kart heading (radians), present only while the user is in a kart. */
+  heading?: number;
+  /** Whether the kart is boosting (draws the exhaust flame). */
+  boost?: boolean;
+  /** Car model of the kart; undefined draws the default car. */
+  model?: KartModel;
+}
+const displayPosMap = new Map<string, DisplayPos>();
 let animFrameId: number | null = null;
+
+// Tyre marks left by karts that are sliding. Each entry is a tile-space point and when it was laid.
+const SKID_MAX = 200;
+const SKID_LIFE_MS = 2000;
+const skidMarks: { x: number; y: number; born: number }[] = [];
+
+function addSkidMarks(x: number, y: number, heading: number, now: number) {
+  // Rear wheels: 0.28 tiles behind the kart centre, 0.3 tiles either side of the axis.
+  const fx = Math.cos(heading);
+  const fy = Math.sin(heading);
+  for (const side of [-1, 1]) {
+    skidMarks.push({
+      x: x + 0.5 - fx * 0.28 - fy * 0.3 * side,
+      y: y + 0.5 - fy * 0.28 + fx * 0.3 * side,
+      born: now,
+    });
+  }
+  while (skidMarks.length > SKID_MAX) skidMarks.shift();
+}
+
+function renderSkidMarks(ctx: CanvasRenderingContext2D, now: number) {
+  while (skidMarks.length > 0 && now - skidMarks[0].born > SKID_LIFE_MS) skidMarks.shift();
+  if (skidMarks.length === 0) return;
+  ctx.save();
+  ctx.fillStyle = 'rgb(15, 23, 42)';
+  for (const m of skidMarks) {
+    ctx.globalAlpha = 0.35 * (1 - (now - m.born) / SKID_LIFE_MS);
+    ctx.beginPath();
+    ctx.arc(m.x * CELL_SIZE, m.y * CELL_SIZE, 0.05 * CELL_SIZE, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
 
 // ============================================================================
 // Character avatars
@@ -1375,11 +1719,14 @@ function renderUser(
   ctx: CanvasRenderingContext2D,
   user: User,
   isSelf: boolean,
-  displayPos: { x: number; y: number; isMoving: boolean },
+  displayPos: DisplayPos,
   isGhost = false
 ) {
   const px = displayPos.x * CELL_SIZE + CELL_SIZE / 2;
   const py = displayPos.y * CELL_SIZE + CELL_SIZE / 2;
+  // Driving: the kart is drawn under the avatar, which then sits in it and faces the way it turns.
+  const kartHeading = displayPos.heading;
+  const onKart = kartHeading !== undefined;
 
   // The walking bounce lives in the sprite now, locked to the step it belongs to. It used
   // to be a sine applied to py here, which moved the body by fractional pixels - and since
@@ -1418,12 +1765,29 @@ function renderUser(
   // While an avatar lerps between tiles its centre lands on a fractional pixel; snapping the
   // sprite origin to whole screen pixels is what stops a pixel character shimmering as it
   // walks.
+  if (kartHeading !== undefined) {
+    if (displayPos.boost) {
+      drawKartBoost(ctx, px, py, kartHeading, CELL_SIZE, Date.now(), displayPos.model);
+    }
+    drawKart(
+      ctx,
+      px,
+      py,
+      kartHeading,
+      kartBodyColor(user.id, user.avatar?.outfitColor),
+      CELL_SIZE,
+      displayPos.model,
+    );
+  }
+
   const oxp = Math.round(px - (AV_W / 2) * PX);
-  const oyp = Math.round(py + 13 - AV_H * PX);
+  // Seated in the kart: the sprite rides up a few pixels so the body reads as sitting in it.
+  const oyp = Math.round(py + 13 - AV_H * PX - (onKart ? 6 : 0));
 
   drawAvatarSprite(ctx, oxp, oyp, PX, user.avatar, {
-    direction: user.direction,
-    walkPhase: displayPos.isMoving ? Math.floor(Date.now() / 120) % 4 : -1,
+    direction: kartHeading !== undefined ? directionFromHeading(kartHeading) : user.direction,
+    // No walk cycle in a kart: the body is not on its feet.
+    walkPhase: displayPos.isMoving && !onKart ? Math.floor(Date.now() / 120) % 4 : -1,
     presence: user.presenceStatus,
     showEmoji: true,
   });
@@ -1456,8 +1820,10 @@ function renderUser(
   ctx.restore();
 }
 
-// Main Render Loop
-function renderCanvas() {
+// Main Render Loop. `frameDt` is the seconds since the previous animation frame; it is zero for
+// renders triggered by a prop change, which must not advance the per-frame motion (headings,
+// skid detection) a second time.
+function renderCanvas(frameDt = 0) {
   const canvas = canvasRef.value;
   if (!canvas || !props.currentMap) return;
   const ctx = canvas.getContext('2d');
@@ -1471,6 +1837,8 @@ function renderCanvas() {
     canvas.width = map.width * CELL_SIZE;
     canvas.height = map.height * CELL_SIZE;
   }
+  // Display size follows zoom; the internal resolution above is unaffected by it.
+  applyCanvasSize();
   ctx.imageSmoothingEnabled = false;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -1478,6 +1846,7 @@ function renderCanvas() {
   // 1. Draw Tiles (cached; only the animated water highlights are per-frame work)
   ctx.drawImage(getTerrain(map), 0, 0);
   waterCells.forEach(({ x, y }) => renderWaterAnimation(ctx, x, y));
+  renderSkidMarks(ctx, performance.now());
 
   // 2. Draw Private Zones Overlays (Explicit & Desk Automatic Private Zones)
   const allZones: Array<{ id: string; name: string; color?: string; x: number; y: number; width: number; height: number; isDeskZone?: boolean }> = [
@@ -1657,14 +2026,27 @@ function renderCanvas() {
   }
 
   // 4. Draw Users with lerp position interpolation and walking animation
+  const advancing = frameDt > 0;
   props.users.forEach((user) => {
+    const isSelfUser = user.socketId === props.currentUser.socketId;
+    // Our own kart is simulated locally, so draw exactly where the simulation is. The users list
+    // lags one server round trip behind it.
+    const selfDriving = isSelfUser && Boolean(props.currentUser.kart);
+    const source = selfDriving ? (props.localKart ?? props.currentUser.position) : user.position;
+
     let currentPos = displayPosMap.get(user.socketId);
-    const targetX = user.position?.x ?? 0;
-    const targetY = user.position?.y ?? 0;
+    const targetX = source?.x ?? 0;
+    const targetY = source?.y ?? 0;
+    const prevX = currentPos?.x ?? targetX;
+    const prevY = currentPos?.y ?? targetY;
 
     if (!currentPos) {
       currentPos = { x: targetX, y: targetY, isMoving: false };
       displayPosMap.set(user.socketId, currentPos);
+    } else if (selfDriving) {
+      currentPos.x = targetX;
+      currentPos.y = targetY;
+      currentPos.isMoving = false;
     } else {
       const dx = targetX - currentPos.x;
       const dy = targetY - currentPos.y;
@@ -1686,8 +2068,58 @@ function renderCanvas() {
       }
     }
 
-    const isSelfUser = user.socketId === props.currentUser.socketId;
+    // Kart heading: ours is exact; everyone else's eases toward the last reported heading.
+    const kart = isSelfUser ? props.currentUser.kart : user.kart;
+    const targetHeading = kart
+      ? isSelfUser && props.localKart
+        ? props.localKart.heading
+        : kart.heading
+      : undefined;
+    if (targetHeading === undefined) {
+      currentPos.heading = undefined;
+    } else if (currentPos.heading === undefined || isSelfUser) {
+      currentPos.heading = targetHeading;
+    } else if (advancing) {
+      currentPos.heading = lerpAngle(currentPos.heading, targetHeading, 0.3);
+    }
+    // Boost is not eased: the flame should start and stop with the boost itself.
+    currentPos.boost =
+      targetHeading !== undefined &&
+      Boolean(isSelfUser ? props.localKart?.boost : kart?.boost);
+    // Our own kart's model comes from currentUser (set on pick), everyone else's from the users list.
+    currentPos.model = kart?.model;
+
+    // Tyre marks: ours from the simulation, anyone else's from their displayed motion against
+    // their displayed heading.
+    if (advancing && currentPos.heading !== undefined) {
+      let sliding = false;
+      if (isSelfUser) {
+        sliding = Boolean(props.localKart?.sliding);
+      } else {
+        const vx = (currentPos.x - prevX) / frameDt;
+        const vy = (currentPos.y - prevY) / frameDt;
+        // Above 30 tiles/s is a server jump, not a skid.
+        const speed = Math.hypot(vx, vy);
+        const moving = speed > 3 && speed < 30;
+        const slip = Math.abs(normalizeAngle(Math.atan2(vy, vx) - currentPos.heading));
+        sliding = moving && slip > 0.3;
+      }
+      if (sliding) addSkidMarks(currentPos.x, currentPos.y, currentPos.heading, performance.now());
+    }
+
     renderUser(ctx, user, isSelfUser, currentPos, isSelfUser && isGhostMode.value);
+  });
+
+  // 4.5 Portal names. Shown when you are close to one (or while building, when every target
+  //     matters), so the floor is not covered in labels.
+  (map.objects || []).forEach((obj) => {
+    if (obj.type !== 'portal') return;
+    // Live position: while driving, the per-frame kart simulation rather than the sent one.
+    const me = props.localKart ?? props.currentUser.position;
+    const px = obj.x + (obj.width || 1) / 2;
+    const py = obj.y + (obj.height || 1) / 2;
+    const near = me && Math.hypot(me.x + 0.5 - px, me.y + 0.5 - py) <= 3;
+    if (near || props.builderMode) renderPortalLabel(ctx, obj);
   });
 
   // 5. Zone being dragged out in the builder. Drawn last, on top of everything, so the
@@ -1723,8 +2155,13 @@ function renderCanvas() {
   followCamera();
 }
 
+let lastFrameMs: number | null = null;
 function startAnimLoop() {
-  renderCanvas();
+  const nowMs = performance.now();
+  // Clamped so a backgrounded tab does not make the first frame back fly across the map.
+  const frameDt = lastFrameMs === null ? 0 : Math.min(0.1, (nowMs - lastFrameMs) / 1000);
+  lastFrameMs = nowMs;
+  renderCanvas(frameDt);
   animFrameId = requestAnimationFrame(startAnimLoop);
 }
 
@@ -1733,6 +2170,8 @@ const KEY_MOVE_COOLDOWN_MS = 140;
 
 // Shared movement step, used by both keyboard input and the on-screen mobile D-pad
 function movePlayer(dx: number, dy: number, dir: 'up' | 'down' | 'left' | 'right') {
+  // Driving is handled by useKartDriving; grid steps would fight the kart simulation.
+  if (props.currentUser.kart) return;
   const now = Date.now();
   if (now - lastKeyMoveTime < KEY_MOVE_COOLDOWN_MS) {
     return;
@@ -1755,6 +2194,9 @@ function handleKeyDown(e: KeyboardEvent) {
     isGhostMode.value = true;
     return;
   }
+
+  // Driving: useKartDriving reads the arrow and WASD keys itself.
+  if (props.currentUser.kart) return;
 
   let dx = 0;
   let dy = 0;
@@ -1826,12 +2268,7 @@ function handlePointerDown(e: PointerEvent) {
   const canvas = canvasRef.value;
   if (!canvas) return;
 
-  const rect = canvas.getBoundingClientRect();
-  const mouseX = e.clientX - rect.left;
-  const mouseY = e.clientY - rect.top;
-
-  const tileX = Math.floor(mouseX / CELL_SIZE);
-  const tileY = Math.floor(mouseY / CELL_SIZE);
+  const { x: tileX, y: tileY } = clientToTile(e);
 
   // Drawing a zone owns the whole gesture - it must not also pick up and drag whatever
   // object happens to sit under the first corner.
@@ -1871,12 +2308,7 @@ function handlePointerMove(e: PointerEvent) {
   const canvas = canvasRef.value;
   if (!canvas || !props.currentMap) return;
 
-  const rect = canvas.getBoundingClientRect();
-  const mouseX = e.clientX - rect.left;
-  const mouseY = e.clientY - rect.top;
-
-  const tileX = Math.floor(mouseX / CELL_SIZE);
-  const tileY = Math.floor(mouseY / CELL_SIZE);
+  const { x: tileX, y: tileY } = clientToTile(e);
 
   if (props.zoneDrawMode) {
     if (zoneDragStart.value) zoneDragEnd.value = { x: tileX, y: tileY };
@@ -1993,9 +2425,10 @@ function handleContextMenu(e: MouseEvent) {
   const canvas = canvasRef.value;
   if (!canvas || props.builderMode) return;
 
+  // Hit test in base map px (the space sprites are drawn in), so it holds at any zoom.
   const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
+  const x = mapPxFromClient(e.clientX, rect.left, rect.width, canvas.width);
+  const y = mapPxFromClient(e.clientY, rect.top, rect.height, canvas.height);
 
   const hit = props.users.find((u) => {
     if (u.socketId === props.currentUser.socketId) return false;
@@ -2020,12 +2453,7 @@ function handleCanvasClick(e: MouseEvent) {
   const canvas = canvasRef.value;
   if (!canvas || !props.currentMap) return;
 
-  const rect = canvas.getBoundingClientRect();
-  const clickX = e.clientX - rect.left;
-  const clickY = e.clientY - rect.top;
-
-  const tileX = Math.floor(clickX / CELL_SIZE);
-  const tileY = Math.floor(clickY / CELL_SIZE);
+  const { x: tileX, y: tileY } = clientToTile(e);
 
   if (props.zoneDrawMode) return;
 
@@ -2069,7 +2497,10 @@ function handleCanvasClick(e: MouseEvent) {
       (o) => tileX >= o.x && tileX < o.x + o.width && tileY >= o.y && tileY < o.y + o.height
     );
 
-    if (clickedObj) {
+    if (clickedObj?.type === "portal") {
+      // Walk onto the portal; the server takes you through it on arrival.
+      emit("navigateTile", { x: clickedObj.x, y: clickedObj.y });
+    } else if (clickedObj) {
       emit("interactObject", clickedObj);
     } else {
       emit("navigateTile", { x: tileX, y: tileY });
@@ -2084,10 +2515,13 @@ onMounted(() => {
   window.addEventListener("pointerup", handleGlobalPointerUp);
   updateIsMobile();
   window.addEventListener("resize", updateIsMobile);
+  // Not passive: the wheel zooms the map, so the page must not scroll underneath it.
+  scrollContainerRef.value?.addEventListener("wheel", handleWheel, { passive: false });
   startAnimLoop();
 });
 
 onUnmounted(() => {
+  scrollContainerRef.value?.removeEventListener("wheel", handleWheel);
   window.removeEventListener("keydown", handleKeyDown);
   window.removeEventListener("keyup", handleKeyUp);
   window.removeEventListener("blur", endGhostMode);
@@ -2099,32 +2533,47 @@ onUnmounted(() => {
   }
 });
 
+// Another map (a portal, or an admin switching presets): forget everything that was about the
+// old one. Avatars snap to their new positions rather than gliding over from the old map's
+// coordinates, and any drag or hover still pointing at an object from the old map is dropped.
+watch(() => props.currentMap.id, () => {
+  displayPosMap.clear();
+  skidMarks.length = 0;
+  hoveredObject.value = null;
+  isDraggingObject.value = false;
+  draggedObject.value = null;
+  currentDragTile.value = null;
+  zoneDragStart.value = null;
+  zoneDragEnd.value = null;
+});
+
 watch([() => props.currentUser, () => props.users, () => props.currentMap, () => props.builderMode], () => {
   renderCanvas();
 }, { deep: true });
 </script>
 
 <template>
+  <!-- Centring is done with auto margins on the content, not flex justify-center: flex centring
+       pushes an overflowing map past the left edge, where scrolling cannot reach it. -->
   <div
     ref="scrollContainerRef"
-    :class="[
-      'w-full h-full overflow-auto custom-scrollbar p-4',
-      isMobile ? 'block' : 'flex justify-center items-start',
-    ]"
+    class="w-full h-full overflow-auto custom-scrollbar p-4"
   >
-    <div class="inline-block relative border-4 border-slate-900 shadow-[8px_8px_0px_0px_#020617] bg-slate-900 overflow-hidden rounded-2xl pixel-rendering">
-      <canvas
-        ref="canvasRef"
-        @click="handleCanvasClick"
-        @contextmenu="handleContextMenu"
-        @pointerdown="handlePointerDown"
-        @pointermove="handlePointerMove"
-        @pointerup="handlePointerUp"
-        @pointerleave="handlePointerLeave"
-        @pointercancel="handlePointerCancel"
-        :style="{ cursor: canvasCursor }"
-        class="block touch-none pixel-rendering"
-      />
+    <div ref="contentRef" class="w-max mx-auto">
+      <div class="block relative border-4 border-slate-900 shadow-[8px_8px_0px_0px_#020617] bg-slate-900 overflow-hidden rounded-2xl pixel-rendering">
+        <canvas
+          ref="canvasRef"
+          @click="handleCanvasClick"
+          @contextmenu="handleContextMenu"
+          @pointerdown="handlePointerDown"
+          @pointermove="handlePointerMove"
+          @pointerup="handlePointerUp"
+          @pointerleave="handlePointerLeave"
+          @pointercancel="handlePointerCancel"
+          :style="{ cursor: canvasCursor }"
+          class="block touch-none pixel-rendering"
+        />
+      </div>
     </div>
   </div>
 

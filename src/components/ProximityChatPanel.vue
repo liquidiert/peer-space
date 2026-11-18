@@ -73,8 +73,23 @@ function getDistance(otherUser: User): number {
   );
 }
 
+/** Maps share one coordinate space, so someone elsewhere can be standing right on top of us. */
+function isOnMyMap(otherUser: User): boolean {
+  return (otherUser.mapId ?? null) === (props.currentUser.mapId ?? null);
+}
+
+/** A friendly name for a map, from its id. Only the presets have one; anything else is "Elsewhere". */
+function mapBadge(mapId: string | undefined): string {
+  const id = mapId ?? '';
+  if (id.endsWith('race_track')) return '🏁 Race track';
+  if (id.endsWith('office_default')) return '🏢 Office';
+  if (id.endsWith('beach_retreat')) return '🌴 Beach';
+  return '🗺️ Elsewhere';
+}
+
 function getAudioVolume(otherUser: User): number {
   if (!props.currentUser || !otherUser) return 0;
+  if (!isOnMyMap(otherUser)) return 0;
   if (props.currentUser.isDeafened || otherUser.isMuted) return 0;
 
   const myZone = props.currentUser.currentZoneId;
@@ -220,28 +235,37 @@ function handleSend() {
               </div>
 
               <div class="flex items-center gap-1.5 text-[10px] text-slate-600 font-bold flex-wrap">
-                <span>{{ getDistance(user) === 0 ? 'Here' : `${getDistance(user)} tiles away` }}</span>
+                <!-- Another map: distances and zones there mean nothing here, so say where they are. -->
                 <span
-                  v-if="user.currentZoneId"
-                  class="text-indigo-950 bg-indigo-100 border border-slate-900 px-1.5 py-0.2 rounded font-extrabold flex items-center gap-1"
+                  v-if="!isOnMyMap(user)"
+                  class="text-slate-900 bg-amber-100 border border-slate-900 px-1.5 py-0.2 rounded font-extrabold"
                 >
-                  🔒 Private Zone
+                  {{ mapBadge(user.mapId) }}
                 </span>
-                <span
-                  v-if="user.socketId !== currentUser.socketId"
-                  :class="`border px-1.5 py-0.2 rounded font-black text-[9px] ${
-                    getAudioVolume(user) > 0
-                      ? 'bg-emerald-100 text-emerald-950 border-emerald-700'
-                      : 'bg-slate-100 text-slate-500 border-slate-300'
-                  }`"
-                >
-                  <template v-if="getAudioVolume(user) > 0">
-                    {{ currentUser.currentZoneId && user.currentZoneId ? '🔒 Zone Connected (100%)' : `🔉 ${getAudioVolume(user)}% vol` }}
-                  </template>
-                  <template v-else>
-                    {{ user.currentZoneId || currentUser.currentZoneId ? '🔒 Zone Muted' : '🔇 Out of range' }}
-                  </template>
-                </span>
+                <template v-else>
+                  <span>{{ getDistance(user) === 0 ? 'Here' : `${getDistance(user)} tiles away` }}</span>
+                  <span
+                    v-if="user.currentZoneId"
+                    class="text-indigo-950 bg-indigo-100 border border-slate-900 px-1.5 py-0.2 rounded font-extrabold flex items-center gap-1"
+                  >
+                    🔒 Private Zone
+                  </span>
+                  <span
+                    v-if="user.socketId !== currentUser.socketId"
+                    :class="`border px-1.5 py-0.2 rounded font-black text-[9px] ${
+                      getAudioVolume(user) > 0
+                        ? 'bg-emerald-100 text-emerald-950 border-emerald-700'
+                        : 'bg-slate-100 text-slate-500 border-slate-300'
+                    }`"
+                  >
+                    <template v-if="getAudioVolume(user) > 0">
+                      {{ currentUser.currentZoneId && user.currentZoneId ? '🔒 Zone Connected (100%)' : `🔉 ${getAudioVolume(user)}% vol` }}
+                    </template>
+                    <template v-else>
+                      {{ user.currentZoneId || currentUser.currentZoneId ? '🔒 Zone Muted' : '🔇 Out of range' }}
+                    </template>
+                  </span>
+                </template>
               </div>
             </div>
           </div>
@@ -282,8 +306,9 @@ function handleSend() {
               {{ user.isAdmin ? 'Remove admin' : 'Make admin' }}
             </button>
 
+            <!-- Teleport walks on our own map, so it has no meaning for someone on another one. -->
             <button
-              v-if="user.socketId !== currentUser.socketId"
+              v-if="user.socketId !== currentUser.socketId && isOnMyMap(user)"
               type="button"
               @click="emit('teleportToUser', { x: user.position.x, y: user.position.y })"
               title="Teleport to User"
