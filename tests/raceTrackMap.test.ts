@@ -49,8 +49,8 @@ const chebyshev = (a: { x: number; y: number }, b: { x: number; y: number }) =>
 
 describe('race track map', () => {
   const map = createRaceTrackMap();
-  const concrete = (x: number, y: number) => map.tiles[y][x] === 'floor_concrete';
-  const road = tilesOfType(map, 'floor_concrete');
+  const concrete = (x: number, y: number) => map.tiles[y][x] === 'asphalt';
+  const road = tilesOfType(map, 'asphalt');
 
   /** Length of the concrete run through (x, y) along one axis, counting (x, y) itself. */
   const run = (x: number, y: number, dx: number, dy: number) => {
@@ -173,9 +173,116 @@ describe('race track map', () => {
 
 /** Chebyshev distance from a tile to the nearest road tile, by brute force over the road list. */
 function roadDistanceFn(m: GridMap): (x: number, y: number) => number {
-  const cells = tilesOfType(m, 'floor_concrete');
+  const cells = tilesOfType(m, 'asphalt');
   return (x, y) => Math.min(...cells.map((c) => Math.max(Math.abs(c.x - x), Math.abs(c.y - y))));
 }
+
+describe('race track surface', () => {
+  const map = createRaceTrackMap();
+  const road = tilesOfType(map, 'asphalt');
+
+  it('paints the road as asphalt and leaves no concrete on the track', () => {
+    expect(road.length).toBeGreaterThanOrEqual(800);
+    expect(tilesOfType(map, 'floor_concrete')).toEqual([]);
+  });
+
+  it('keeps the pit lane as pit floor, not road', () => {
+    for (let x = 32; x < 36; x++) for (let y = 8; y < 13; y++) expect(map.tiles[y][x]).toBe('floor_tile');
+  });
+
+  it('is walkable and drivable: asphalt is road for walkers, karts and the server', () => {
+    const world = kartWorldFromMap(map);
+    for (const tile of road.slice(0, 200)) {
+      expect(isTileWalkable(map, tile.x, tile.y)).toBe(true);
+      expect(validateKartMove(map, tile.x + 0.5, tile.y + 0.5)).toBe(true);
+      expect(world.surfaceAt(tile.x, tile.y)).toBe('road');
+    }
+  });
+
+  it('keeps grass offroad next to the asphalt', () => {
+    const world = kartWorldFromMap(map);
+    expect(world.surfaceAt(25, 30)).toBe('offroad');
+  });
+});
+
+describe('race track finish line', () => {
+  const map = createRaceTrackMap();
+  const lines = map.objects.filter((o) => o.type === 'finish_line');
+  const line = lines[0];
+  const asphalt = (x: number, y: number) => map.tiles[y]?.[x] === 'asphalt';
+
+  it('is a single non-blocking object', () => {
+    expect(lines).toHaveLength(1);
+    expect(line.isBlocking).toBe(false);
+    expect(isTileWalkable(map, line.x, line.y)).toBe(true);
+    expect(validateKartMove(map, line.x + 0.5, line.y + 0.5)).toBe(true);
+  });
+
+  it('is one tile wide and spans exactly the road width on the bottom straight', () => {
+    expect(line.width).toBe(1);
+    expect(line.y).toBe(45);
+    expect(line.height).toBe(6);
+    // The road column under the line is asphalt from its first row to its last, and grass
+    // (or nothing) just beyond both ends, so the line covers the whole road and no more.
+    expect(asphalt(line.x, line.y - 1)).toBe(false);
+    expect(asphalt(line.x, line.y + line.height)).toBe(false);
+    for (let y = line.y; y < line.y + line.height; y++) expect(asphalt(line.x, y)).toBe(true);
+  });
+
+  it('sits on the middle of the bottom straight, on asphalt tiles only', () => {
+    expect(line.y + line.height / 2).toBe(48);
+    expect(line.x).toBeGreaterThanOrEqual(24);
+    expect(line.x).toBeLessThanOrEqual(63);
+    for (let y = line.y; y < line.y + line.height; y++) {
+      expect(map.tiles[y][line.x]).toBe('asphalt');
+    }
+  });
+});
+
+describe('race track direction arrows', () => {
+  const map = createRaceTrackMap();
+  const arrows = map.objects.filter((o) => o.type === 'track_arrow');
+  const line = map.objects.find((o) => o.type === 'finish_line')!;
+
+  /** The direction the race runs on the straight an arrow sits on (clockwise on screen). */
+  const straightDirection = (x: number, y: number) => {
+    if (y === 16) return 'right'; // top straight, east
+    if (x === 72) return 'down'; // right side, south
+    if (y === 48) return 'left'; // bottom straight, west
+    if (x === 16) return 'up'; // left side, north
+    return null;
+  };
+
+  it('places eight non-blocking arrows, each on asphalt with a direction', () => {
+    expect(arrows).toHaveLength(8);
+    for (const a of arrows) {
+      expect(a.isBlocking).toBe(false);
+      expect(a.width).toBe(1);
+      expect(a.height).toBe(1);
+      expect(map.tiles[a.y][a.x]).toBe('asphalt');
+      expect(['up', 'down', 'left', 'right']).toContain(a.data?.dir);
+      expect(isTileWalkable(map, a.x, a.y)).toBe(true);
+    }
+  });
+
+  it('points clockwise on each straight: top right, right side down, bottom left, left side up', () => {
+    for (const a of arrows) {
+      expect(straightDirection(a.x, a.y), `arrow at ${a.x},${a.y} is not on a straight`).not.toBeNull();
+      expect(a.data?.dir, `arrow at ${a.x},${a.y}`).toBe(straightDirection(a.x, a.y));
+    }
+    expect(arrows.some((a) => a.y === 16 && a.data?.dir === 'right')).toBe(true);
+    expect(arrows.some((a) => a.x === 72 && a.data?.dir === 'down')).toBe(true);
+    expect(arrows.some((a) => a.y === 48 && a.data?.dir === 'left')).toBe(true);
+    expect(arrows.some((a) => a.x === 16 && a.data?.dir === 'up')).toBe(true);
+  });
+
+  it('keeps clear of the finish line', () => {
+    for (const a of arrows) {
+      const onLine = a.x === line.x && a.y >= line.y && a.y < line.y + line.height;
+      expect(onLine).toBe(false);
+    }
+  });
+});
 
 describe('race track tire barriers', () => {
   const map = createRaceTrackMap();
@@ -244,7 +351,7 @@ describe('race track tire barriers', () => {
     const queue: [number, number][] = [];
     for (let y = 0; y < map.height; y++) {
       for (let x = 0; x < map.width; x++) {
-        if (map.tiles[y][x] === 'floor_concrete') {
+        if (map.tiles[y][x] === 'asphalt') {
           seen.add(`${x},${y}`);
           queue.push([x, y]);
         }
@@ -291,7 +398,7 @@ describe('race track pit lane', () => {
       }
     }
     // The strip meets the top straight's road directly below it.
-    for (let x = lane.x; x < lane.x + lane.width; x++) expect(map.tiles[lane.y + lane.height][x]).toBe('floor_concrete');
+    for (let x = lane.x; x < lane.x + lane.width; x++) expect(map.tiles[lane.y + lane.height][x]).toBe('asphalt');
   });
 
   it('is the only way from spawn onto the road: the walking path enters the lane', () => {
@@ -325,7 +432,7 @@ describe('race track upgrade', () => {
 
   it('stamps the preset with its version', () => {
     expect(createRaceTrackMap().presetVersion).toBe(RACE_TRACK_VERSION);
-    expect(RACE_TRACK_VERSION).toBe(4);
+    expect(RACE_TRACK_VERSION).toBe(5);
   });
 
   it('sets mapWideMedia, so everyone on the track is in media range', () => {
@@ -340,8 +447,12 @@ describe('race track upgrade', () => {
     expect(needsRaceTrackUpgrade({ ...createRaceTrackMap(), presetVersion: 2 })).toBe(true);
   });
 
-  it('leaves a version 4 track at the current size alone', () => {
-    expect(needsRaceTrackUpgrade({ ...createRaceTrackMap(), presetVersion: 4 })).toBe(false);
+  it('flags a version 4 track (concrete road, no finish line) for replacement', () => {
+    expect(needsRaceTrackUpgrade({ ...createRaceTrackMap(), presetVersion: 4 })).toBe(true);
+  });
+
+  it('leaves a version 5 track at the current size alone', () => {
+    expect(needsRaceTrackUpgrade({ ...createRaceTrackMap(), presetVersion: 5 })).toBe(false);
   });
 });
 

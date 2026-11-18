@@ -58,6 +58,7 @@ export type TileType =
   | 'floor_tile' 
   | 'floor_grass' 
   | 'floor_concrete'
+  | 'asphalt'
   | 'wall_brick'
   | 'wall_wood'
   | 'water';
@@ -74,7 +75,9 @@ export type ObjectType =
   | 'bookshelf'
   | 'door'
   | 'portal'
-  | 'tires';
+  | 'tires'
+  | 'finish_line'
+  | 'track_arrow';
 
 /**
  * Data on a 'portal' object (1x1, walkable). Stepping onto it moves the user to another map.
@@ -110,7 +113,10 @@ export interface MapObject {
     notes?: StickyNote[];
     gameState?: GameTableState;
     deskState?: DeskState;
-  } & Partial<PortalData>; // portal objects keep their PortalData here
+  } & Partial<PortalData> & {
+    /** Direction of travel for a 'track_arrow' (a non-blocking painted chevron). */
+    dir?: Direction;
+  }; // portal objects keep their PortalData here
 }
 
 export interface WhiteboardStroke {

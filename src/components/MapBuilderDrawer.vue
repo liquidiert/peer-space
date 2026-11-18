@@ -128,6 +128,7 @@ const TILE_PRESETS: { type: TileType; label: string; color: string }[] = [
   { type: "floor_tile", label: "Marble Tile", color: "#f1f5f9" },
   { type: "floor_grass", label: "Outdoor Grass", color: "#4d7c0f" },
   { type: "floor_concrete", label: "Grey Concrete", color: "#64748b" },
+  { type: "asphalt", label: "Asphalt", color: "#2b2f36" },
   { type: "wall_brick", label: "Brick Wall", color: "#b91c1c" },
   { type: "wall_wood", label: "Wood Wall", color: "#854d0e" },
   { type: "water", label: "Pool Water", color: "#06b6d4" },

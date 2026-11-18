@@ -4,7 +4,7 @@ import { ChevronUp, ChevronDown, ChevronLeft, ChevronRight } from "lucide-vue-ne
 import type { User, GridMap, MapObject, TileType } from "../types";
 import type { KartModel } from "../lib/kartModels";
 import { ACCENT, mixHex, type Ramp } from "../lib/pixelArt";
-import { AV_H, AV_INK as AVATAR_INK, AV_W, drawAvatarSprite } from "../lib/avatarSprite";
+import { AV_H, AV_INK as AVATAR_INK, AV_W, drawAvatarHead, drawAvatarSprite } from "../lib/avatarSprite";
 import { directionFromHeading, lerpAngle, normalizeAngle } from "../lib/kart";
 import { drawKart, drawKartBoost, kartBodyColor } from "../lib/kartSprite";
 import {
@@ -398,7 +398,20 @@ const TILE: Record<string, TileRamp> = {
     hi: '#a5e7f3',
     tones: ['#2a94bb', '#2c9ac2', '#2ea0c9'],
   },
+  // Race track road. Near-black, so the red and white kerbs and the white markings carry the eye.
+  asphalt: {
+    shadow: '#1b1e24',
+    dark: '#22262d',
+    base: '#2b2f36',
+    light: '#353a43',
+    hi: '#41474f',
+    tones: ['#292d34', '#2b2f36', '#2d3139'],
+  },
 };
+
+/** Kerb colours: a red and white band along the edge of the road. */
+const KERB_RED = '#b91c1c';
+const KERB_WHITE = '#e5e7eb';
 
 /**
  * Object ramps - furniture, props and screens.
@@ -828,6 +841,45 @@ function renderTile(
       break;
     }
 
+    case 'asphalt': {
+      const p = TILE.asphalt;
+      fx(ctx, ox, oy, 0, 0, ART, ART, p.base);
+
+      // Grit: sparse lighter and darker pixels, hashed on world position so the speckle is
+      // deterministic and does not repeat per cell.
+      for (let j = 0; j < ART; j++) {
+        for (let i = 0; i < ART; i++) {
+          const h = tileHash(x * ART + i, y * ART + j, 101);
+          if (h > 0.9) fx(ctx, ox, oy, i, j, 1, 1, p.light);
+          else if (h < 0.08) fx(ctx, ox, oy, i, j, 1, 1, p.dark);
+        }
+      }
+
+      // Kerbs run along each edge that faces grass, walls or anything else that is not road or
+      // pit lane. Two art pixels (6 screen pixels) deep, in 4-pixel blocks alternating red and
+      // white. The blocks are keyed on world position, so the stripes run unbroken around
+      // corners and across tile edges.
+      const KERB = 2;
+      const kerbFacing = (nx: number, ny: number) => {
+        const t = tiles[ny]?.[nx];
+        return t !== undefined && t !== 'asphalt' && t !== 'floor_tile';
+      };
+      const kerbBlock = (world: number) => (Math.floor(world / 4) % 2 ? KERB_WHITE : KERB_RED);
+      if (kerbFacing(x, y - 1)) {
+        for (let i = 0; i < ART; i++) fx(ctx, ox, oy, i, 0, 1, KERB, kerbBlock(x * ART + i));
+      }
+      if (kerbFacing(x, y + 1)) {
+        for (let i = 0; i < ART; i++) fx(ctx, ox, oy, i, ART - KERB, 1, KERB, kerbBlock(x * ART + i));
+      }
+      if (kerbFacing(x - 1, y)) {
+        for (let j = 0; j < ART; j++) fx(ctx, ox, oy, 0, j, KERB, 1, kerbBlock(y * ART + j));
+      }
+      if (kerbFacing(x + 1, y)) {
+        for (let j = 0; j < ART; j++) fx(ctx, ox, oy, ART - KERB, j, KERB, 1, kerbBlock(y * ART + j));
+      }
+      break;
+    }
+
     case 'wall_brick': {
       const p = TILE.brick;
       fx(ctx, ox, oy, 0, 0, ART, ART, p.shadow); // mortar
@@ -1206,8 +1258,9 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
   // Contact shadow. Two bands rather than one flat block: a tight, darker core right under
   // the object and a wider soft skirt, which is what sits a sprite *on* the floor instead of
   // hovering it over a grey rectangle. Matches the light direction used everywhere else.
-  // Tire barriers fill their tile, so they have no visible floor shadow and skip it.
-  if (obj.type !== 'tires') {
+  // Tire barriers fill their tile, and the start line and track arrows are painted on the road,
+  // so none of them has a visible floor shadow and they skip it.
+  if (obj.type !== 'tires' && obj.type !== 'finish_line' && obj.type !== 'track_arrow') {
     fx(ctx, ox, oy, 1, H - 2, W - 1, 2, 'rgba(20, 26, 44, 0.38)');
     fx(ctx, ox, oy, 2, H, W - 1, 1, 'rgba(20, 26, 44, 0.16)');
     fx(ctx, ox, oy, W - 2, 2, 2, H - 2, 'rgba(20, 26, 44, 0.22)');
@@ -1216,6 +1269,39 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
   switch (obj.type) {
     case 'tires': {
       ctx.drawImage(tireSprite(obj.x, obj.y), ox, oy);
+      break;
+    }
+
+    case 'finish_line': {
+      // Two columns of checks across the line's width, alternating down its length.
+      const CHECK = ART / 2;
+      for (let j = 0; j < H / CHECK; j++) {
+        for (let i = 0; i < W / CHECK; i++) {
+          fx(ctx, ox, oy, i * CHECK, j * CHECK, CHECK, CHECK, (i + j) % 2 ? '#f8fafc' : '#0f172a');
+        }
+      }
+      break;
+    }
+
+    case 'track_arrow': {
+      // A faint chevron on the road, pointing the way the race runs. The right-pointing shape is
+      // drawn once and rotated for the other three directions.
+      const dir = obj.data?.dir ?? 'right';
+      const place = (bx: number, by: number): [number, number] => {
+        switch (dir) {
+          case 'left': return [ART - 2 - bx, by];
+          case 'down': return [ART - 2 - by, bx];
+          case 'up': return [by, ART - 2 - bx];
+          default: return [bx, by];
+        }
+      };
+      ctx.globalAlpha = 0.5;
+      for (let t = 0; t < 5; t++) {
+        const [ax, ay] = place(4 + t, 4 + t); // upper arm
+        fx(ctx, ox, oy, ax, ay, 2, 2, '#ffffff');
+        const [bx, by] = place(4 + t, 10 - t); // lower arm
+        fx(ctx, ox, oy, bx, by, 2, 2, '#ffffff');
+      }
       break;
     }
 
@@ -1715,6 +1801,11 @@ function renderSkidMarks(ctx: CanvasRenderingContext2D, now: number) {
 // around it: proximity rings, the walk cycle driven by interpolated movement, and the name
 // tag - none of which belong in a preview.
 
+/** Art-pixel scale of a kart driver's head. The full sprite uses PX; the head is drawn smaller to fit the seat. */
+const KART_HEAD_SCALE = 2;
+/** Seat position along the kart's heading, as a fraction of a cell (negative = behind centre). 0 puts the head over the drawn cockpit, which is centred on every model. */
+const KART_SEAT_OFFSET = 0;
+
 function renderUser(
   ctx: CanvasRenderingContext2D,
   user: User,
@@ -1724,9 +1815,8 @@ function renderUser(
 ) {
   const px = displayPos.x * CELL_SIZE + CELL_SIZE / 2;
   const py = displayPos.y * CELL_SIZE + CELL_SIZE / 2;
-  // Driving: the kart is drawn under the avatar, which then sits in it and faces the way it turns.
+  // Driving: the kart is drawn under the driver's head, which sits in the seat and faces the way it turns.
   const kartHeading = displayPos.heading;
-  const onKart = kartHeading !== undefined;
 
   // The walking bounce lives in the sprite now, locked to the step it belongs to. It used
   // to be a sine applied to py here, which moved the body by fractional pixels - and since
@@ -1780,17 +1870,28 @@ function renderUser(
     );
   }
 
-  const oxp = Math.round(px - (AV_W / 2) * PX);
-  // Seated in the kart: the sprite rides up a few pixels so the body reads as sitting in it.
-  const oyp = Math.round(py + 13 - AV_H * PX - (onKart ? 6 : 0));
+  const direction = kartHeading !== undefined ? directionFromHeading(kartHeading) : user.direction;
+  // Y the name tag sits above (its bottom edge is this minus the gap).
+  let tagAnchorY: number;
+  if (kartHeading !== undefined) {
+    // Driving: only the head shows, sat in the seat just behind the kart's centre. Presence pip
+    // and status chip are not drawn while driving.
+    const seatX = px + Math.cos(kartHeading) * KART_SEAT_OFFSET * CELL_SIZE;
+    const seatY = py + Math.sin(kartHeading) * KART_SEAT_OFFSET * CELL_SIZE;
+    drawAvatarHead(ctx, seatX, seatY, KART_HEAD_SCALE, user.avatar, { direction });
+    tagAnchorY = py - CELL_SIZE / 2 - 4;
+  } else {
+    const oxp = Math.round(px - (AV_W / 2) * PX);
+    const oyp = Math.round(py + 13 - AV_H * PX);
 
-  drawAvatarSprite(ctx, oxp, oyp, PX, user.avatar, {
-    direction: kartHeading !== undefined ? directionFromHeading(kartHeading) : user.direction,
-    // No walk cycle in a kart: the body is not on its feet.
-    walkPhase: displayPos.isMoving && !onKart ? Math.floor(Date.now() / 120) % 4 : -1,
-    presence: user.presenceStatus,
-    showEmoji: true,
-  });
+    drawAvatarSprite(ctx, oxp, oyp, PX, user.avatar, {
+      direction,
+      walkPhase: displayPos.isMoving ? Math.floor(Date.now() / 120) % 4 : -1,
+      presence: user.presenceStatus,
+      showEmoji: true,
+    });
+    tagAnchorY = oyp - 6;
+  }
 
   // --- Name tag ---------------------------------------------------------------
   const nameText = isSelf ? `${user.name} (YOU)` : user.name;
@@ -1800,7 +1901,7 @@ function renderUser(
   const tagW = textWidth + 14;
   const tagH = 20;
   const tagX = Math.round(px - tagW / 2);
-  const tagY = oyp - tagH - 6;
+  const tagY = tagAnchorY - tagH;
 
   ctx.fillStyle = 'rgba(20, 26, 44, 0.45)';
   ctx.fillRect(tagX + 3, tagY + 3, tagW, tagH);

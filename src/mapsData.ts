@@ -1,4 +1,4 @@
-import { GridMap, TileType, MapObject, PrivateZone } from './types';
+import { GridMap, TileType, MapObject, PrivateZone, Direction } from './types';
 import { createGameState } from './lib/gameTable';
 
 export function createDefaultOfficeMap(): GridMap {
@@ -319,7 +319,7 @@ const RACE_TRACK_PIT_LANE = { x: 32, y: 8, width: 4, height: 5 };
  * Version of this preset. Stored tracks with an older (or no) version are rewritten on boot.
  * Bump whenever the layout changes.
  */
-export const RACE_TRACK_VERSION = 4;
+export const RACE_TRACK_VERSION = 5;
 
 /** Points on an arc from angle `from` to `to` (radians; y grows downward on the grid). */
 function arcPoints(
@@ -379,7 +379,7 @@ function isRaceTrackRoad(x: number, y: number): boolean {
 }
 
 /**
- * Chebyshev distance from every tile to the nearest concrete tile, by a BFS over the eight
+ * Chebyshev distance from every tile to the nearest asphalt tile, by a BFS over the eight
  * neighbours (each step adds 1, so the BFS depth is the Chebyshev distance). -1 where no road.
  */
 function distanceToRoad(tiles: TileType[][]): number[][] {
@@ -389,7 +389,7 @@ function distanceToRoad(tiles: TileType[][]): number[][] {
   const queue: [number, number][] = [];
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      if (tiles[y][x] === 'floor_concrete') {
+      if (tiles[y][x] === 'asphalt') {
         dist[y][x] = 0;
         queue.push([x, y]);
       }
@@ -428,7 +428,45 @@ function raceTrackBarrierTiles(tiles: TileType[][]): [number, number][] {
 }
 
 /**
- * The race track: a grass course with a closed six-wide concrete circuit, a pit area off the
+ * The start/finish line: a 1-wide object across the bottom straight at its midpoint, spanning the
+ * road's full width. Read from the asphalt itself, so it always matches the road.
+ */
+function raceTrackFinishLine(tiles: TileType[][]): MapObject {
+  const x = (TRACK_LEFT + TRACK_RIGHT) / 2; // midway along the bottom straight
+  let top = TRACK_BOTTOM;
+  while (tiles[top - 1]?.[x] === 'asphalt') top--;
+  let bottom = TRACK_BOTTOM;
+  while (tiles[bottom + 1]?.[x] === 'asphalt') bottom++;
+  return {
+    id: 'finish_line',
+    type: 'finish_line',
+    name: 'Start / Finish',
+    x,
+    y: top,
+    width: 1,
+    height: bottom - top + 1,
+    isBlocking: false,
+  };
+}
+
+/**
+ * Direction arrows painted on the straights, one every ten tiles or so. Each straight runs
+ * clockwise on screen: top east, right side south, bottom west, left side north. They sit on the
+ * straights' centre-line rows and columns, clear of the hairpin arms, pit lane and finish line.
+ */
+const RACE_TRACK_ARROWS: { x: number; y: number; dir: Direction }[] = [
+  { x: 26, y: 16, dir: 'right' },
+  { x: 56, y: 16, dir: 'right' },
+  { x: 72, y: 26, dir: 'down' },
+  { x: 72, y: 36, dir: 'down' },
+  { x: 34, y: 48, dir: 'left' },
+  { x: 54, y: 48, dir: 'left' },
+  { x: 16, y: 36, dir: 'up' },
+  { x: 16, y: 26, dir: 'up' },
+];
+
+/**
+ * The race track: a grass course with a closed six-wide asphalt circuit, a pit area off the
  * track (where users arrive) and a portal back to the space's main map. Karts are allowed.
  */
 export function createRaceTrackMap(): GridMap {
@@ -448,7 +486,7 @@ export function createRaceTrackMap(): GridMap {
       } else if (inRect(pit, x, y) || inRect(lane, x, y)) {
         row.push('floor_tile');
       } else if (isRaceTrackRoad(x, y)) {
-        row.push('floor_concrete');
+        row.push('asphalt');
       } else {
         row.push('floor_grass'); // offroad
       }
@@ -466,6 +504,20 @@ export function createRaceTrackMap(): GridMap {
     height: 1,
     isBlocking: true,
   }));
+  objects.push(raceTrackFinishLine(tiles));
+  RACE_TRACK_ARROWS.forEach((arrow, i) => {
+    objects.push({
+      id: `track_arrow_${i + 1}`,
+      type: 'track_arrow',
+      name: 'Track Direction',
+      x: arrow.x,
+      y: arrow.y,
+      width: 1,
+      height: 1,
+      isBlocking: false,
+      data: { dir: arrow.dir },
+    });
+  });
   objects.push({
     id: 'portal_main',
     type: 'portal',
