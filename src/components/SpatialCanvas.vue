@@ -409,9 +409,14 @@ const TILE: Record<string, TileRamp> = {
   },
 };
 
-/** Kerb colours: a red and white band along the edge of the road. */
-const KERB_RED = '#b91c1c';
-const KERB_WHITE = '#e5e7eb';
+/**
+ * Kerb colours: a red and white band along the edge of the road. Each has a darker shade for
+ * the row nearest the road, so the kerb reads as a raised lip rather than a flat stripe.
+ */
+const KERB_RED = '#c94a3d';
+const KERB_RED_SHADE = '#8c2f2c';
+const KERB_WHITE = '#ece7dc';
+const KERB_WHITE_SHADE = '#b8b2a6';
 
 /**
  * Object ramps - furniture, props and screens.
@@ -533,9 +538,19 @@ function shadedBlock(
 
 /** Deep neutral used for ambient occlusion, always applied translucently. */
 const AO = '#0b1220';
+/** Neutral metal for the threshold strip between two indoor floor materials. */
+const EDGE_TRIM = '#9aa1ab';
+/** Exposed earth at the lip of a lawn that runs up against a slab. */
+const SOIL = '#4e4129';
 
 function isWallTile(t?: TileType) {
   return t === 'wall_brick' || t === 'wall_wood';
+}
+
+const INDOOR_FLOORS: TileType[] = ['floor_wood', 'floor_carpet', 'floor_tile', 'floor_concrete'];
+
+function isIndoorFloor(t?: TileType) {
+  return t !== undefined && INDOOR_FLOORS.includes(t);
 }
 
 /** Translucent fill in art-pixel units - the soft-step counterpart to `fx`. */
@@ -591,6 +606,143 @@ function floorContactShadow(
   // Inner corners pool a little more darkness, the way real ambient occlusion does.
   if (isWallTile(at(0, -1)) && isWallTile(at(-1, 0))) fxa(ctx, ox, oy, 0, 0, 4, 4, AO, 0.16);
   if (isWallTile(at(0, -1)) && isWallTile(at(1, 0))) fxa(ctx, ox, oy, ART - 4, 0, 4, 4, AO, 0.12);
+}
+
+/**
+ * Where two different floor materials meet (indoor against indoor, or indoor against lawn) the
+ * boundary is otherwise a hard cut, which reads as unfinished. Each side of such an edge gets a
+ * thin treatment, painted from the cell that owns it:
+ *  - indoor/indoor: a metal threshold on the top/left cell and a soft shadow on each side of it,
+ *    so the seam reads as a fitted strip rather than two colours meeting;
+ *  - indoor/lawn: the slab gets a short dark edge, as if it stands a little proud of the ground;
+ *    the lawn gets a soil lip and a broken dither, so the grass looks tucked under the slab.
+ * Walls are deliberately excluded (they are not indoor or grass here), so floorContactShadow
+ * keeps sole ownership of wall edges. Asphalt and water keep their own kerbs and banks.
+ * Terrain is cached per cell and redrawn with its neighbours, so reading neighbours is safe.
+ */
+function floorTransitions(
+  ctx: CanvasRenderingContext2D,
+  ox: number,
+  oy: number,
+  x: number,
+  y: number,
+  tiles: TileType[][]
+) {
+  const self = tiles[y]?.[x];
+  const selfIndoor = isIndoorFloor(self);
+  if (!selfIndoor && self !== 'floor_grass') return;
+
+  // Out-of-bounds neighbours are undefined and fall through to null.
+  const kindAt = (dx: number, dy: number): 'indoor' | 'grass' | null => {
+    const t = tiles[y + dy]?.[x + dx];
+    if (t === undefined) return null;
+    if (!selfIndoor) return isIndoorFloor(t) ? 'indoor' : null;
+    if (t === 'floor_grass') return 'grass';
+    return isIndoorFloor(t) && t !== self ? 'indoor' : null;
+  };
+  const top = kindAt(0, -1);
+  const right = kindAt(1, 0);
+  const bottom = kindAt(0, 1);
+  const left = kindAt(-1, 0);
+  if (!top && !right && !bottom && !left) return;
+
+  // Art pixels a vertical side paints inwards from its edge. Indoor against indoor is 2 px on
+  // the left/top cell of the pair (threshold + shadow) but only 1 px on the right/bottom cell,
+  // which has just a soft shadow there.
+  const depth = (side: 'right' | 'left', kind: 'indoor' | 'grass' | null) => {
+    if (!kind) return 0;
+    if (selfIndoor && kind === 'indoor' && side === 'left') return 1;
+    return 2;
+  };
+  const dR = depth('right', right);
+  const dL = depth('left', left);
+
+  // Corner rule: vertical sides always run the full cell height, and horizontal sides are
+  // trimmed by the depth of the vertical side they meet. Each corner pixel is therefore painted
+  // by exactly one strip, so two translucent shadows never stack into a dark notch.
+  const h = (row: number, color: string, alpha: number) =>
+    fxa(ctx, ox, oy, dL, row, ART - dL - dR, 1, color, alpha);
+  const v = (col: number, color: string, alpha: number) =>
+    fxa(ctx, ox, oy, col, 0, 1, ART, color, alpha);
+
+  // Broken dither on the lawn: world-parity checkerboard, with about a quarter of the dots
+  // dropped so the lip looks worn rather than ruled.
+  const lawnDot = (i: number, j: number) => {
+    const wc = x * ART + i;
+    const wr = y * ART + j;
+    if (((wc + wr) & 1) !== 0 || tileHash(wc, wr, 61) < 0.25) return;
+    fxa(ctx, ox, oy, i, j, 1, 1, TILE.grass.shadow, 0.35);
+  };
+
+  if (selfIndoor) {
+    // The top/left cell of a pair owns the metal threshold; the bottom/right cell only takes the
+    // soft seam on its own edge. Trimmed horizontal strips never reach the corner (see above).
+    if (top === 'grass') {
+      h(0, OUTLINE, 0.45);
+      h(1, AO, 0.15);
+    } else if (top === 'indoor') {
+      h(0, AO, 0.22);
+    }
+    if (bottom === 'grass') {
+      h(ART - 1, OUTLINE, 0.45);
+      h(ART - 2, AO, 0.15);
+    } else if (bottom === 'indoor') {
+      h(ART - 1, EDGE_TRIM, 1);
+      h(ART - 2, AO, 0.18);
+    }
+    if (left === 'grass') {
+      v(0, OUTLINE, 0.45);
+      v(1, AO, 0.15);
+    } else if (left === 'indoor') {
+      v(0, AO, 0.22);
+    }
+    if (right === 'grass') {
+      v(ART - 1, OUTLINE, 0.45);
+      v(ART - 2, AO, 0.15);
+    } else if (right === 'indoor') {
+      v(ART - 1, EDGE_TRIM, 1);
+      v(ART - 2, AO, 0.18);
+    }
+  } else {
+    // Lawn beside a slab: a soil line on the edge, then broken dither for the next pixel.
+    if (top === 'indoor') {
+      h(0, SOIL, 0.55);
+      for (let i = dL; i < ART - dR; i++) lawnDot(i, 1);
+    }
+    if (bottom === 'indoor') {
+      h(ART - 1, SOIL, 0.55);
+      for (let i = dL; i < ART - dR; i++) lawnDot(i, ART - 2);
+    }
+    if (left === 'indoor') {
+      v(0, SOIL, 0.55);
+      for (let j = 0; j < ART; j++) lawnDot(1, j);
+    }
+    if (right === 'indoor') {
+      v(ART - 1, SOIL, 0.55);
+      for (let j = 0; j < ART; j++) lawnDot(ART - 2, j);
+    }
+  }
+}
+
+/**
+ * Smooth low-frequency wobble in art-pixel space, roughly +/-3px. Only used to bend the depth
+ * bands: a distance field alone gives concentric squares around a rectangular pond, and the
+ * wobble is what makes the contours look like a real bottom rather than a drawn frame.
+ */
+function waterNoise(wx: number, wy: number): number {
+  const gx = wx / 8;
+  const gy = wy / 8;
+  const x0 = Math.floor(gx);
+  const y0 = Math.floor(gy);
+  const sx = (gx - x0) ** 2 * (3 - 2 * (gx - x0));
+  const sy = (gy - y0) ** 2 * (3 - 2 * (gy - y0));
+  const v00 = tileHash(x0, y0, 113);
+  const v10 = tileHash(x0 + 1, y0, 113);
+  const v01 = tileHash(x0, y0 + 1, 113);
+  const v11 = tileHash(x0 + 1, y0 + 1, 113);
+  const top = v00 + (v10 - v00) * sx;
+  const bottom = v01 + (v11 - v01) * sx;
+  return ((top + (bottom - top) * sy) * 2 - 1) * 3;
 }
 
 function renderTile(
@@ -665,6 +817,7 @@ function renderTile(
       }
 
       floorContactShadow(ctx, ox, oy, x, y, tiles);
+      floorTransitions(ctx, ox, oy, x, y, tiles);
       break;
     }
 
@@ -701,6 +854,7 @@ function renderTile(
       }
 
       floorContactShadow(ctx, ox, oy, x, y, tiles);
+      floorTransitions(ctx, ox, oy, x, y, tiles);
       break;
     }
 
@@ -757,6 +911,7 @@ function renderTile(
       }
 
       floorContactShadow(ctx, ox, oy, x, y, tiles);
+      floorTransitions(ctx, ox, oy, x, y, tiles);
       break;
     }
 
@@ -801,7 +956,19 @@ function renderTile(
         fx(ctx, ox, oy, fxp + 1, fyp + 1, 1, 1, '#c39a4a');
       }
 
+      // Where the lawn meets water, a raised earth bank on the grass side. The darker row sits
+      // against the water so the lip reads as sitting above it.
+      if (tiles[y + 1]?.[x] === 'water') {
+        fx(ctx, ox, oy, 0, ART - 2, ART, 1, '#6b5a3a');
+        fx(ctx, ox, oy, 0, ART - 1, ART, 1, '#4e4129');
+      }
+      if (tiles[y]?.[x + 1] === 'water') {
+        fx(ctx, ox, oy, ART - 2, 0, 1, ART, '#6b5a3a');
+        fx(ctx, ox, oy, ART - 1, 0, 1, ART, '#4e4129');
+      }
+
       floorContactShadow(ctx, ox, oy, x, y, tiles);
+      floorTransitions(ctx, ox, oy, x, y, tiles);
       break;
     }
 
@@ -838,6 +1005,7 @@ function renderTile(
       }
 
       floorContactShadow(ctx, ox, oy, x, y, tiles);
+      floorTransitions(ctx, ox, oy, x, y, tiles);
       break;
     }
 
@@ -856,26 +1024,74 @@ function renderTile(
       }
 
       // Kerbs run along each edge that faces grass, walls or anything else that is not road or
-      // pit lane. Two art pixels (6 screen pixels) deep, in 4-pixel blocks alternating red and
-      // white. The blocks are keyed on world position, so the stripes run unbroken around
-      // corners and across tile edges.
-      const KERB = 2;
+      // pit lane. Three art pixels deep: the two outer rows take the block colour and the row
+      // nearest the road takes its shade. Blocks are 4 art pixels long, alternate red and white,
+      // and are keyed on world position, so the stripes run unbroken around corners and across
+      // tile edges. Each kerb with a road side gets a 35% dark lip line just inside it. The lip
+      // is skipped where the neighbouring kerb already covers that spot, so no shadow lands on
+      // top of the other kerb in a corner.
+      const KERB = 3;
       const kerbFacing = (nx: number, ny: number) => {
         const t = tiles[ny]?.[nx];
         return t !== undefined && t !== 'asphalt' && t !== 'floor_tile';
       };
-      const kerbBlock = (world: number) => (Math.floor(world / 4) % 2 ? KERB_WHITE : KERB_RED);
-      if (kerbFacing(x, y - 1)) {
-        for (let i = 0; i < ART; i++) fx(ctx, ox, oy, i, 0, 1, KERB, kerbBlock(x * ART + i));
+      const kerbColours = (world: number): [string, string] =>
+        Math.floor(world / 4) % 2 ? [KERB_WHITE, KERB_WHITE_SHADE] : [KERB_RED, KERB_RED_SHADE];
+      const topKerb = kerbFacing(x, y - 1);
+      const bottomKerb = kerbFacing(x, y + 1);
+      const leftKerb = kerbFacing(x - 1, y);
+      const rightKerb = kerbFacing(x + 1, y);
+
+      if (topKerb) {
+        for (let i = 0; i < ART; i++) {
+          const [block, shade] = kerbColours(x * ART + i);
+          fx(ctx, ox, oy, i, 0, 1, KERB - 1, block);
+          fx(ctx, ox, oy, i, KERB - 1, 1, 1, shade);
+        }
       }
-      if (kerbFacing(x, y + 1)) {
-        for (let i = 0; i < ART; i++) fx(ctx, ox, oy, i, ART - KERB, 1, KERB, kerbBlock(x * ART + i));
+      if (bottomKerb) {
+        for (let i = 0; i < ART; i++) {
+          const [block, shade] = kerbColours(x * ART + i);
+          fx(ctx, ox, oy, i, ART - KERB + 1, 1, KERB - 1, block);
+          fx(ctx, ox, oy, i, ART - KERB, 1, 1, shade);
+        }
       }
-      if (kerbFacing(x - 1, y)) {
-        for (let j = 0; j < ART; j++) fx(ctx, ox, oy, 0, j, KERB, 1, kerbBlock(y * ART + j));
+      if (leftKerb) {
+        for (let j = 0; j < ART; j++) {
+          const [block, shade] = kerbColours(y * ART + j);
+          fx(ctx, ox, oy, 0, j, KERB - 1, 1, block);
+          fx(ctx, ox, oy, KERB - 1, j, 1, 1, shade);
+        }
       }
-      if (kerbFacing(x + 1, y)) {
-        for (let j = 0; j < ART; j++) fx(ctx, ox, oy, ART - KERB, j, KERB, 1, kerbBlock(y * ART + j));
+      if (rightKerb) {
+        for (let j = 0; j < ART; j++) {
+          const [block, shade] = kerbColours(y * ART + j);
+          fx(ctx, ox, oy, ART - KERB + 1, j, KERB - 1, 1, block);
+          fx(ctx, ox, oy, ART - KERB, j, 1, 1, shade);
+        }
+      }
+
+      // Lip shadows, one art pixel just inside each kerb. Each run stops short of any kerb that
+      // runs across its end (the cross-kerb spans below).
+      if (topKerb) {
+        for (let i = leftKerb ? KERB : 0; i < (rightKerb ? ART - KERB : ART); i++) {
+          fxa(ctx, ox, oy, i, KERB, 1, 1, OUTLINE, 0.35);
+        }
+      }
+      if (bottomKerb) {
+        for (let i = leftKerb ? KERB : 0; i < (rightKerb ? ART - KERB : ART); i++) {
+          fxa(ctx, ox, oy, i, ART - KERB - 1, 1, 1, OUTLINE, 0.35);
+        }
+      }
+      if (leftKerb) {
+        for (let j = topKerb ? KERB : 0; j < (bottomKerb ? ART - KERB : ART); j++) {
+          fxa(ctx, ox, oy, KERB, j, 1, 1, OUTLINE, 0.35);
+        }
+      }
+      if (rightKerb) {
+        for (let j = topKerb ? KERB : 0; j < (bottomKerb ? ART - KERB : ART); j++) {
+          fxa(ctx, ox, oy, ART - KERB - 1, j, 1, 1, OUTLINE, 0.35);
+        }
       }
       break;
     }
@@ -978,38 +1194,140 @@ function renderTile(
 
     case 'water': {
       const p = TILE.water;
-      // Depth: shallower (lighter) the closer a cell is to a non-water neighbour, which is
-      // what makes a body of water read as having a bottom instead of being a blue rectangle.
-      const nearShore =
-        tiles[y - 1]?.[x] !== 'water' ||
-        tiles[y + 1]?.[x] !== 'water' ||
-        tiles[y]?.[x - 1] !== 'water' ||
-        tiles[y]?.[x + 1] !== 'water';
-      fx(ctx, ox, oy, 0, 0, ART, ART, nearShore ? p.light : p.base);
-
-      for (let j = 0; j < ART; j += 4) {
-        for (let i = 0; i < ART; i += 4) {
-          const wx = (x * ART + i) >> 2;
-          const wy = (y * ART + j) >> 2;
-          if (tileHash(wx, wy, 71) > 0.7) fxa(ctx, ox, oy, i, j, 4, 4, p.dark, 0.35);
+      // Out-of-bounds cells count as water, so the map's outer edge doesn't grow a shoreline.
+      const land: Array<{ dx: number; dy: number }> = [];
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const t = tiles[y + dy]?.[x + dx];
+          if ((dx !== 0 || dy !== 0) && t !== undefined && t !== 'water') land.push({ dx, dy });
         }
       }
 
-      // Foam where the water meets land, fading out over three pixels rather than stopping
-      // dead - a hard band of highlight along the shore reads as a drawing error.
-      if (tiles[y - 1]?.[x] !== undefined && tiles[y - 1]?.[x] !== 'water') {
-        fxa(ctx, ox, oy, 0, 0, ART, 1, p.hi, 0.55);
-        fxa(ctx, ox, oy, 0, 1, ART, 1, p.hi, 0.3);
-        dither(ctx, ox, oy, 0, 2, ART, 2, p.light, (x + y) % 2);
+      // Convex shore corners: where grass wraps a water corner (both orthogonal neighbours and the
+      // diagonal between them), the corner is cut by a quarter circle instead of a square. Walls and
+      // other floors keep hard corners, since a curve there would read as soft.
+      const R = 6;
+      const roundCorners = [
+        { flipX: false, flipY: false, dx: -1, dy: -1 }, // NW
+        { flipX: true, flipY: false, dx: 1, dy: -1 }, // NE
+        { flipX: false, flipY: true, dx: -1, dy: 1 }, // SW
+        { flipX: true, flipY: true, dx: 1, dy: 1 }, // SE
+      ].filter(
+        ({ dx, dy }) =>
+          tiles[y + dy]?.[x + dx] === 'floor_grass' &&
+          tiles[y]?.[x + dx] === 'floor_grass' &&
+          tiles[y + dy]?.[x] === 'floor_grass'
+      );
+
+      // Distance from every art pixel to the nearest land rectangle, with diagonal cells included
+      // so convex corners round off instead of stepping. `cast` is the same measure restricted to
+      // land above or left of the pixel, since that's the land whose shadow falls onto the water.
+      // Inside a rounded corner the land is the arc itself, so pixels measure to the arc.
+      const DEPTH_CAP = 24;
+      const depth = new Float32Array(ART * ART);
+      const cast = new Float32Array(ART * ART);
+      const cornerLand = new Uint8Array(ART * ART);
+      const cornerBank = new Uint8Array(ART * ART);
+      for (let j = 0; j < ART; j++) {
+        for (let i = 0; i < ART; i++) {
+          const k = j * ART + i;
+          let inCorner = false;
+          let isBank = false;
+          let arcD = DEPTH_CAP;
+          let arcCast = DEPTH_CAP;
+          for (const c of roundCorners) {
+            // Mirror into the corner's own frame so one quarter circle serves all four.
+            const mi = c.flipX ? ART - 1 - i : i;
+            const mj = c.flipY ? ART - 1 - j : j;
+            if (mi >= R || mj >= R) continue;
+            const dC = Math.hypot(mi + 0.5 - R, mj + 0.5 - R);
+            if (dC > R) {
+              inCorner = true;
+              // Land pixels touching the water get the dark bank row, like the grass bank elsewhere.
+              const waterRight = mi + 1 >= R || Math.hypot(mi + 1.5 - R, mj + 0.5 - R) <= R;
+              const waterBelow = mj + 1 >= R || Math.hypot(mi + 0.5 - R, mj + 1.5 - R) <= R;
+              if (waterRight || waterBelow) isBank = true;
+            } else {
+              const arc = R - dC;
+              if (arc < arcD) arcD = arc;
+              if ((c.dx < 0 || c.dy < 0) && arc < arcCast) arcCast = arc;
+            }
+          }
+          if (inCorner) {
+            cornerLand[k] = 1;
+            if (isBank) cornerBank[k] = 1;
+            continue;
+          }
+
+          const px = i + 0.5;
+          const py = j + 0.5;
+          let dAll = Math.min(DEPTH_CAP, arcD);
+          let dCast = Math.min(DEPTH_CAP, arcCast);
+          for (const { dx, dy } of land) {
+            const x0 = dx * ART;
+            const y0 = dy * ART;
+            const ddx = Math.max(x0 - px, 0, px - (x0 + ART));
+            const ddy = Math.max(y0 - py, 0, py - (y0 + ART));
+            const d = Math.min(DEPTH_CAP, Math.hypot(ddx, ddy));
+            if (d < dAll) dAll = d;
+            if ((dx < 0 || dy < 0) && d < dCast) dCast = d;
+          }
+          depth[k] = dAll;
+          cast[k] = dCast;
+        }
       }
-      if (tiles[y + 1]?.[x] !== undefined && tiles[y + 1]?.[x] !== 'water') {
-        fxa(ctx, ox, oy, 0, ART - 1, ART, 1, p.hi, 0.35);
+
+      // Depth bands with dithered seams between them. The bands are read through a wobble so the
+      // contours are organic; shadow and foam below use the raw distance so the shoreline stays crisp.
+      for (let j = 0; j < ART; j++) {
+        for (let i = 0; i < ART; i++) {
+          const k = j * ART + i;
+          const wx = x * ART + i;
+          const wy = y * ART + j;
+          if (cornerLand[k]) {
+            fx(ctx, ox, oy, i, j, 1, 1, cornerBank[k] ? '#4e4129' : TILE.grass.base);
+            continue;
+          }
+          const d = depth[k];
+          const checker = (wx + wy) % 2 === 0;
+          const n = waterNoise(wx, wy);
+          const de = d + n;
+          let c: string;
+          if (de < 3) c = p.light;
+          else if (de < 6) c = checker ? p.light : p.base;
+          else if (de < 12) c = p.base;
+          else if (de < 14) c = checker ? p.base : p.dark;
+          else c = p.dark;
+          fx(ctx, ox, oy, i, j, 1, 1, c);
+
+          // Land above or left casts a 2px shadow onto the water, then the foam sits one pixel
+          // beyond it. Without a cast shadow the foam sits one pixel out from the bank directly.
+          const castD = cast[k];
+          if (castD < 2) fxa(ctx, ox, oy, i, j, 1, 1, p.shadow, 0.45);
+          const start = castD <= d + 0.01 ? 2 : 1;
+          if (d >= start && d < start + 1) {
+            fxa(ctx, ox, oy, i, j, 1, 1, p.hi, 0.7);
+          } else if (d >= start + 1 && d < start + 2) {
+            // Broken foam: thin, dithered and patchy so the line looks like wash, not a border.
+            if (checker && tileHash(wx, wy, 83) > 0.35) fxa(ctx, ox, oy, i, j, 1, 1, p.hi, 0.45);
+          } else if (d >= start + 2 && d < start + 3) {
+            if ((wx + wy) % 4 === 0 && tileHash(wx, wy, 84) > 0.6) fxa(ctx, ox, oy, i, j, 1, 1, p.hi, 0.3);
+          }
+        }
       }
-      if (tiles[y]?.[x - 1] !== undefined && tiles[y]?.[x - 1] !== 'water') {
-        fxa(ctx, ox, oy, 0, 0, 1, ART, p.hi, 0.35);
-      }
-      if (tiles[y]?.[x + 1] !== undefined && tiles[y]?.[x + 1] !== 'water') {
-        fxa(ctx, ox, oy, ART - 1, 0, 1, ART, p.hi, 0.35);
+
+      // Sparse ripples: short horizontal lines one step lighter than the water beneath, kept out
+      // of the shore zone so they never read as a second foam line. Two per cell at most.
+      for (let r = 0; r < 2; r++) {
+        if (tileHash(x, y, 90 + r) < 0.5) continue;
+        const ry = 4 + Math.floor(tileHash(x, y, 92 + r) * 9);
+        const rx = Math.floor(tileHash(x, y, 94 + r) * 12);
+        const rw = 2 + Math.floor(tileHash(x, y, 96 + r) * 2);
+        for (let i = rx; i < rx + rw; i++) {
+          const d = depth[ry * ART + i];
+          if (d < 6) continue;
+          fxa(ctx, ox, oy, i, ry, 1, 1, d < 12 ? p.light : p.base, 0.6);
+        }
       }
       break;
     }
@@ -1030,14 +1348,16 @@ function renderWaterAnimation(ctx: CanvasRenderingContext2D, x: number, y: numbe
   const t = Math.floor(Date.now() / 260);
   for (let i = 0; i < 3; i++) {
     const seed = tileHash(x, y, 60 + i);
-    const ry = 1 + Math.floor(seed * 13);
+    // Rows 3-12 keep the moving highlights clear of the north and south shore foam, which sits
+    // in the outer two or three rows of the cell.
+    const ry = 3 + Math.floor(seed * 10);
     const rx = ((Math.floor(seed * 7) + t) % 22) - 5;
     const rw = 4 + Math.floor(seed * 4);
     if (rx + rw <= 0 || rx >= ART) continue;
     const left = Math.max(rx, 0);
     const right = Math.min(rx + rw, ART);
-    fxa(ctx, ox, oy, left, ry, right - left, 1, p.hi, 0.55);
-    fxa(ctx, ox, oy, left + 1, ry - 1, Math.max(1, right - left - 2), 1, p.hi, 0.28);
+    fxa(ctx, ox, oy, left, ry, right - left, 1, p.hi, 0.4);
+    fxa(ctx, ox, oy, left + 1, ry - 1, Math.max(1, right - left - 2), 1, p.hi, 0.2);
   }
 }
 
@@ -1125,49 +1445,66 @@ function getTerrain(map: GridMap): HTMLCanvasElement {
 
 /**
  * A portal is a flat swirl on the floor, not furniture, so it gets no contact shadow. It is
- * animated from Date.now() like the water; objects are redrawn every frame (they are not part
- * of the terrain cache), so this moves without any extra bookkeeping.
+ * drawn per art pixel like everything else, so the ring edges stay on the grid, and animated
+ * from Date.now(). Objects are redrawn every frame (they are not part of the terrain cache),
+ * so the rotation needs no extra bookkeeping. Each pixel picks its colour from its distance
+ * from the centre and, for the rings, its angle: segments rotate by shifting the angle sampled
+ * over time, so the pattern turns without any pixel having to move.
  */
 function renderPortal(ctx: CanvasRenderingContext2D, obj: MapObject) {
-  const cx = (obj.x + (obj.width || 1) / 2) * CELL_SIZE;
-  const cy = (obj.y + (obj.height || 1) / 2) * CELL_SIZE;
-  const r = CELL_SIZE * 0.42;
+  const ox = obj.x * CELL_SIZE;
+  const oy = obj.y * CELL_SIZE;
+  const W = (obj.width || 1) * ART;
+  const H = (obj.height || 1) * ART;
+  const cx = W / 2;
+  const cy = H / 2;
+  const mid = W / 2;
   const t = Date.now() / 1000;
   const TAU = Math.PI * 2;
+  const wrap = (v: number) => ((v % TAU) + TAU) % TAU;
+  // Centre pulse: the plus-shaped ring around the core toggles on and off twice a second.
+  const pulseOn = Math.floor(t * 2) % 2 === 1;
 
   ctx.save();
-  ctx.lineCap = 'round';
+  for (let j = 0; j < H; j++) {
+    for (let i = 0; i < W; i++) {
+      const dx = i + 0.5 - cx;
+      const dy = j + 0.5 - cy;
+      const d = Math.hypot(dx, dy);
+      if (d > 8) continue;
+      const a = Math.atan2(dy, dx);
 
-  // Soft violet-to-cyan glow pooled on the floor.
-  const glow = ctx.createRadialGradient(cx, cy, 2, cx, cy, r * 1.2);
-  glow.addColorStop(0, 'rgba(192, 132, 252, 0.55)');
-  glow.addColorStop(0.6, 'rgba(34, 211, 238, 0.25)');
-  glow.addColorStop(1, 'rgba(34, 211, 238, 0)');
-  ctx.fillStyle = glow;
-  ctx.beginPath();
-  ctx.arc(cx, cy, r * 1.2, 0, TAU);
-  ctx.fill();
-
-  // Three concentric rings spinning in alternating directions, each as two opposite arcs.
-  for (let i = 0; i < 3; i++) {
-    const radius = r * (1 - i * 0.26);
-    const spin = (i % 2 === 0 ? 1 : -1) * (2.4 - i * 0.5);
-    const start = t * spin + i * 2.1;
-    ctx.strokeStyle = i === 1 ? '#67e8f9' : '#c084fc';
-    ctx.lineWidth = 3 - i * 0.6;
-    for (const offset of [0, Math.PI]) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, start + offset, start + offset + Math.PI * 0.7);
-      ctx.stroke();
+      if (d > 7) {
+        // Glow: a checkerboard dither of violet, so it reads as light pooled on the floor.
+        if ((i + j) % 2 === 0) fxa(ctx, ox, oy, i, j, 1, 1, '#b98cf0', 0.35);
+      } else if (d > 5.4) {
+        // Outer ring: 8 segments turning clockwise (angle sampled at a - 1.2t).
+        const seg = Math.floor(wrap(a - 1.2 * t) / (TAU / 8));
+        let colour = seg % 2 === 0 ? '#8f5fe0' : '#c9a6ff';
+        // The lower-right of the outer edge sits in shadow, which gives the ring some depth.
+        if (d > 6.5 && dx + dy > 0) colour = '#5b3aa8';
+        fx(ctx, ox, oy, i, j, 1, 1, colour);
+      } else if (d > 4.4) {
+        fx(ctx, ox, oy, i, j, 1, 1, '#1c1438'); // dark gap between the rings
+      } else if (d > 2.8) {
+        // Inner ring: 6 segments turning counter-clockwise (angle sampled at a + 2t).
+        const seg = Math.floor(wrap(a + 2 * t) / (TAU / 6));
+        fx(ctx, ox, oy, i, j, 1, 1, seg % 2 === 0 ? '#2fb5c8' : '#8ef0f5');
+      } else {
+        // Core. The 2x2 centre block is white, with a plus-shaped ring of 1px around it that
+        // blinks in and out.
+        const inCentre = (i === mid - 1 || i === mid) && (j === mid - 1 || j === mid);
+        const edgeI = i === mid - 2 || i === mid + 1;
+        const edgeJ = j === mid - 2 || j === mid + 1;
+        const inRing =
+          i >= mid - 2 && i <= mid + 1 && j >= mid - 2 && j <= mid + 1 && !(edgeI && edgeJ);
+        let colour = '#1c1438';
+        if (inCentre) colour = '#ffffff';
+        else if (inRing && pulseOn) colour = '#c9a6ff';
+        fx(ctx, ox, oy, i, j, 1, 1, colour);
+      }
     }
   }
-
-  // Bright dot at the centre.
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-  ctx.beginPath();
-  ctx.arc(cx, cy, 2.5 + Math.sin(t * 4) * 0.8, 0, TAU);
-  ctx.fill();
-
   ctx.restore();
 }
 
@@ -1203,13 +1540,15 @@ function renderPortalLabel(ctx: CanvasRenderingContext2D, obj: MapObject) {
 // offscreen tile and blitted. The painted band alternates red and white by tile parity, like the
 // striped barriers on real circuits.
 
-const TIRE_SIDEWALL = '#111827';
-const TIRE_TREAD = '#1f2937';
-const TIRE_TREAD_HI = '#374151';
-const TIRE_RIM = '#4b5563';
-const TIRE_HUB = '#6b7280';
-const TIRE_HUB_HI = '#9ca3af';
-const TIRE_BANDS = ['#b91c1c', '#e5e7eb'] as const;
+const TIRE_CONTACT = 'rgba(11, 18, 32, 0.35)';
+const TIRE_RUBBER = '#262b38';
+const TIRE_RUBBER_NOTCH = '#2f3544';
+const TIRE_RUBBER_LIT = '#3a4152';
+const TIRE_RUBBER_NOTCH_LIT = '#323848';
+const TIRE_BANDS = ['#c94a3d', '#ece7dc'] as const;
+const TIRE_SIDEWALL = '#1a1e29';
+const TIRE_SIDEWALL_FAR = '#2f3544';
+const TIRE_HOLE = '#0b0f19';
 
 let tireSprites: HTMLCanvasElement[] | null = null;
 
@@ -1221,16 +1560,33 @@ function drawTireSprite(band: string): HTMLCanvasElement {
   const centre = ART / 2;
   for (let py = 0; py < ART; py++) {
     for (let px = 0; px < ART; px++) {
-      // Distance of this art pixel's centre from the middle of the tile.
-      const d = Math.hypot(px + 0.5 - centre, py + 0.5 - centre);
-      let colour: string | null;
-      if (d > 7.2) colour = null; // beyond the stack: the floor shows through the corners
-      else if (d > 6.2) colour = TIRE_SIDEWALL;
-      else if (d > 4.8) colour = px + py <= 14 ? TIRE_TREAD_HI : TIRE_TREAD; // lit from top-left
-      else if (d > 3.8) colour = band;
-      else if (d > 2.2) colour = TIRE_RIM;
-      else if (d > 1.0) colour = TIRE_HUB;
-      else colour = TIRE_HUB_HI;
+      // Distance and angle of this art pixel's centre from the middle of the tile. The bands
+      // are rings, so every edge is a distance threshold; the tread notches are angular.
+      const dx = px + 0.5 - centre;
+      const dy = py + 0.5 - centre;
+      const d = Math.hypot(dx, dy);
+      const a = Math.atan2(dy, dx);
+      // Light comes from the top-left: that half of the tyre is lifted, and the far inner wall
+      // on the bottom-right catches light instead of falling into the hole.
+      const lit = px + py < 15;
+      const farSide = px + py > 16;
+      let colour: string | null = null; // null: beyond the stack, the floor shows through
+      if (d > 7.2) {
+        if (d <= 8 && farSide) colour = TIRE_CONTACT; // soft contact shadow on the bottom-right
+      } else if (d > 6.4) {
+        colour = OUTLINE;
+      } else if (d > 4.6) {
+        // Every other 22.5-degree sector is a notch, which reads as tread.
+        const notch = Math.floor((a + Math.PI) / (Math.PI / 8)) % 2 === 1;
+        if (lit) colour = notch ? TIRE_RUBBER_NOTCH_LIT : TIRE_RUBBER_LIT;
+        else colour = notch ? TIRE_RUBBER_NOTCH : TIRE_RUBBER;
+      } else if (d > 3.8) {
+        colour = band;
+      } else if (d > 2.6) {
+        colour = farSide ? TIRE_SIDEWALL_FAR : TIRE_SIDEWALL;
+      } else {
+        colour = TIRE_HOLE;
+      }
       if (colour) fx(tctx, 0, 0, px, py, 1, 1, colour);
     }
   }
@@ -1273,34 +1629,55 @@ function renderObject(ctx: CanvasRenderingContext2D, obj: MapObject) {
     }
 
     case 'finish_line': {
-      // Two columns of checks across the line's width, alternating down its length.
-      const CHECK = ART / 2;
+      // 4-pixel checks, so four columns fit across a 16-wide tile. Dark 40% edges down the left
+      // and right of the strip bound the line against the road instead of letting the checks
+      // run straight into the asphalt.
+      const CHECK = 4;
       for (let j = 0; j < H / CHECK; j++) {
         for (let i = 0; i < W / CHECK; i++) {
-          fx(ctx, ox, oy, i * CHECK, j * CHECK, CHECK, CHECK, (i + j) % 2 ? '#f8fafc' : '#0f172a');
+          fx(ctx, ox, oy, i * CHECK, j * CHECK, CHECK, CHECK, (i + j) % 2 ? '#efeae0' : '#151a24');
         }
       }
+      fxa(ctx, ox, oy, 0, 0, 1, H, OUTLINE, 0.4);
+      fxa(ctx, ox, oy, W - 1, 0, 1, H, OUTLINE, 0.4);
       break;
     }
 
     case 'track_arrow': {
-      // A faint chevron on the road, pointing the way the race runs. The right-pointing shape is
-      // drawn once and rotated for the other three directions.
+      // A faint chevron painted on the road, pointing the way the race runs. Authored once as a
+      // right-pointing mask and mapped onto the other directions, so the tip always lands on the
+      // edge it points at. Translucent, so the road grit still shows through the paint.
+      const MASK = [
+        '................',
+        '................',
+        '................',
+        '....###.........',
+        '.....###........',
+        '......###.......',
+        '.......###......',
+        '.........###....',
+        '.........###....',
+        '.......###......',
+        '......###.......',
+        '.....###........',
+        '....###.........',
+        '................',
+        '................',
+        '................',
+      ];
       const dir = obj.data?.dir ?? 'right';
-      const place = (bx: number, by: number): [number, number] => {
-        switch (dir) {
-          case 'left': return [ART - 2 - bx, by];
-          case 'down': return [ART - 2 - by, bx];
-          case 'up': return [by, ART - 2 - bx];
-          default: return [bx, by];
+      for (let j = 0; j < ART; j++) {
+        for (let i = 0; i < ART; i++) {
+          if (MASK[j][i] !== '#') continue;
+          // Mask cell (i, j) to drawn cell. For 'down' the tip (largest i) maps to the bottom row;
+          // for 'up' it maps to the top row.
+          const [dx, dy] =
+            dir === 'down' ? [ART - 1 - j, i]
+            : dir === 'left' ? [ART - 1 - i, j]
+            : dir === 'up' ? [j, ART - 1 - i]
+            : [i, j];
+          fxa(ctx, ox, oy, dx, dy, 1, 1, '#e8e4d8', 0.45);
         }
-      };
-      ctx.globalAlpha = 0.5;
-      for (let t = 0; t < 5; t++) {
-        const [ax, ay] = place(4 + t, 4 + t); // upper arm
-        fx(ctx, ox, oy, ax, ay, 2, 2, '#ffffff');
-        const [bx, by] = place(4 + t, 10 - t); // lower arm
-        fx(ctx, ox, oy, bx, by, 2, 2, '#ffffff');
       }
       break;
     }
@@ -1783,12 +2160,11 @@ function renderSkidMarks(ctx: CanvasRenderingContext2D, now: number) {
   while (skidMarks.length > 0 && now - skidMarks[0].born > SKID_LIFE_MS) skidMarks.shift();
   if (skidMarks.length === 0) return;
   ctx.save();
-  ctx.fillStyle = 'rgb(15, 23, 42)';
+  // Each mark is one art pixel snapped to the grid. A round stamp would anti-alias into a grey
+  // smear at this size, while a single dark pixel reads as tyre grit on the asphalt.
   for (const m of skidMarks) {
     ctx.globalAlpha = 0.35 * (1 - (now - m.born) / SKID_LIFE_MS);
-    ctx.beginPath();
-    ctx.arc(m.x * CELL_SIZE, m.y * CELL_SIZE, 0.05 * CELL_SIZE, 0, Math.PI * 2);
-    ctx.fill();
+    fx(ctx, 0, 0, Math.floor(m.x * ART), Math.floor(m.y * ART), 1, 1, '#0e1117');
   }
   ctx.restore();
 }

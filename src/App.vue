@@ -25,6 +25,7 @@ import {
     Volume2,
     UserRoundCog,
     ArrowLeftRight,
+    Keyboard,
 } from "lucide-vue-next";
 import { useRegisterSW } from "virtual:pwa-register/vue";
 import type {
@@ -569,6 +570,31 @@ function toggleProximityVolume() {
     }
 }
 
+const KEYBOARD_ONLY_WALKING_PERSISTENCE_KEY = "peerspace_keyboard_only_walking";
+
+function loadKeyboardOnlyWalkingPreference(): boolean {
+    try {
+        // Defaults to off: click-to-walk stays the default, keyboard-only is an opt-in.
+        return localStorage.getItem(KEYBOARD_ONLY_WALKING_PERSISTENCE_KEY) === "on";
+    } catch (e) {
+        return false;
+    }
+}
+
+const keyboardOnlyWalking = ref<boolean>(loadKeyboardOnlyWalkingPreference());
+
+function toggleKeyboardOnlyWalking() {
+    keyboardOnlyWalking.value = !keyboardOnlyWalking.value;
+    try {
+        localStorage.setItem(
+            KEYBOARD_ONLY_WALKING_PERSISTENCE_KEY,
+            keyboardOnlyWalking.value ? "on" : "off",
+        );
+    } catch (e) {
+        console.warn("Failed to persist keyboard-only walking preference:", e);
+    }
+}
+
 // --- Per-user context menu (right-click an avatar) --------------------------------------
 const userMenu = ref<{ socketId: string; x: number; y: number } | null>(null);
 
@@ -1099,6 +1125,14 @@ function handleMove(data: {
     if (socket.value && hasJoined.value) {
         socket.value.emit("user:move", data);
     }
+}
+
+// Click-to-walk from the map and minimap. The keyboard-only gate lives here, at the click
+// binding, rather than inside handleNavigateTile: explicit actions (teleport to a user, answering
+// a chime, walking to your desk) still walk you even when the setting is on.
+function handleMapNavigate(target: { x: number; y: number }) {
+    if (keyboardOnlyWalking.value) return;
+    handleNavigateTile(target);
 }
 
 function handleNavigateTile(target: { x: number; y: number }, walkToDesk?: boolean) {
@@ -1988,6 +2022,44 @@ function handleRemoveDummy(dummyId: string) {
                                 />
                             </span>
                         </button>
+
+                        <button
+                            type="button"
+                            @click="toggleKeyboardOnlyWalking"
+                            class="w-full text-left px-2.5 py-2 rounded-xl border-2 border-transparent hover:bg-slate-100 hover:border-slate-900 flex items-center gap-2.5 transition-colors"
+                        >
+                            <Keyboard class="w-4 h-4 text-indigo-700 shrink-0" />
+                            <span class="min-w-0 flex-1">
+                                <span
+                                    class="block text-xs font-extrabold text-slate-900 font-heading"
+                                    >Keyboard-only walking</span
+                                >
+                                <span
+                                    class="block text-[10px] font-bold text-slate-600"
+                                >
+                                    {{
+                                        keyboardOnlyWalking
+                                            ? "Clicking the map won't move you"
+                                            : "Click the map to walk there"
+                                    }}
+                                </span>
+                            </span>
+                            <span
+                                :class="`shrink-0 w-9 h-5 rounded-full border-2 border-slate-900 relative transition-colors ${
+                                    keyboardOnlyWalking
+                                        ? 'bg-emerald-400'
+                                        : 'bg-slate-300'
+                                }`"
+                            >
+                                <span
+                                    :class="`absolute top-0.5 w-3 h-3 rounded-full bg-white border-2 border-slate-900 transition-all ${
+                                        keyboardOnlyWalking
+                                            ? 'left-4.5'
+                                            : 'left-0.5'
+                                    }`"
+                                />
+                            </span>
+                        </button>
                     </div>
                 </div>
 
@@ -2131,7 +2203,7 @@ function handleRemoveDummy(dummyId: string) {
                 @zoneDrawn="handleZoneDrawn"
                 @userContextMenu="openUserContextMenu"
                 @move="handleMove"
-                @navigateTile="handleNavigateTile"
+                @navigateTile="handleMapNavigate"
                 @interactObject="(obj) => (activeObjectModal = obj)"
                 @placeObject="handlePlaceObject"
                 @moveObject="handleMoveObject"
@@ -2182,7 +2254,7 @@ function handleRemoveDummy(dummyId: string) {
                 :currentMap="currentMap"
                 :users="sameMapUsers"
                 :currentUser="currentUser"
-                @navigateTile="handleNavigateTile"
+                @navigateTile="handleMapNavigate"
             />
 
             <!-- Kart HUD: hop in / get out, plus speed while driving. Only on maps that allow karts. -->

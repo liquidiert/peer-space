@@ -8,7 +8,15 @@ import {
   kartSpec,
   type KartModel,
 } from '../src/lib/kartModels';
-import { drawKart, drawKartBoost, drawKartPreview, kartRearOffset } from '../src/lib/kartSprite';
+import {
+  drawKart,
+  drawKartBoost,
+  drawKartPreview,
+  flamePixels,
+  kartPixels,
+  kartRearOffset,
+  type PixelGrid,
+} from '../src/lib/kartSprite';
 
 /** '#' solid, '.' road, ',' offroad; anything else (and out of bounds) is solid. */
 function makeWorld(rows: string[]): KartWorld {
@@ -286,8 +294,24 @@ function drawLog(model: KartModel, body = '#e11d48'): string[] {
   return log;
 }
 
+/** Positions (column, row) of every pixel of one colour. */
+function pixelsOf(grid: PixelGrid, colour: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  grid.px.forEach((c, i) => {
+    if (c === colour) out.push([i % grid.size, Math.floor(i / grid.size)]);
+  });
+  return out;
+}
+
+const HEADLIGHT_COLOUR = '#f6dc8a';
+
 describe('sprites', () => {
-  it('each model produces a different sequence of draw calls', () => {
+  it('each model is a different pixel sprite', () => {
+    const sprites = KART_MODEL_IDS.map((m) => kartPixels(m, '#e11d48', 0).px.join('|'));
+    expect(new Set(sprites).size).toBe(KART_MODEL_IDS.length);
+  });
+
+  it('each model draws a different sequence of calls', () => {
     const logs = KART_MODEL_IDS.map((m) => drawLog(m).join('|'));
     expect(new Set(logs).size).toBe(KART_MODEL_IDS.length);
   });
@@ -296,12 +320,73 @@ describe('sprites', () => {
     expect(drawLog(DEFAULT_KART_MODEL)).toEqual(drawKartLogWithoutModel());
   });
 
-  it('drawKartPreview clears, centres and draws without throwing on a stub context', () => {
+  it('step 0 faces east: headlights on the right half only', () => {
+    for (const m of KART_MODEL_IDS) {
+      const { size } = kartPixels(m, '#e11d48', 0);
+      const lights = pixelsOf(kartPixels(m, '#e11d48', 0), HEADLIGHT_COLOUR);
+      expect(lights.length, m).toBeGreaterThan(0);
+      for (const [x] of lights) expect(x, m).toBeGreaterThanOrEqual(size / 2);
+    }
+  });
+
+  it('step 16 faces west: headlights on the left half only', () => {
+    for (const m of KART_MODEL_IDS) {
+      const { size } = kartPixels(m, '#e11d48', 16);
+      const lights = pixelsOf(kartPixels(m, '#e11d48', 16), HEADLIGHT_COLOUR);
+      expect(lights.length, m).toBeGreaterThan(0);
+      for (const [x] of lights) expect(x, m).toBeLessThan(size / 2);
+    }
+  });
+
+  it('step 16 is exactly step 0 turned 180 degrees', () => {
+    for (const m of KART_MODEL_IDS) {
+      const a = kartPixels(m, '#e11d48', 0);
+      const b = kartPixels(m, '#e11d48', 16);
+      expect(b.size).toBe(a.size);
+      for (let i = 0; i < a.px.length; i++) {
+        expect(b.px[i], `${m} pixel ${i}`).toBe(a.px[a.px.length - 1 - i]);
+      }
+    }
+  });
+
+  it('step 8 (south) puts the headlights in the bottom half', () => {
+    for (const m of KART_MODEL_IDS) {
+      const { size } = kartPixels(m, '#e11d48', 8);
+      const lights = pixelsOf(kartPixels(m, '#e11d48', 8), HEADLIGHT_COLOUR);
+      expect(lights.length, m).toBeGreaterThan(0);
+      for (const [, y] of lights) expect(y, m).toBeGreaterThanOrEqual(size / 2);
+    }
+  });
+
+  it('changing the body colour keeps the silhouette', () => {
+    const a = kartPixels('kart', '#e11d48', 0).px;
+    const b = kartPixels('kart', '#2563eb', 0).px;
+    expect(a.map((c) => c === null)).toEqual(b.map((c) => c === null));
+    expect(a.filter((c, i) => c !== b[i]).length).toBeGreaterThan(0);
+  });
+
+  it('drawKart on a plain recording context does not throw', () => {
+    for (const m of KART_MODEL_IDS) {
+      const { ctx } = recordingContext();
+      expect(() => drawKart(ctx, 100, 100, 1.3, '#e11d48', 48, m)).not.toThrow();
+    }
+  });
+
+  it('drawKartBoost draws a flame for every model and frame without throwing', () => {
+    for (const m of KART_MODEL_IDS) {
+      for (const now of [0, 60, 120, 5000]) {
+        const { ctx } = recordingContext();
+        expect(() => drawKartBoost(ctx, 100, 100, 2.4, 48, now, m)).not.toThrow();
+      }
+    }
+  });
+
+  it('drawKartPreview clears and draws without throwing on a stub context', () => {
     for (const m of KART_MODEL_IDS) {
       const { ctx, log } = recordingContext();
       expect(() => drawKartPreview(stubCanvas(100, 60, ctx), m, '#2563eb')).not.toThrow();
       expect(log[0]).toBe('clearRect(0,0,100,60)');
-      expect(log).toContain('translate(50,30)');
+      expect(log.some((l) => l.startsWith('fillRect('))).toBe(true);
     }
   });
 
@@ -318,19 +403,57 @@ describe('sprites', () => {
     }
   });
 
-  it('the boost flame starts at each model rear', () => {
-    const logs = KART_MODEL_IDS.map((m) => {
-      const { ctx, log } = recordingContext();
-      drawKartBoost(ctx, 100, 100, 0, 40, 0, m);
-      return log.join('|');
-    });
-    expect(new Set(logs).size).toBe(KART_MODEL_IDS.length);
+  it('the flame sits entirely behind the kart, for every model', () => {
     for (const m of KART_MODEL_IDS) {
-      const { ctx, log } = recordingContext();
-      drawKartBoost(ctx, 100, 100, 0, 40, 0, m);
-      const back = kartRearOffset(m) * 40;
-      expect(log).toContain(`moveTo(${back},${-0.2 * 40})`);
+      const flame = flamePixels(m, 0, 0);
+      const half = flame.size / 2;
+      const cols = pixelsOf(flame, '#ffd04a').concat(pixelsOf(flame, '#ff8a2a'), pixelsOf(flame, '#d9432b'));
+      expect(cols.length, m).toBeGreaterThan(0);
+      for (const [x] of cols) expect(x, m).toBeLessThan(half);
     }
+  });
+
+  it('the flame front edge meets the rear of the sprite (or kartRearOffset, whichever is further back)', () => {
+    for (const m of KART_MODEL_IDS) {
+      const body = kartPixels(m, '#e11d48', 0);
+      // Left edge of the rearmost opaque column of the sprite, relative to the kart centre.
+      const rearmost = Math.min(...body.px.map((c, i) => (c ? i % body.size : Infinity)));
+      const spriteRear = rearmost - body.size / 2;
+      const target = Math.min(kartRearOffset(m) * 16, spriteRear);
+      const flame = flamePixels(m, 0, 0);
+      // Right edge of the frontmost opaque flame column, relative to the kart centre.
+      const frontmost = Math.max(...flame.px.map((c, i) => (c ? i % flame.size : -1)));
+      const flameFront = frontmost + 1 - flame.size / 2;
+      expect(Math.abs(flameFront - target), m).toBeLessThan(1.5);
+    }
+  });
+
+  it('the three flame frames differ', () => {
+    for (const m of KART_MODEL_IDS) {
+      const frames = [0, 1, 2].map((f) => flamePixels(m, f, 0).px.join('|'));
+      expect(new Set(frames).size).toBe(3);
+    }
+  });
+
+  it('the sprite stays symmetric about its length axis', () => {
+    for (const m of KART_MODEL_IDS) {
+      const { size, px } = kartPixels(m, '#e11d48', 0);
+      // Step 0 is unrotated, so the sprite's top and bottom rows mirror each other in the grid.
+      for (let j = 0; j < size; j++) {
+        for (let i = 0; i < size; i++) {
+          const mirrored = px[(size - 1 - j) * size + i];
+          expect(px[j * size + i] === null, `${m} ${i},${j}`).toBe(mirrored === null);
+        }
+      }
+    }
+  });
+
+  it('the boost flame with no model draws the same as the kart', () => {
+    const a = recordingContext();
+    drawKartBoost(a.ctx, 100, 100, 0, 48, 0);
+    const b = recordingContext();
+    drawKartBoost(b.ctx, 100, 100, 0, 48, 0, 'kart');
+    expect(a.log).toEqual(b.log);
   });
 });
 

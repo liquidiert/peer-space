@@ -120,7 +120,9 @@ const myDesk = computed(() => {
       type="button"
       @click="emit('toggleMute')"
       :title="isMuted ? 'Unmute Microphone (M)' : 'Mute Microphone (M)'"
-      :class="`h-10 px-3 sm:px-3.5 rounded-xl border-2 border-slate-900 inline-flex items-center justify-center gap-2 text-xs font-bold transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] ${
+      :aria-label="isMuted ? 'Unmute Microphone (M)' : 'Mute Microphone (M)'"
+      :aria-pressed="!isMuted"
+      :class="`h-10 w-10 rounded-xl border-2 border-slate-900 inline-flex items-center justify-center text-xs font-bold transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] ${
         isMuted
           ? 'bg-rose-400 text-slate-950 hover:bg-rose-300'
           : 'bg-emerald-400 text-slate-950 hover:bg-emerald-300'
@@ -128,7 +130,6 @@ const myDesk = computed(() => {
     >
       <MicOff v-if="isMuted" class="w-4 h-4 shrink-0" />
       <Mic v-else class="w-4 h-4 shrink-0" />
-      <span class="hidden sm:inline font-heading whitespace-nowrap">{{ isMuted ? 'Muted' : 'Mic On' }}</span>
     </button>
 
     <!-- Deafen Control -->
@@ -136,7 +137,9 @@ const myDesk = computed(() => {
       type="button"
       @click="emit('toggleDeafen')"
       :title="isDeafened ? 'Undeafen Audio (N)' : 'Deafen Audio (N)'"
-      :class="`h-10 px-3 sm:px-3.5 rounded-xl border-2 border-slate-900 inline-flex items-center justify-center gap-2 text-xs font-bold transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] ${
+      :aria-label="isDeafened ? 'Undeafen Audio (N)' : 'Deafen Audio (N)'"
+      :aria-pressed="!isDeafened"
+      :class="`h-10 w-10 rounded-xl border-2 border-slate-900 inline-flex items-center justify-center text-xs font-bold transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] ${
         isDeafened
           ? 'bg-rose-400 text-slate-950 hover:bg-rose-300'
           : 'bg-slate-100 text-slate-900 hover:bg-slate-200'
@@ -144,7 +147,6 @@ const myDesk = computed(() => {
     >
       <VolumeX v-if="isDeafened" class="w-4 h-4 shrink-0" />
       <Volume2 v-else class="w-4 h-4 shrink-0" />
-      <span class="hidden sm:inline font-heading whitespace-nowrap">{{ isDeafened ? 'Deafened' : 'Sound' }}</span>
     </button>
 
     <!-- Camera Control -->
@@ -152,7 +154,9 @@ const myDesk = computed(() => {
       type="button"
       @click="emit('toggleCamera')"
       :title="isVideoOn ? 'Turn Off Video (V)' : 'Turn On Video (V)'"
-      :class="`h-10 px-3 sm:px-3.5 rounded-xl border-2 border-slate-900 inline-flex items-center justify-center gap-2 text-xs font-bold transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] ${
+      :aria-label="isVideoOn ? 'Turn Off Video (V)' : 'Turn On Video (V)'"
+      :aria-pressed="!!isVideoOn"
+      :class="`h-10 w-10 rounded-xl border-2 border-slate-900 inline-flex items-center justify-center text-xs font-bold transition-all pixel-btn shadow-[2px_2px_0px_0px_#0f172a] ${
         isVideoOn
           ? 'bg-emerald-400 text-slate-950 hover:bg-emerald-300'
           : 'bg-slate-100 text-slate-900 hover:bg-slate-200'
@@ -160,7 +164,6 @@ const myDesk = computed(() => {
     >
       <VideoOff v-if="!isVideoOn" class="w-4 h-4 shrink-0" />
       <Video v-else class="w-4 h-4 shrink-0" />
-      <span class="hidden sm:inline font-heading whitespace-nowrap">{{ isVideoOn ? 'Video On' : 'Camera' }}</span>
     </button>
 
     <!-- Screen Share (desktop only - getDisplayMedia isn't reliably supported on mobile browsers) -->
