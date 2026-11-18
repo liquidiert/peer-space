@@ -64,7 +64,7 @@ const SOLID_TILES = new Set(['wall_brick', 'wall_wood', 'water']);
 /**
  * The drivable surface of a map as a flat lookup. Out-of-bounds and missing tiles are solid, as
  * are walls, water and the footprint of every blocking object (portals never are). Grass is
- * offroad; every other floor is road.
+ * offroad; every other floor, asphalt included, is road.
  */
 export function kartWorldFromMap(map: GridMap): KartWorld {
   const { width, height } = map;

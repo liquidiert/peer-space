@@ -77,6 +77,7 @@ const TILE_COLORS: Record<string, string> = {
   floor_tile: '#cbd5e1',
   floor_grass: '#22c55e',
   floor_concrete: '#64748b',
+  asphalt: '#2b2f36',
   wall_brick: '#0f172a',
   wall_wood: '#78350f',
   wall_glass: '#38bdf8',
@@ -128,6 +129,22 @@ function renderMiniMap() {
       ctx.beginPath();
       ctx.arc(px, py, 4, 0, Math.PI * 2);
       ctx.stroke();
+      return;
+    }
+    // Painted track arrows are too small to read at this scale, so they are left off.
+    if (obj.type === 'track_arrow') return;
+    if (obj.type === 'finish_line') {
+      // The start/finish line as a black and white checked strip.
+      const x0 = Math.floor(obj.x * scaleX);
+      const y0 = Math.floor(obj.y * scaleY);
+      const w = Math.max(2, Math.ceil(obj.width * scaleX));
+      const h = Math.max(2, Math.ceil(obj.height * scaleY));
+      for (let j = 0; j < h; j++) {
+        for (let i = 0; i < w; i++) {
+          ctx.fillStyle = (i + j) % 2 ? '#0f172a' : '#f8fafc';
+          ctx.fillRect(x0 + i, y0 + j, 1, 1);
+        }
+      }
       return;
     }
     // Tire barriers read as dark grey cells, a shade lighter than other solid furniture.

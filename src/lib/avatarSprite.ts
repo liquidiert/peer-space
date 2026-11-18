@@ -37,6 +37,18 @@ const ARM_H = 3;
 const LEG_Y = 14;
 const LEG_H = 3;
 
+/**
+ * The head block, in art pixels, for karts: everything from the hat peak / pom down to the
+ * skull's bottom outline, and out to the long-hair locks. Half-open: x in [x0, x1), y in
+ * [y0, y1). It is symmetric about the sprite's centre column, so mirroring keeps it in place.
+ */
+const HEAD_CLIP = { x0: 1, x1: 15, y0: -1, y1: 10 };
+/** Size in art pixels of the head block drawn by {@link drawAvatarHead}. */
+export const AVATAR_HEAD_SIZE = {
+  w: HEAD_CLIP.x1 - HEAD_CLIP.x0,
+  h: HEAD_CLIP.y1 - HEAD_CLIP.y0,
+};
+
 export interface AvatarSpriteOptions {
   /** Which way the character faces. Defaults to 'down' (toward the camera). */
   direction?: Direction;
@@ -68,7 +80,51 @@ export function drawAvatarSprite(
   avatar: AvatarCustomization | undefined,
   options: AvatarSpriteOptions = {}
 ) {
+  paintAvatar(ctx, ox, oy, scale, avatar, options, false);
+}
+
+/**
+ * Draws only the head (hair, face, ears, hat) of the character, for a kart driver whose
+ * head shows above the seat. Same palette and rows as {@link drawAvatarSprite}; no torso,
+ * arms, legs, presence pip or status chip.
+ *
+ * @param cx,cy  Centre of the head block, in device pixels. The block is
+ *               {@link AVATAR_HEAD_SIZE} art pixels times `scale`, rounded to whole pixels.
+ * @param scale  Device pixels per art pixel.
+ */
+export function drawAvatarHead(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  scale: number,
+  avatar: AvatarCustomization | undefined,
+  options: Pick<AvatarSpriteOptions, 'direction'> = {}
+) {
+  const left = Math.round(cx - (AVATAR_HEAD_SIZE.w * scale) / 2);
+  const top = Math.round(cy - (AVATAR_HEAD_SIZE.h * scale) / 2);
+  // Art pixel (HEAD_CLIP.x0, HEAD_CLIP.y0) is the block's top-left corner.
+  paintAvatar(
+    ctx,
+    left - HEAD_CLIP.x0 * scale,
+    top - HEAD_CLIP.y0 * scale,
+    scale,
+    avatar,
+    { direction: options.direction },
+    true
+  );
+}
+
+function paintAvatar(
+  ctx: CanvasRenderingContext2D,
+  ox: number,
+  oy: number,
+  scale: number,
+  avatar: AvatarCustomization | undefined,
+  options: AvatarSpriteOptions,
+  headOnly: boolean
+) {
   const { direction = "down", walkPhase = -1, presence = null, showEmoji = false } = options;
+  const clip = headOnly ? HEAD_CLIP : null;
 
   // --- Walk cycle -------------------------------------------------------------
   // Four frames: two contact poses (one leg striding) separated by two passing poses where
@@ -99,8 +155,25 @@ export function drawAvatarSprite(
 
   /** Fill art pixels, mirrored horizontally when the character faces left. */
   const f = (x: number, y: number, w: number, h: number, color: string) => {
+    let ax = mirror ? AV_W - x - w : x;
+    let ay = y;
+    let aw = w;
+    let ah = h;
+    if (clip) {
+      // Head-only: trim to the head block, so anything hanging out of it (the beanie pom,
+      // long locks) is cut at the block edge rather than painted outside the head.
+      const x0 = Math.max(ax, clip.x0);
+      const x1 = Math.min(ax + aw, clip.x1);
+      const y0 = Math.max(ay, clip.y0);
+      const y1 = Math.min(ay + ah, clip.y1);
+      if (x1 <= x0 || y1 <= y0) return;
+      ax = x0;
+      ay = y0;
+      aw = x1 - x0;
+      ah = y1 - y0;
+    }
     ctx.fillStyle = color;
-    ctx.fillRect(ox + (mirror ? AV_W - x - w : x) * scale, oy + y * scale, w * scale, h * scale);
+    ctx.fillRect(ox + ax * scale, oy + ay * scale, aw * scale, ah * scale);
   };
   /** Translucent variant, for blush and glass. */
   const fa = (x: number, y: number, w: number, h: number, color: string, alpha: number) => {
@@ -142,36 +215,40 @@ export function drawAvatarSprite(
     [4, strideLeft ? 1 : 0],
     [9, strideRight ? 1 : 0],
   ];
-  legs.forEach(([lx, lift]) => {
-    const h = LEG_H - lift;
-    f(lx - 1, LEG_Y + lift, 1, h + 1, AV_INK);
-    f(lx + 3, LEG_Y + lift, 1, h + 1, AV_INK);
-    f(lx, LEG_Y + lift + h, 3, 1, AV_INK);
-    f(lx, LEG_Y + lift, 3, h, trouser.base);
-    f(lx, LEG_Y + lift, 1, h, trouser.light);
-    f(lx, LEG_Y + lift + h - 1, 3, 1, shoe);
-  });
+  if (!headOnly) {
+    legs.forEach(([lx, lift]) => {
+      const h = LEG_H - lift;
+      f(lx - 1, LEG_Y + lift, 1, h + 1, AV_INK);
+      f(lx + 3, LEG_Y + lift, 1, h + 1, AV_INK);
+      f(lx, LEG_Y + lift + h, 3, 1, AV_INK);
+      f(lx, LEG_Y + lift, 3, h, trouser.base);
+      f(lx, LEG_Y + lift, 1, h, trouser.light);
+      f(lx, LEG_Y + lift + h - 1, 3, 1, shoe);
+    });
+  }
 
   // --- Torso and arms ---------------------------------------------------------
   const armLeftY = ARM_Y - (strideRight ? 1 : 0);
   const armRightY = ARM_Y - (strideLeft ? 1 : 0);
 
-  // Precise tight outline matching torso & arm silhouette
-  f(1, armLeftY, 1, ARM_H, AV_INK);
-  f(2, armLeftY + ARM_H, 2, 1, AV_INK);
-  f(14, armRightY, 1, ARM_H, AV_INK);
-  f(12, armRightY + ARM_H, 2, 1, AV_INK);
-  f(4, TORSO_Y + TORSO_H, 8, 1, AV_INK);
-  f(3, TORSO_Y - 1, 10, 1, AV_INK);
+  if (!headOnly) {
+    // Precise tight outline matching torso & arm silhouette
+    f(1, armLeftY, 1, ARM_H, AV_INK);
+    f(2, armLeftY + ARM_H, 2, 1, AV_INK);
+    f(14, armRightY, 1, ARM_H, AV_INK);
+    f(12, armRightY + ARM_H, 2, 1, AV_INK);
+    f(4, TORSO_Y + TORSO_H, 8, 1, AV_INK);
+    f(3, TORSO_Y - 1, 10, 1, AV_INK);
 
-  shade(2, armLeftY, 2, ARM_H, outfit);
-  shade(12, armRightY, 2, ARM_H, outfit);
-  shade(4, TORSO_Y, 8, TORSO_H, outfit);
-  f(2, armLeftY + ARM_H - 1, 2, 1, skin.base); // hands
-  f(12, armRightY + ARM_H - 1, 2, 1, skin.base);
-  if (!facingUp) {
-    f(6, TORSO_Y, 4, 1, skin.dark); // neckline
-    f(6, TORSO_Y + 1, 4, 1, outfit.hi); // collar
+    shade(2, armLeftY, 2, ARM_H, outfit);
+    shade(12, armRightY, 2, ARM_H, outfit);
+    shade(4, TORSO_Y, 8, TORSO_H, outfit);
+    f(2, armLeftY + ARM_H - 1, 2, 1, skin.base); // hands
+    f(12, armRightY + ARM_H - 1, 2, 1, skin.base);
+    if (!facingUp) {
+      f(6, TORSO_Y, 4, 1, skin.dark); // neckline
+      f(6, TORSO_Y + 1, 4, 1, outfit.hi); // collar
+    }
   }
 
   // --- Head -------------------------------------------------------------------
