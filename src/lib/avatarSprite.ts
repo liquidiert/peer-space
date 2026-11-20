@@ -1,4 +1,14 @@
 import type { AvatarCustomization, Direction, PresenceStatus } from '../types';
+import {
+  BODY_CODES,
+  BODY_FRAMES,
+  BODY_H,
+  BODY_PASSING_COLUMN,
+  BODY_SIDE_FACING,
+  BODY_W,
+  type BodyFrame,
+  type BodyRole,
+} from './avatarBodyData';
 import { ACCENT, LIGHT_TINT, mixHex, rampFrom, safeHex, SHADOW_TINT, type Ramp } from './pixelArt';
 
 /**
@@ -10,47 +20,59 @@ import { ACCENT, LIGHT_TINT, mixHex, rampFrom, safeHex, SHADOW_TINT, type Ramp }
  * made twice and the two drifted apart until the Studio was showing something the map never
  * rendered. A single scale-parameterised draw makes that drift impossible.
  *
- * 16x18 art pixels: at the map's 3px art pixel that is 48x54, so a character stands about
- * one tile tall and comfortably under a tile wide. Proportions stay chibi - a 10x7 head
- * over an 8-wide torso - because the head carries every piece of identity (skin, hair,
- * glasses, hat) and equal-width head and body read as two stacked rectangles at this size.
+ * The body is baked pixel art, generated offline by pixel_generator (bake_avatar.py) into
+ * avatarBodyData.ts. It is drawn in five roles - outline, skin, shirt, pants, shoes - and each
+ * role is recoloured from the user's customization at draw time, so one baked body serves
+ * every outfit and skin tone. Everything that carries identity on top of the body is drawn
+ * in code: the face, then hair, hats and glasses over it. Those are positioned from the
+ * frame's head box, so they bob with the head through the walk cycle.
  *
- * The art-pixel size is deliberately the same as the tiles' and furniture's. Rendering the
- * character at a smaller art pixel to shrink it would make it the one part of the scene
- * drawn on a finer grid, which reads as a sprite from a different game.
- *
- * Three views are painted, not one symmetric figure with conditionals bolted on: the front
- * (facing the camera), the back, and the profile (left/right, which is the front view's
- * geometry mirrored by the `f` helper only for 'left'). Each view has its own head, body and
- * legs, because a profile is not a front view with the face moved - it has one eye, one arm
- * and legs that stride rather than stand side by side.
+ * The sprite box is the body plus 3 art pixels on each side (room for the ground shadow, the
+ * walk sway and volumetric hair), PAD_TOP above (for hair and hats), and 2 below for the shadow.
+ * Everything is measured in art pixels, and the art pixel is deliberately the same size as the
+ * tiles' and furniture's. Rendering the character at a smaller art pixel to shrink it would
+ * make it the one part of the scene drawn on a finer grid, which reads as a sprite from a
+ * different game.
  */
 
-export const AV_W = 16;
-export const AV_H = 18;
+/** Empty art pixels either side of the body: room for the ground shadow and the walk sway. */
+const PAD_X = 3;
+/** Empty art pixels above the body: room for afros, hats and pom-poms. */
+const PAD_TOP = 5;
+
+export const AV_W = BODY_W + 2 * PAD_X;
+export const AV_H = PAD_TOP + BODY_H + 2;
 export const AV_INK = "#1e293b";
 
-// Sprite rows, top to bottom. Named because every feature is positioned relative to them.
-const HEAD_X = 3;
-const HEAD_W = 10;
-const HEAD_Y = 2;
-const HEAD_H = 7;
-const CROWN_Y = 1; // hair/hat sits one row proud of the skull, giving it volume
-const TORSO_Y = 10;
-const TORSO_H = 4;
-const ARM_Y = 11;
-const ARM_H = 3;
-const LEG_Y = 14;
-const LEG_H = 3;
+/**
+ * The standing pose. BODY_PASSING_COLUMN is column 1, which is also the idle frame; the walk
+ * cycle is columns 0, 1, 2, 1.
+ */
+const IDLE_COLUMN = BODY_PASSING_COLUMN;
+const WALK_COLUMNS = [0, 1, 2, 1];
+const IDLE_DOWN: BodyFrame = BODY_FRAMES.down[IDLE_COLUMN];
 
 /**
- * The head block, in art pixels, for karts: everything from the hat peak / pom down to the
- * skull's bottom outline, and out to the long-hair locks. Half-open: x in [x0, x1), y in
- * [y0, y1). The front and back views are symmetric about the centre column, so mirroring
- * keeps them in place; the profile is not, so its nose and back of head are placed so that
- * the block's painted extent still mirrors cleanly (leftmost x + rightmost x = AV_W).
+ * Art row of the ground line: the row just below the idle feet. The shadow sits on it and does
+ * not move with the walk bob.
  */
-const HEAD_CLIP = { x0: 1, x1: 15, y0: -1, y1: 10 };
+export const AV_GROUND_Y = PAD_TOP + IDLE_DOWN.feetY + 1;
+/** Art row of the top of the idle head outline. Hair and hats rise above it. */
+export const AV_HEAD_TOP_Y = PAD_TOP + IDLE_DOWN.headBox.y;
+/** Art row at the middle of the body: the centre for anything that wraps the whole figure. */
+export const AV_BODY_CENTER_Y = PAD_TOP + BODY_H / 2;
+
+/**
+ * The head block, in art pixels, for karts: the full sprite width, from the top of the box down
+ * to the bottom row of the idle head. Half-open: x in [x0, x1), y in [y0, y1). It is symmetric
+ * about the box centre, so mirroring keeps it in place.
+ */
+const HEAD_CLIP = {
+  x0: 0,
+  x1: AV_W,
+  y0: 0,
+  y1: PAD_TOP + IDLE_DOWN.headBox.y + IDLE_DOWN.headBox.h,
+};
 /** Size in art pixels of the head block drawn by {@link drawAvatarHead}. */
 export const AVATAR_HEAD_SIZE = {
   w: HEAD_CLIP.x1 - HEAD_CLIP.x0,
@@ -60,7 +82,7 @@ export const AVATAR_HEAD_SIZE = {
 export interface AvatarSpriteOptions {
   /** Which way the character faces. Defaults to 'down' (toward the camera). */
   direction?: Direction;
-  /** Walk cycle frame 0-3, or -1 to stand still. See the walk notes below. */
+  /** Walk cycle frame 0-3, cycling columns 0, 1, 2, 1 of the baked frames; -1 stands still. */
   walkPhase?: number;
   /** Draws the presence pip over the head's top-right corner when set. */
   presence?: PresenceStatus | null;
@@ -73,6 +95,64 @@ const PRESENCE_COLORS: Record<string, string> = {
   busy: ACCENT.orange,
   dnd: ACCENT.red,
 };
+
+/** One horizontal run of identical body codes, in sprite art pixels: [x, y, w, code]. */
+type BodyRun = [x: number, y: number, w: number, code: string];
+
+/** The runs of one frame: each row's non-transparent codes merged into single rectangles. */
+function runsOf(frame: BodyFrame): BodyRun[] {
+  const runs: BodyRun[] = [];
+  frame.rows.forEach((row, y) => {
+    for (let x = 0; x < row.length; ) {
+      let end = x + 1;
+      while (end < row.length && row[end] === row[x]) end++;
+      if (row[x] !== ".") runs.push([PAD_X + x, PAD_TOP + y, end - x, row[x]]);
+      x = end;
+    }
+  });
+  return runs;
+}
+
+// Precomputed once, so a draw is only colour lookups and fillRects.
+const BODY_RUNS = {
+  down: BODY_FRAMES.down.map(runsOf),
+  side: BODY_FRAMES.side.map(runsOf),
+  up: BODY_FRAMES.up.map(runsOf),
+};
+
+/** The four tones of a ramp, indexed by the baked shade 0..3 (dark, base, light, hi). */
+const tonesOf = (ramp: Ramp) => [ramp.dark, ramp.base, ramp.light, ramp.hi];
+
+/**
+ * Each baked body code as a colour, recoloured from the customization. The skin, shirt and
+ * pants use the shared ramps; the shoes are a fixed step darker than the outfit.
+ */
+function bodyPalette(avatar: AvatarCustomization | undefined) {
+  const skinBase = safeHex(avatar?.skinColor, "#f0b090");
+  // The shade is warmed toward a brown-red, so the jaw, cheeks and neck read as skin, not stubble.
+  const skin: Ramp = { ...rampFrom(skinBase), dark: mixHex(skinBase, "#7a3a2a", 0.32) };
+  const outfit = rampFrom(safeHex(avatar?.outfitColor, "#5b86cf"));
+  const trouser = rampFrom(mixHex(outfit.base, SHADOW_TINT, 0.42));
+  const tones: Record<Exclude<BodyRole, "outline" | "shoes">, string[]> = {
+    skin: tonesOf(skin),
+    shirt: tonesOf(outfit),
+    pants: tonesOf(trouser),
+  };
+  // A lighter toe on each shoe, so the foot reads as a shoe rather than a stub of colour.
+  const shoe = mixHex(outfit.base, AV_INK, 0.65);
+  const shoeTones = [
+    shoe,
+    mixHex(shoe, LIGHT_TINT, 0.2),
+    mixHex(shoe, LIGHT_TINT, 0.35),
+    mixHex(shoe, LIGHT_TINT, 0.35),
+  ];
+  const codes: Record<string, string> = {};
+  for (const [code, [role, shade]] of Object.entries(BODY_CODES)) {
+    codes[code] =
+      role === "outline" ? AV_INK : role === "shoes" ? shoeTones[shade] : tones[role][shade];
+  }
+  return { codes, skin };
+}
 
 /**
  * @param ox,oy  Top-left of the sprite box, in device pixels. Snap this to whole pixels:
@@ -92,9 +172,9 @@ export function drawAvatarSprite(
 }
 
 /**
- * Draws only the head (hair, face, ears, hat) of the character, for a kart driver whose
- * head shows above the seat. Same palette and rows as {@link drawAvatarSprite}; no torso,
- * arms, legs, shadow, presence pip or status chip.
+ * Draws only the head (face, hair and hat) of the character, for a kart driver whose head
+ * shows above the seat. Same palette and rows as {@link drawAvatarSprite}; no body below the
+ * head, shadow, presence pip or status chip.
  *
  * @param cx,cy  Centre of the head block, in device pixels. The block is
  *               {@link AVATAR_HEAD_SIZE} art pixels times `scale`, rounded to whole pixels.
@@ -134,52 +214,31 @@ function paintAvatar(
   const { direction = "down", walkPhase = -1, presence = null, showEmoji = false } = options;
   const clip = headOnly ? HEAD_CLIP : null;
 
-  // --- Walk cycle -------------------------------------------------------------
-  // Four frames: two contact poses (one leg striding) separated by two passing poses where
-  // the feet are together. On the passing frames the whole body rises exactly one art
-  // pixel, which is what gives a walk its gait; the arms swing opposite the striding leg.
-  //
-  // The lift is a whole art pixel rather than the smooth sine bounce this used to have.
-  // That bounce moved the body by fractional pixels, and since the sprite origin has to be
-  // rounded to stay crisp, it showed up as an irregular 1-2px jitter instead of a bounce.
-  const walking = walkPhase >= 0;
-  const strideLeft = walking && walkPhase === 0;
-  const strideRight = walking && walkPhase === 2;
-  const passing = walking && (walkPhase === 1 || walkPhase === 3);
-  // The ground is captured before the passing-frame lift. The shadow is drawn from it, so
-  // the body bounces off the floor while the shadow stays where the feet are.
-  const groundY = oy;
-  if (passing) oy -= scale;
-
-  const skin = rampFrom(safeHex(avatar?.skinColor, "#f0b090"));
-  const hair = rampFrom(safeHex(avatar?.hairColor, "#2b1a10"));
-  const outfit = rampFrom(safeHex(avatar?.outfitColor, "#5b86cf"));
-  const trouser = rampFrom(mixHex(outfit.base, SHADOW_TINT, 0.42));
-  // The far leg in profile sits behind the near one, so it is one step darker still.
-  // The far leg is the trouser's dark tone, so the near leg reads as the one in front.
-  const trouserFar = rampFrom(trouser.dark);
-  const shoe = mixHex(outfit.base, AV_INK, 0.65);
-  // A lighter toe on each shoe, so the foot reads as a shoe rather than a stub of colour.
-  const shoeLight = mixHex(shoe, LIGHT_TINT, 0.35);
-
-  const hairStyle = avatar?.hairStyle || "short";
-  const hatStyle = avatar?.hatStyle || "none";
-  const hatted = hatStyle !== "none";
-  const facingUp = direction === "up";
+  // --- Frame ------------------------------------------------------------------------------
+  // Side frames are drawn facing BODY_SIDE_FACING; the other side is the same art mirrored.
+  // Each frame carries its own walk bob, so the body is never offset here.
   const facingSide = direction === "left" || direction === "right";
-  const mirror = direction === "left";
-  // Profile only: +1 when the near leg is forward (the arm on that side swings back).
-  const near = facingSide ? (strideLeft ? 1 : strideRight ? -1 : 0) : 0;
+  const mirror = facingSide && direction !== BODY_SIDE_FACING;
+  const view = direction === "up" ? "up" : facingSide ? "side" : "down";
+  const column =
+    walkPhase >= 0 && walkPhase < WALK_COLUMNS.length ? WALK_COLUMNS[walkPhase] : IDLE_COLUMN;
+  const frame = BODY_FRAMES[view][column];
+  const { codes, skin } = bodyPalette(avatar);
 
-  /** Fill art pixels, mirrored horizontally when the character faces left. */
+  // The head's origin in art pixels. Everything on the head is positioned from here, so it
+  // follows the frame's 1px bob.
+  const hb = frame.headBox;
+  const hx = PAD_X + hb.x;
+  const hy = PAD_TOP + hb.y;
+
+  /** Fill art pixels, mirrored horizontally when the character faces the other side. */
   const f = (x: number, y: number, w: number, h: number, color: string) => {
     let ax = mirror ? AV_W - x - w : x;
     let ay = y;
     let aw = w;
     let ah = h;
     if (clip) {
-      // Head-only: trim to the head block, so anything hanging out of it (the beanie pom,
-      // long locks) is cut at the block edge rather than painted outside the head.
+      // Head-only: trim to the head block, so anything hanging out of it is cut at the edge.
       const x0 = Math.max(ax, clip.x0);
       const x1 = Math.min(ax + aw, clip.x1);
       const y0 = Math.max(ay, clip.y0);
@@ -193,400 +252,612 @@ function paintAvatar(
     ctx.fillStyle = color;
     ctx.fillRect(ox + ax * scale, oy + ay * scale, aw * scale, ah * scale);
   };
-  /** Translucent variant, for blush and glass. */
+  /** Translucent variant, for blush and lenses. */
   const fa = (x: number, y: number, w: number, h: number, color: string, alpha: number) => {
     ctx.save();
     ctx.globalAlpha = alpha;
     f(x, y, w, h, color);
     ctx.restore();
   };
-  /** Cel shading only: light on the top/left, shade on the bottom/right. */
-  const shade = (x: number, y: number, w: number, h: number, ramp: Ramp) => {
-    f(x, y, w, h, ramp.base);
-    f(x, y, w, 1, ramp.light);
-    f(x, y, 1, h, ramp.light);
-    f(x + w - 1, y, 1, h, ramp.dark);
-    f(x, y + h - 1, w, 1, ramp.dark);
-  };
-  /** A shaded block with precise 1px perimeter outline (no solid filled dark background box). */
-  const part = (x: number, y: number, w: number, h: number, ramp: Ramp) => {
-    f(x - 1, y - 1, w + 2, 1, AV_INK);
-    f(x - 1, y + h, w + 2, 1, AV_INK);
-    f(x - 1, y, 1, h, AV_INK);
-    f(x + w, y, 1, h, AV_INK);
-    shade(x, y, w, h, ramp);
-  };
-  /**
-   * Like {@link part}, but the outline's four corner pixels are left out and the block's own
-   * corner pixels are inked. The silhouette then steps in at each corner instead of meeting
-   * at a right angle: a skull or a shoulder reads as round rather than as a box.
-   */
-  const roundedPart = (x: number, y: number, w: number, h: number, ramp: Ramp) => {
-    f(x, y - 1, w, 1, AV_INK);
-    f(x, y + h, w, 1, AV_INK);
-    f(x - 1, y, 1, h, AV_INK);
-    f(x + w, y, 1, h, AV_INK);
-    shade(x, y, w, h, ramp);
-    f(x, y, 1, 1, AV_INK);
-    f(x + w - 1, y, 1, 1, AV_INK);
-    f(x, y + h - 1, 1, 1, AV_INK);
-    f(x + w - 1, y + h - 1, 1, 1, AV_INK);
-  };
-  /**
-   * One profile leg: a 2px column, lit on its back edge, with a shoe row whose lighter toe is
-   * the front pixel. The near leg gets an outline on both edges; the far leg is hidden behind
-   * it at the front, so it only gets its back outline. Without the inner outlines the two legs
-   * read as dark vertical stripes rather than two legs.
-   */
-  const sideLeg = (fx: number, ramp: Ramp, sole: string, frontOutline: boolean) => {
-    f(fx - 1, LEG_Y, 1, LEG_H + 1, AV_INK);
-    if (frontOutline) f(fx + 2, LEG_Y, 1, LEG_H + 1, AV_INK);
-    f(fx, LEG_Y + LEG_H, 2, 1, AV_INK);
-    f(fx, LEG_Y, 2, LEG_H, ramp.base);
-    f(fx, LEG_Y, 1, LEG_H, ramp.light);
-    f(fx, LEG_Y + LEG_H - 1, 2, 1, sole);
-    f(fx + 1, LEG_Y + LEG_H - 1, 1, 1, shoeLight); // toe, on the facing side
-  };
 
-  // --- Ground shadow ----------------------------------------------------------
-  // A translucent 10x2 patch under the feet, drawn first so everything sits on top of it.
-  // Its ends are at half strength so the edge fades instead of ending in a hard step. It is
-  // placed from the ground line, not the lifted origin, so it does not bob with the walk.
-  // Skipped in head-only mode: a kart's head has no feet to stand on.
+  // --- Ground shadow ----------------------------------------------------------------------
+  // A translucent 9x2 patch under the feet, drawn first so the body sits on top of it. Its
+  // ends are at half strength so the edge fades instead of ending in a hard step. It is placed
+  // from the ground line, so it does not bob with the walk. Skipped in head-only mode: a kart's
+  // head has no feet to stand on.
   if (!headOnly) {
     const shadow = (x: number, w: number, alpha: number) => {
       ctx.fillStyle = `rgba(20, 26, 44, ${alpha})`;
-      ctx.fillRect(ox + x * scale, groundY + 17 * scale, w * scale, 2 * scale);
+      ctx.fillRect(ox + x * scale, oy + (AV_GROUND_Y - 1) * scale, w * scale, 2 * scale);
     };
-    shadow(4, 8, 0.28);
-    shadow(3, 1, 0.14);
-    shadow(12, 1, 0.14);
+    const shadowLeft = PAD_X + IDLE_DOWN.centerX - 4;
+    shadow(shadowLeft, 1, 0.14);
+    shadow(shadowLeft + 1, 7, 0.28);
+    shadow(shadowLeft + 8, 1, 0.14);
   }
 
-  // --- Afro halo, drawn behind the head (front and back only) -----------------
-  // In profile the afro is drawn as part of the head instead, so it has a back and a face.
-  if (!hatted && hairStyle === "afro" && !facingSide) {
-    f(1, 0, 14, 1, AV_INK);
-    f(1, 8, 14, 1, AV_INK);
-    f(1, 0, 1, 9, AV_INK);
-    f(14, 0, 1, 9, AV_INK);
-    f(2, 0, 12, 8, hair.base);
-    f(3, 0, 10, 1, hair.light);
-    f(2, 7, 12, 1, hair.dark);
-  }
+  // --- Body -------------------------------------------------------------------------------
+  for (const [x, y, w, code] of BODY_RUNS[view][column]) f(x, y, w, 1, codes[code]);
 
-  // --- Legs -------------------------------------------------------------------
-  if (!headOnly) {
-    if (facingSide) {
-      // Profile: the legs stride front and back. The far leg is behind (darker, drawn first),
-      // the near leg in front, and they move in opposite directions on the contact frames.
-      sideLeg(5 - near, trouserFar, shoe, false);
-      sideLeg(7 + near, trouser, shoe, true);
-    } else {
-      // Front and back: side by side, the striding leg lifts one row.
-      const legs: Array<[number, number]> = [
-        [4, strideLeft ? 1 : 0],
-        [9, strideRight ? 1 : 0],
-      ];
-      legs.forEach(([lx, lift]) => {
-        const h = LEG_H - lift;
-        f(lx - 1, LEG_Y + lift, 1, h + 1, AV_INK);
-        f(lx + 3, LEG_Y + lift, 1, h + 1, AV_INK);
-        f(lx, LEG_Y + lift + h, 3, 1, AV_INK);
-        f(lx, LEG_Y + lift, 3, h, trouser.base);
-        f(lx, LEG_Y + lift, 1, h, trouser.light);
-        f(lx, LEG_Y + lift + h - 1, 3, 1, shoe);
-        f(lx, LEG_Y + lift + h - 1, 1, 1, shoeLight); // toe
-      });
+  // --- Face -------------------------------------------------------------------------------
+  // Positioned from the head box. Every feature is defined for the baked facing (left, in
+  // profile); the `f` helper mirrors it for the other side. The front head is symmetric about
+  // its centre column, so its features are too. Up is the back of the head, which has no face.
+  if (direction === "down") {
+    // Two eyes, 1x2, with a catch-light on the top pixel. Blush and mouth are translucent, so
+    // they tint the skin rather than sit on top of it.
+    const catchLight = mixHex(AV_INK, "#ffffff", 0.75);
+    for (const ex of [4, 8]) {
+      f(hx + ex, hy + 6, 1, 1, catchLight);
+      f(hx + ex, hy + 7, 1, 1, AV_INK);
     }
+    fa(hx + 3, hy + 8, 1, 1, ACCENT.red, 0.28);
+    fa(hx + 9, hy + 8, 1, 1, ACCENT.red, 0.28);
+    fa(hx + 6, hy + 9, 1, 1, AV_INK, 0.45); // a soft dab, not a moustache
+  } else if (facingSide) {
+    // One eye, two in from the front outline, where it has skin on both sides to read against.
+    f(hx + 2, hy + 5, 1, 1, mixHex(AV_INK, "#ffffff", 0.75));
+    f(hx + 2, hy + 6, 1, 1, AV_INK);
+    // The nose: a single pixel, one row below the eye, one skin column past the front outline,
+    // with its own ink outline. A taller nose read as an ear.
+    f(hx - 1, hy + 7, 1, 1, skin.base);
+    f(hx - 2, hy + 7, 1, 1, AV_INK);
+    f(hx - 1, hy + 6, 1, 1, AV_INK);
+    f(hx - 1, hy + 8, 1, 1, AV_INK);
+    // The jaw is flat at the front and round only at the back: skin fills the old front outline,
+    // and the outline moves out a pixel to meet the nose.
+    f(hx + 1, hy + 9, 1, 1, skin.base);
+    f(hx, hy + 9, 1, 1, AV_INK);
+    f(hx + 2, hy + 10, 1, 1, skin.dark);
+    f(hx + 1, hy + 10, 1, 1, AV_INK);
+    // Blush just behind and below the eye, and a soft mouth dab at the front of the jaw, drawn
+    // over the jaw fill.
+    fa(hx + 3, hy + 7, 1, 1, ACCENT.red, 0.28);
+    fa(hx + 1, hy + 9, 1, 1, AV_INK, 0.45);
   }
 
-  // --- Torso and arms ---------------------------------------------------------
-  const armLeftY = ARM_Y - (strideRight ? 1 : 0);
-  const armRightY = ARM_Y - (strideLeft ? 1 : 0);
+  drawHeadwear();
 
-  if (!headOnly) {
-    if (facingSide) {
-      // Profile torso: six wide, its shoulder corners rounded like the head's.
-      roundedPart(5, TORSO_Y, 6, TORSO_H, outfit);
-      f(5, TORSO_Y + TORSO_H - 1, 6, 1, trouser.dark); // belt, between torso and legs
-      // One arm, the near one. It swings opposite the near leg: back when the leg is forward.
-      const armX = 7 - near;
-      part(armX, ARM_Y, 2, ARM_H, outfit);
-      f(armX, ARM_Y + ARM_H - 1, 2, 1, skin.base); // hand
-    } else {
-      // From behind with long hair, the hair falls over the shoulders and the arms sit behind
-      // it: drawing them would leave stray hands and outfit pixels at the hair's bottom corners.
-      const armsHidden = facingUp && hairStyle === 'long';
-      // Front and back torso: the outline is a rounded top with the arms outside it.
-      if (!armsHidden) {
-        f(1, armLeftY, 1, ARM_H, AV_INK);
-        f(2, armLeftY + ARM_H, 2, 1, AV_INK);
-        f(14, armRightY, 1, ARM_H, AV_INK);
-        f(12, armRightY + ARM_H, 2, 1, AV_INK);
-      }
-      if (!armsHidden) f(4, TORSO_Y + TORSO_H, 8, 1, AV_INK); // hem
-      f(4, TORSO_Y - 1, 8, 1, AV_INK);
+  // --- Hair, glasses and hats -------------------------------------------------------------
+  /**
+   * Hair, glasses and hats, painted over the face. Every position is in head-relative art
+   * pixels (0,0 is the head box's top-left, so the head's outline runs x 0..12 in the front
+   * view), and goes through `f`, so it mirrors and clips with the rest of the sprite.
+   *
+   * Hair never covers the eye row: the crown stops at the brow, and the sideburns stop at the
+   * cheek. Under a hat only the hair that is not on the face shows.
+   */
+  function drawHeadwear() {
+    const hairStyle = avatar?.hairStyle || "short";
+    const hatStyle = avatar?.hatStyle || "none";
+    const hatted = hatStyle !== "none";
+    const hair = rampFrom(safeHex(avatar?.hairColor, "#2b1a10"));
+    const pose = direction === "up" ? "back" : facingSide ? "side" : "front";
+    const r = (x: number, y: number, w: number, h: number, color: string) =>
+      f(hx + x, hy + y, w, h, color);
+    const ra = (x: number, y: number, w: number, h: number, color: string, alpha: number) =>
+      fa(hx + x, hy + y, w, h, color, alpha);
 
-      if (!armsHidden) {
-        shade(2, armLeftY, 2, ARM_H, outfit);
-        shade(12, armRightY, 2, ARM_H, outfit);
-      }
-      shade(4, TORSO_Y, 8, TORSO_H, outfit);
-      // Shoulder corners are inked so the top of the torso is not a flat rectangle.
-      f(4, TORSO_Y, 1, 1, AV_INK);
-      f(11, TORSO_Y, 1, 1, AV_INK);
-      if (!armsHidden) {
-        // A dark seam between each arm and the torso, so the arms read as separate limbs.
-        f(4, armLeftY, 1, ARM_H, outfit.dark);
-        f(11, armRightY, 1, ARM_H, outfit.dark);
-        f(2, armLeftY + ARM_H - 1, 2, 1, skin.base); // hands
-        f(12, armRightY + ARM_H - 1, 2, 1, skin.base);
-      }
-      f(4, TORSO_Y + TORSO_H - 1, 8, 1, trouser.dark); // belt
-      if (!facingUp) {
-        f(6, TORSO_Y, 4, 1, skin.dark); // neckline
-        f(6, TORSO_Y + 1, 4, 1, outfit.hi); // collar
-      }
-    }
-  }
+    /** A non-negative remainder, so the texture tests work for cells above and left of the head. */
+    const mod = (n: number, m: number) => ((n % m) + m) % m;
 
-  // --- Head -------------------------------------------------------------------
-  if (facingSide) {
-    // The profile skull is the front view's skull shifted back a column, so the nose can
-    // sit just past its front outline without pushing the sprite wider than the head block.
-    roundedPart(2, HEAD_Y, 10, HEAD_H, skin);
-    // Ear: one 1px column just in front of the hair mass, at the ear row.
-    f(6, 5, 1, 2, skin.dark);
-  } else {
-    roundedPart(HEAD_X, HEAD_Y, HEAD_W, HEAD_H, skin);
-    // Ears: one each side facing the camera; the back view hides them under the hair.
-    f(2, 5, 1, 2, skin.base);
-    f(2, 6, 1, 1, skin.dark);
-    f(13, 5, 1, 2, skin.dark);
-  }
-
-  // --- Hair over the head -----------------------------------------------------
-  if (!hatted && hairStyle !== 'bald') {
-    if (facingSide) {
-      // Profile hair: a crown across the top, a fringe over the brow, and the back of the
-      // head covered down to the ear row. Long hair continues down behind the shoulders.
-      f(2, 0, 10, 1, AV_INK); // top outline
-      f(2, 1, 10, 3, hair.base);
-      f(2, 1, 10, 1, hair.light);
-      f(2, 1, 1, 1, AV_INK); // rounded corner at the back
-      f(2, 4, 4, 3, hair.base); // back mass, to the ear row
-      f(2, 6, 4, 1, hair.dark);
-      f(8, 4, 3, 1, hair.base); // fringe over the brow
-      f(9, 4, 1, 1, hair.dark);
-      if (hairStyle === 'curly' || hairStyle === 'afro') {
-        // Bumpy top and back: scalloped outline and lit bumps.
-        f(3, 0, 2, 1, hair.light);
-        f(7, 0, 2, 1, hair.light);
-        f(1, 2, 1, 5, AV_INK);
-        f(2, 2, 1, 1, hair.light);
-        f(2, 4, 1, 1, hair.light);
-      }
-      if (hairStyle === 'afro') {
-        // Afro: the mass bulges further back and up, past the head outline.
-        f(0, 1, 1, 7, AV_INK);
-        f(1, 1, 1, 7, hair.base);
-        f(1, 2, 1, 1, hair.light);
-        f(1, 5, 1, 1, hair.dark);
-      }
-      if (hairStyle === 'long') {
-        // Falls behind the shoulders, outside the torso's back outline (which is at x=4).
-        f(1, 4, 1, 9, AV_INK);
-        f(2, 4, 2, 9, hair.base);
-        f(2, 4, 2, 1, hair.light);
-        f(2, 12, 2, 1, hair.dark);
-      }
-    } else {
-      // Facing away, the back of the head is all hair - the single strongest cue that a
-      // character has turned around. Facing the camera it is a real mass with volume, not
-      // the thin band across the forehead that a 2px crown reads as.
-      const crownH = facingUp ? HEAD_H + 1 : 4;
-      f(HEAD_X, CROWN_Y - 1, HEAD_W, 1, AV_INK); // top outline; its corners are left out
-      f(2, CROWN_Y, 1, crownH, AV_INK);
-      f(13, CROWN_Y, 1, crownH, AV_INK);
-      f(HEAD_X, CROWN_Y, HEAD_W, crownH, hair.base);
-      f(HEAD_X, CROWN_Y, HEAD_W, 1, hair.light);
-      // From behind, long hair runs on into the mass below with no shadow line across it.
-      const longBack = facingUp && hairStyle === 'long';
-      f(HEAD_X, CROWN_Y + crownH - 1, HEAD_W, 1, longBack ? hair.base : hair.dark);
-      f(HEAD_X, CROWN_Y, 1, 1, AV_INK); // rounded crown corners
-      f(HEAD_X + HEAD_W - 1, CROWN_Y, 1, 1, AV_INK);
-      // A one-pixel highlight streak across the top-left of the hair mass.
-      if (!facingUp) f(4, 2, 3, 1, hair.hi);
-
-      if (hairStyle === 'curly') {
-        [3, 6, 9].forEach((bx) => f(bx, CROWN_Y - 1, 2, 1, hair.light)); // bumpy silhouette
-        f(HEAD_X, 5, 1, 2, hair.base);
-        f(HEAD_X + HEAD_W - 1, 5, 1, 2, hair.base);
-      } else if (hairStyle === 'short') {
-        f(HEAD_X, 5, 1, 2, hair.dark); // sideburns
-        f(HEAD_X + HEAD_W - 1, 5, 1, 2, hair.dark);
-      } else if (hairStyle === 'long') {
-        // Two 2px locks hanging straight down beside the head to about the shoulders. Each has
-        // an outline on its outer edge only and a darker tip row, so it reads as hair falling,
-        // not as a box. From behind the tip sits one row lower, to meet the mass below.
-        const tipY = facingUp ? 13 : 12;
-        ([
-          [1, 0],
-          [13, 15],
-        ] as Array<[number, number]>).forEach(([lx, inkX]) => {
-          f(inkX, 5, 1, tipY - 5, AV_INK);
-          f(lx, 5, 2, tipY - 5, hair.base);
-          f(lx, 5, 1, 1, hair.light);
-          f(lx, tipY, 2, 1, hair.dark);
-        });
-        if (facingUp) {
-          // From behind the hair falls over the shoulders as one shape with a rounded tip: the
-          // mass is square-cornered at the top (it meets the head) and its tip row is inset.
-          f(3, TORSO_Y - 1, 10, 4, hair.base);
-          f(4, TORSO_Y + 3, 8, 1, hair.dark);
-          f(5, TORSO_Y, 2, 1, hair.light);
+    /**
+     * A puff of hair drawn as one shape, such as an afro or curls. `rows` gives the hair's
+     * inclusive x spans per row (head-relative). Its outline is every shape cell with a neighbour
+     * outside the shape, so the stepped corners and the rounded bottom come out of the spans.
+     * `hairline`, if set, is a row of flat hair.dark over the forehead that is not outlined.
+     * `texture` colours each interior cell (not the outline or the hairline), and returns null
+     * for plain hair.base.
+     */
+    const puff = (
+      rows: Record<number, Array<[number, number]>>,
+      hairline: [number, number, number] | null,
+      texture: (x: number, y: number) => string | null
+    ) => {
+      const inShape = (x: number, y: number) =>
+        (rows[y] ?? []).some(([l, rr]) => x >= l && x <= rr);
+      for (const key of Object.keys(rows)) {
+        const y = Number(key);
+        for (const [l, rr] of rows[y]) {
+          for (let x = l; x <= rr; x++) {
+            if (hairline && y === hairline[0] && x >= hairline[1] && x <= hairline[2]) {
+              r(x, y, 1, 1, hair.dark);
+              continue;
+            }
+            const edge = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(
+              ([dx, dy]) => !inShape(x + dx, y + dy)
+            );
+            const color = edge ? AV_INK : (texture(x, y) ?? hair.base);
+            r(x, y, 1, 1, color);
+          }
         }
       }
-    }
-  } else if (!hatted && hairStyle === 'bald') {
-    // A scalp catch-light, on the top of the head, where the light falls.
-    if (facingSide) f(4, HEAD_Y, 3, 1, skin.hi);
-    else f(5, HEAD_Y, 4, 1, skin.hi);
-  }
+    };
 
-  // --- Face -------------------------------------------------------------------
-  if (!facingUp) {
-    // Sits clear of the head's bottom row, which the cel shading already darkens - a mouth
-    // drawn onto that row merged with it into what read as a beard.
-    if (facingSide) {
-      // One eye, near the front of the head, a single pixel wide and two tall. It sits one
-      // column in from the shaded front edge, where it has skin on both sides to read against.
-      // A catch-light on its top pixel keeps it visible on the darkest skin tones too.
-      f(9, 5, 1, 1, mixHex(AV_INK, '#ffffff', 0.75));
-      f(9, 6, 1, 1, AV_INK);
-      // The nose protrudes one art pixel past the front outline, with its own outline.
-      f(13, 5, 1, 1, AV_INK);
-      f(13, 6, 1, 2, skin.base);
-      f(14, 6, 1, 2, AV_INK);
-      f(13, 8, 1, 1, AV_INK);
-    } else {
-      const eyes: Array<[number, number]> = [
-        [5, 5],
-        [9, 5],
-      ];
-      eyes.forEach(([ex, ey]) => {
-        f(ex, ey, 2, 2, AV_INK);
-        f(ex, ey, 1, 1, mixHex(AV_INK, '#ffffff', 0.75)); // catch-light
-      });
-    }
-
-    // Blush and mouth, translucent so they tint the skin rather than sit on top of it.
-    // Drawn before the glasses so a frame simply covers anything it overlaps.
-    if (facingSide) {
-      fa(8, 7, 1, 1, ACCENT.red, 0.28);
-      fa(11, 7, 1, 1, AV_INK, 0.5); // mouth dab, near the front
-    } else {
-      fa(4, 7, 2, 1, ACCENT.red, 0.28);
-      fa(10, 7, 2, 1, ACCENT.red, 0.28);
-      // Full-strength ink across two pixels read as a moustache; this is a soft dab.
-      fa(7, 7, 2, 1, AV_INK, 0.45);
-    }
-
-    if (avatar?.glasses) {
-      // Translucent lenses so the eyes still read through them.
-      if (facingSide) {
-        // One lens, with its arm running back to the ear.
-        // The lens frames the eye; its back edge meets the ear, which is the arm's join.
-        fa(8, 5, 2, 2, ACCENT.sky, 0.4);
-        f(7, 4, 4, 1, AV_INK);
-        f(7, 7, 4, 1, AV_INK);
-        f(7, 5, 1, 2, AV_INK);
-        f(10, 5, 1, 2, AV_INK);
+    // The crown of a haired head, per pose. Short hair starts a px above the skull, with an ink
+    // top, and its fringe is broken and sweeps across the brow. Long hair keeps the original
+    // crown under its locks, so it is drawn exactly as before.
+    const frontCrown = () => {
+      if (hairStyle === "long") {
+        r(4, 1, 5, 1, hair.base);
+        r(4, 1, 2, 1, hair.light);
+        r(3, 2, 7, 1, hair.base);
+        r(3, 2, 3, 1, hair.light);
+        r(4, 2, 2, 1, hair.hi);
+        r(2, 3, 9, 2, hair.base);
+        r(2, 3, 2, 1, hair.light);
+        r(2, 5, 9, 1, hair.base);
+        r(2, 5, 1, 2, hair.dark);
+        r(10, 6, 1, 1, hair.dark);
+        return;
+      }
+      // Volume: a rounded dome, a px wider than the skull at each side. Row -1 is ink over the top
+      // middle only. Each row steps out by a px until the hair meets the skull at row 3.
+      r(5, -1, 3, 1, AV_INK);
+      r(3, 0, 1, 1, AV_INK);
+      r(9, 0, 1, 1, AV_INK);
+      r(4, 0, 5, 1, hair.base);
+      r(2, 1, 1, 1, AV_INK);
+      r(10, 1, 1, 1, AV_INK);
+      r(3, 1, 7, 1, hair.base);
+      r(1, 2, 1, 1, AV_INK);
+      r(11, 2, 1, 1, AV_INK);
+      r(2, 2, 9, 1, hair.base);
+      // The crown. A light streak runs diagonally down toward the left temple.
+      r(4, 1, 2, 1, hair.light);
+      r(3, 2, 1, 1, hair.light);
+      r(2, 3, 9, 1, hair.base);
+      r(2, 3, 1, 1, hair.light);
+      r(2, 4, 9, 1, hair.base);
+      r(5, 4, 1, 1, hair.dark); // a strand in the mass
+      // The side part: a dark line at x8, rows 3-5. The larger side (x2-7) sweeps over it, and its
+      // edge steps down from row 5 to row 6 at the temple. The smaller side (x9-10) stays short.
+      r(8, 3, 1, 3, hair.dark);
+      r(3, 5, 5, 1, hair.base);
+      r(6, 5, 1, 1, hair.dark); // a strand in the fringe
+      r(9, 5, 2, 1, hair.base);
+      r(3, 6, 1, 1, hair.dark);
+      r(9, 6, 2, 1, hair.dark);
+      // Sideburns, short, over the skull outline at x1-2.
+      r(1, 5, 2, 2, hair.dark);
+    };
+    const sideCrown = () => {
+      if (hairStyle === "long") {
+        r(3, 1, 5, 1, hair.base);
+        r(3, 1, 2, 1, hair.light);
+        r(2, 2, 7, 1, hair.base);
+        r(2, 2, 2, 1, hair.light);
+        r(1, 3, 9, 1, hair.base);
+        r(1, 3, 3, 1, hair.light);
+        r(1, 4, 3, 1, hair.dark);
+        r(4, 4, 3, 1, hair.base);
+        r(7, 4, 2, 2, hair.base);
+        r(9, 4, 1, 3, hair.dark);
+        return;
+      }
+      // Volume: a rounded dome, a px wider than the skull at the top-back. Row -1 is ink over the
+      // top middle only. Each row steps out by a px until the hair meets the skull at row 3.
+      r(4, -1, 3, 1, AV_INK);
+      r(3, 0, 1, 1, AV_INK);
+      r(8, 0, 1, 1, AV_INK);
+      r(4, 0, 4, 1, hair.base);
+      r(2, 1, 1, 1, AV_INK);
+      r(9, 1, 1, 1, AV_INK);
+      r(3, 1, 6, 1, hair.base);
+      r(1, 2, 1, 1, AV_INK);
+      r(10, 2, 1, 1, AV_INK);
+      r(2, 2, 8, 1, hair.base);
+      // The crown, with a light streak at the top-front.
+      r(3, 1, 2, 1, hair.light);
+      r(2, 2, 1, 1, hair.light);
+      r(1, 3, 9, 1, hair.base);
+      // The fringe ends above the eye at row 4, with one dark tip at the front.
+      r(2, 4, 8, 1, hair.base);
+      r(1, 4, 1, 1, hair.dark);
+      // The back of the hair, behind the ear, with a dark underside.
+      r(7, 5, 2, 2, hair.base);
+      r(9, 5, 1, 2, hair.dark);
+      r(7, 7, 3, 1, hair.dark);
+      r(8, 8, 1, 1, hair.dark);
+    };
+    const backCrown = () => {
+      if (hairStyle === "long") {
+        r(4, 1, 5, 1, hair.base);
+        r(4, 1, 2, 1, hair.light);
+        r(3, 2, 7, 1, hair.base);
+        r(3, 2, 2, 1, hair.hi);
+        r(2, 3, 9, 1, hair.base);
+        r(1, 4, 11, 4, hair.base);
+        r(10, 4, 1, 4, hair.dark);
+        r(1, 8, 11, 1, hair.dark);
+        return;
+      }
+      // Volume: a rounded dome, as at the front.
+      r(5, -1, 3, 1, AV_INK);
+      r(3, 0, 1, 1, AV_INK);
+      r(9, 0, 1, 1, AV_INK);
+      r(4, 0, 5, 1, hair.base);
+      r(2, 1, 1, 1, AV_INK);
+      r(10, 1, 1, 1, AV_INK);
+      r(3, 1, 7, 1, hair.base);
+      r(1, 2, 1, 1, AV_INK);
+      r(11, 2, 1, 1, AV_INK);
+      r(2, 2, 9, 1, hair.base);
+      // The crown, with a light streak on the top-left.
+      r(4, 1, 2, 1, hair.light);
+      r(3, 2, 1, 1, hair.light);
+      r(2, 3, 9, 1, hair.base);
+      r(2, 3, 1, 1, hair.light);
+      // The back of the skull, down to row 8, with a dark shade on its right-hand edge.
+      r(2, 4, 9, 2, hair.base);
+      r(1, 6, 11, 3, hair.base);
+      r(10, 4, 1, 4, hair.dark);
+      // Two short strands in the lower half, to break up the mass.
+      r(4, 5, 1, 3, hair.dark);
+      r(8, 6, 1, 2, hair.dark);
+      // A ragged bottom edge at row 9, with two tips dipping to row 10 over the nape.
+      r(3, 9, 7, 1, hair.dark);
+      r(4, 10, 1, 1, hair.dark);
+      r(8, 10, 1, 1, hair.dark);
+    };
+    /**
+     * Curly: a tight puff with a scalloped top, three bumps across the crown, drawn in place of
+     * the crown. Row -1 of interior cells is lit, so each bump reads as a lit curl, and the rest
+     * of the mass has a sparse light and dark lattice.
+     */
+    const curlyPuff = () => {
+      const curlyTexture = (x: number, y: number) => {
+        if (y === -1) return hair.light;
+        if (mod(x + 2 * y, 5) === 0 && x + y <= 5) return hair.light;
+        if (mod(x + 2 * y, 5) === 3 && x + y >= 11) return hair.dark;
+        return null;
+      };
+      if (pose === "side") {
+        puff(
+          {
+            [-2]: [[1, 2], [4, 5], [7, 8]],
+            [-1]: [[0, 9]],
+            0: [[-1, 10]],
+            1: [[-1, 11]],
+            2: [[-1, 11]],
+            3: [[-1, 11]],
+            4: [[1, 11]],
+            5: [[6, 11]],
+            6: [[7, 10]],
+          },
+          [4, 1, 5],
+          curlyTexture
+        );
+      } else if (pose === "back") {
+        puff(
+          {
+            [-2]: [[2, 3], [5, 7], [9, 10]],
+            [-1]: [[1, 11]],
+            0: [[0, 12]],
+            1: [[-1, 13]],
+            2: [[-1, 13]],
+            3: [[-1, 13]],
+            4: [[-1, 13]],
+            5: [[0, 12]],
+            6: [[0, 12]],
+            7: [[0, 12]],
+            8: [[1, 11]],
+          },
+          null,
+          curlyTexture
+        );
       } else {
-        [4, 9].forEach((lx) => {
-          fa(lx, 5, 3, 2, ACCENT.sky, 0.4);
-          f(lx, 4, 3, 1, AV_INK);
-          f(lx, 7, 3, 1, AV_INK);
-          f(lx, 5, 1, 2, AV_INK);
-          f(lx + 2, 5, 1, 2, AV_INK);
-        });
-        f(7, 6, 2, 1, AV_INK); // bridge
+        puff(
+          {
+            [-2]: [[2, 3], [5, 7], [9, 10]],
+            [-1]: [[1, 11]],
+            0: [[0, 12]],
+            1: [[-1, 13]],
+            2: [[-1, 13]],
+            3: [[-1, 13]],
+            4: [[-1, 13]],
+            5: [[-1, 1], [11, 13]],
+            6: [[-1, 0], [12, 13]],
+          },
+          [4, 2, 10],
+          curlyTexture
+        );
+      }
+    };
+
+    if (hairStyle === "bald") {
+      // Nothing extra: the baked skin shows the scalp.
+    } else if (!hatted && hairStyle === "afro") {
+      // Round mass from the brow up: 2-3px past the skull each side, rising 4px above the
+      // skull top (it fits in PAD_TOP). The front edge stops at the temples, clear of the eyes.
+      // In profile it bulges backwards, with its front edge just behind the forehead.
+      // Front: the puff ends at the temples, with the hairline a flat row over the forehead.
+      // Back: the middle runs on down the whole skull, to y 8, with no face to leave clear.
+      // Side: the puff's front edge is flush with the forehead, and it reaches 3-4px past the
+      // back of the skull.
+      const afroTexture = (x: number, y: number) => {
+        if ((x === 2 && y === -3) || (x === 1 && y === -2)) return hair.hi;
+        if (mod(x + 2 * y, 5) === 0 && x + y <= 3) return hair.light;
+        if (mod(x + 2 * y, 5) === 3 && x + y >= 12) return hair.dark;
+        return null;
+      };
+      const top: Record<number, Array<[number, number]>> = {
+        [-4]: [[3, 9]],
+        [-3]: [[1, 11]],
+        [-2]: [[0, 12]],
+        [-1]: [[-1, 13]],
+        0: [[-2, 14]],
+        1: [[-2, 14]],
+        2: [[-2, 14]],
+        3: [[-3, 15]],
+      };
+      if (pose === "side") {
+        puff(
+          {
+            [-4]: [[5, 8]],
+            [-3]: [[3, 10]],
+            [-2]: [[2, 11]],
+            [-1]: [[1, 12]],
+            0: [[0, 13]],
+            1: [[0, 13]],
+            2: [[0, 13]],
+            3: [[0, 14]],
+            4: [[1, 14]],
+            5: [[4, 13]],
+            6: [[5, 12]],
+          },
+          [4, 1, 3],
+          afroTexture
+        );
+      } else if (pose === "back") {
+        puff(
+          {
+            ...top,
+            4: [[-3, 15]],
+            5: [[-2, 14]],
+            6: [[-1, 13]],
+            7: [[0, 12]],
+            8: [[0, 12]],
+          },
+          null,
+          afroTexture
+        );
+      } else {
+        puff(
+          {
+            ...top,
+            4: [[-3, 15]],
+            5: [[-2, 1], [11, 14]],
+            6: [[-1, 0], [12, 13]],
+          },
+          [4, 2, 10],
+          afroTexture
+        );
+      }
+    } else if (!hatted && hairStyle === "curly") {
+      // Curly hair replaces the crown: the puff covers the top of the head and the sides.
+      curlyPuff();
+    } else if (!hatted) {
+      if (pose === "side") sideCrown();
+      else if (pose === "back") backCrown();
+      else frontCrown();
+
+      if (hairStyle === "long") {
+        if (pose === "front") {
+          // Two locks that hug and frame the face, overlaying the head's side outline. Each is an
+          // inked outer edge with 2px of hair beside it. The inner column sits in shadow next to
+          // the face, each lock is lit at its top, and the tip is inked and rounded.
+          for (let y = 3; y <= 14; y++) {
+            r(-1, y, 1, 1, AV_INK);
+            r(0, y, 2, 1, hair.base);
+            r(13, y, 1, 1, AV_INK);
+            r(11, y, 2, 1, hair.base);
+          }
+          for (let y = 6; y <= 14; y++) {
+            r(1, y, 1, 1, hair.dark);
+            r(11, y, 1, 1, hair.dark);
+          }
+          r(0, 2, 2, 1, AV_INK);
+          r(11, 2, 2, 1, AV_INK);
+          r(0, 3, 1, 1, hair.light);
+          r(12, 3, 1, 1, hair.light);
+          r(0, 15, 2, 1, AV_INK);
+          r(11, 15, 2, 1, AV_INK);
+          r(0, 14, 1, 1, hair.dark);
+          r(12, 14, 1, 1, hair.dark);
+        } else if (pose === "back") {
+          // From behind the hair is one mass: it covers the back of the skull, runs on over the
+          // nape and the shoulders, and ends in a rounded tip about 3-4 rows below them.
+          for (let y = 9; y <= 14; y++) {
+            r(2, y, 9, 1, hair.base);
+            r(10, y, 1, 1, hair.dark);
+          }
+          r(2, 9, 1, 3, hair.light);
+          r(3, 15, 7, 1, hair.base); // narrower at the tip
+          r(3, 15, 1, 1, hair.light);
+          r(9, 15, 1, 1, hair.dark);
+          r(4, 16, 5, 1, hair.dark); // rounded corners: the tip row is inset on both sides
+        } else {
+          // In profile one lock falls behind the head from the ear row to the shoulder. Its inner
+          // column sits on the back outline of each row (replacing that outline pixel), so it
+          // touches the skull with no gap, and only its outer edge is inked.
+          const sideIdle = BODY_FRAMES.side[IDLE_COLUMN];
+          for (let y = 5; y <= 14; y++) {
+            const back = sideIdle.rows[y + sideIdle.headBox.y].lastIndexOf("o") - sideIdle.headBox.x;
+            r(back, y, 1, 1, hair.base);
+            r(back + 1, y, 1, 1, hair.base);
+            r(back + 2, y, 1, 1, AV_INK);
+          }
+          r(10, 5, 1, 1, hair.light);
+          r(10, 15, 2, 1, hair.dark);
+        }
+      }
+    } else {
+      // Under a hat only the hair off the face shows: the sideburns from the front, the back of
+      // the head from behind or in profile. Never a band across the eyes.
+      if (pose === "front") {
+        r(2, 5, 1, 2, hair.dark);
+        r(10, 5, 1, 2, hair.dark);
+      } else if (pose === "side") {
+        // A small patch at the back edge, under the cap, rounded at the bottom.
+        r(8, 5, 2, 2, hair.base);
+        r(8, 7, 1, 1, hair.base);
+        r(9, 7, 1, 1, hair.dark);
+      } else {
+        r(2, 5, 9, 2, hair.base); // just below the hat's band, above the nape
+        r(2, 6, 9, 1, hair.dark);
       }
     }
-  }
 
-  // --- Headwear ---------------------------------------------------------------
-  if (hatted && hairStyle !== 'bald') {
-    // Under a hat only the hair that is not on the face shows: the back of the head from
-    // behind or in profile, and the sideburns from the front. Never a band across the eye row.
-    if (facingUp) f(HEAD_X, 6, HEAD_W, 3, hair.base);
-    else if (facingSide) f(2, 5, 4, 3, hair.base);
-    else {
-      f(HEAD_X, 5, 1, 2, hair.dark);
-      f(HEAD_X + HEAD_W - 1, 5, 1, 2, hair.dark);
+    // Glasses: translucent lenses so the eye still reads through them, over the hair.
+    if (avatar?.glasses && pose !== "back") {
+      if (pose === "side") {
+        // A lens frame 3 wide and 4 tall around the eye, and one arm: a single ink row that runs
+        // back from the frame's top row, leaving a 1px gap to the frame.
+        ra(2, 5, 1, 2, ACCENT.sky, 0.4);
+        r(1, 4, 3, 1, AV_INK);
+        r(1, 7, 3, 1, AV_INK);
+        r(1, 5, 1, 2, AV_INK);
+        r(3, 5, 1, 2, AV_INK);
+        r(4, 4, 2, 1, AV_INK);
+      } else {
+        // Two lens frames, 3 wide, around the eyes, joined by a one-pixel bridge.
+        [4, 8].forEach((ex) => {
+          ra(ex, 6, 1, 2, ACCENT.sky, 0.4);
+          r(ex - 1, 5, 3, 1, AV_INK);
+          r(ex - 1, 8, 3, 1, AV_INK);
+          r(ex - 1, 6, 1, 2, AV_INK);
+          r(ex + 1, 6, 1, 2, AV_INK);
+        });
+        r(6, 6, 1, 1, AV_INK);
+      }
+    }
+
+    /**
+     * The outlined crown of a hat, for the current pose. Row -1 is the ink along the top, and
+     * each row below steps out to the skull's outline until the sides run straight down to row 4.
+     * The crown is shaded from the top-left, with a hi pixel on the highlight and a dark column
+     * down the right-hand edge in shadow.
+     */
+    const dome = (ramp: Ramp) => {
+      // Per row: the ink columns at each side, then the span of fill between them.
+      const rows: Array<[inkL: number, inkR: number, fillL: number, fillR: number]> =
+        pose === "side"
+          ? [
+              [2, 8, 3, 7],
+              [1, 9, 2, 8],
+              [0, 10, 1, 9],
+              [0, 10, 1, 9],
+              [0, 10, 1, 9],
+            ]
+          : [
+              [3, 9, 4, 8],
+              [2, 10, 3, 9],
+              [1, 11, 2, 10],
+              [1, 11, 2, 10],
+              [1, 11, 2, 10],
+            ];
+      const top = pose === "side" ? [3, 7] : [4, 8];
+      const light =
+        pose === "side"
+          ? [[3, 0], [4, 0], [2, 1], [3, 1], [1, 2]]
+          : [[4, 0], [5, 0], [3, 1], [4, 1], [2, 2]];
+      const dark =
+        pose === "side"
+          ? [[7, 0], [8, 1], [9, 2], [9, 3], [9, 4]]
+          : [[8, 0], [9, 1], [10, 2], [10, 3], [10, 4]];
+      const hi = pose === "side" ? [3, 0] : [4, 0];
+
+      r(top[0], -1, top[1] - top[0] + 1, 1, AV_INK);
+      rows.forEach(([inkL, inkR, fillL, fillR], y) => {
+        r(inkL, y, 1, 1, AV_INK);
+        r(inkR, y, 1, 1, AV_INK);
+        r(fillL, y, fillR - fillL + 1, 1, ramp.base);
+      });
+      for (const [x, y] of light) r(x, y, 1, 1, ramp.light);
+      for (const [x, y] of dark) r(x, y, 1, 1, ramp.dark);
+      r(hi[0], hi[1], 1, 1, ramp.hi);
+    };
+
+    // Hats: a crown over the top of the head, with a brim or peak and a band.
+    if (hatStyle === "cap") {
+      const cap = rampFrom(ACCENT.red);
+      dome(cap);
+      // The band runs round the head just above the brow, from outline to outline.
+      const [bandL, bandR] = pose === "side" ? [1, 9] : [2, 10];
+      r(bandL, 4, bandR - bandL + 1, 1, cap.dark);
+      if (pose === "side") {
+        // Peak: juts three pixels past the front of the face, with its own outline.
+        r(-3, 2, 3, 1, AV_INK);
+        r(-3, 3, 3, 1, cap.base);
+        r(-3, 4, 3, 1, cap.dark);
+        r(-3, 5, 3, 1, AV_INK);
+        r(-4, 3, 1, 2, AV_INK);
+      } else if (pose === "back") {
+        // The bottom edge of the cap, with a light snapback buckle in the band.
+        r(1, 5, 11, 1, AV_INK);
+        r(6, 4, 1, 1, cap.light);
+      } else {
+        // The peak points at the viewer: a lit band one pixel wider than the skull on each side,
+        // and a soft shadow on the face just below it.
+        r(0, 5, 1, 1, AV_INK);
+        r(12, 5, 1, 1, AV_INK);
+        r(1, 5, 11, 1, cap.light);
+        ra(2, 6, 9, 1, AV_INK, 0.3);
+      }
+    } else if (hatStyle === "beanie") {
+      const beanie = rampFrom(ACCENT.teal);
+      dome(beanie);
+      // A ribbed folded band: the fill alternates between two tones, column by column.
+      const [bandL, bandR] = pose === "side" ? [1, 9] : [2, 10];
+      for (let x = bandL; x <= bandR; x++) {
+        r(x, 4, 1, 1, x % 2 === 0 ? beanie.hi : beanie.light);
+      }
+      // The bottom edge of the band, outlined across its width and the outline columns.
+      const [edgeL, edgeR] = pose === "side" ? [0, 10] : [1, 11];
+      r(edgeL, 5, edgeR - edgeL + 1, 1, AV_INK);
+      // A 2x2 yellow pom sitting on the dome's top ink, outlined on its sides and top.
+      const [pomL, pomR] = pose === "side" ? [3, 6] : [4, 7];
+      r(pomL + 1, -4, 2, 1, AV_INK);
+      r(pomL, -3, 1, 2, AV_INK);
+      r(pomR, -3, 1, 2, AV_INK);
+      r(pomL + 1, -3, 2, 2, ACCENT.yellow);
+      // The lit top-left pixel of the pom, lightened so it reads as a rounded puff.
+      r(pomL + 1, -3, 1, 1, mixHex(ACCENT.yellow, "#ffffff", 0.4));
     }
   }
 
-  if (hatStyle === 'cap') {
-    const cap = rampFrom(ACCENT.red);
-    if (facingSide) {
-      // The profile crown sits one row higher than the front's, so its underside clears the
-      // eye row: the brim would otherwise cover the one eye a profile has.
-      roundedPart(2, CROWN_Y, 10, 3, cap);
-    } else {
-      // Same for the front: the crown is three rows, so the brim lands on the forehead row
-      // and the eyes below it stay clear.
-      roundedPart(HEAD_X, CROWN_Y, HEAD_W, 3, cap);
-    }
-    // The peak follows the direction of travel, which sells the facing at this size more
-    // than the face itself does.
-    if (facingUp) {
-      f(HEAD_X, CROWN_Y - 1, HEAD_W, 1, cap.dark);
-    } else if (facingSide) {
-      // Profile peak: juts two to three pixels past the face, with its own outline.
-      f(12, 2, 3, 1, cap.base);
-      f(12, 3, 3, 1, cap.dark);
-      f(13, 1, 2, 1, AV_INK);
-      f(15, 2, 1, 2, AV_INK);
-      f(12, 4, 4, 1, AV_INK);
-    } else {
-      f(2, 4, 12, 1, cap.dark);
-    }
-  } else if (hatStyle === 'beanie') {
-    const beanie = rampFrom(ACCENT.teal);
-    roundedPart(facingSide ? 2 : HEAD_X, CROWN_Y, facingSide ? 10 : HEAD_W, 4, beanie);
-    f(facingSide ? 2 : HEAD_X, CROWN_Y + 3, facingSide ? 10 : HEAD_W, 1, beanie.hi); // folded band
-    f(7, CROWN_Y - 2, 2, 2, AV_INK);
-    f(7, CROWN_Y - 2, 2, 1, ACCENT.yellow); // pom
-  }
+  // --- Presence pip -----------------------------------------------------------------------
+  // Anchored to the current frame's head, so it bobs with it. Never mirrored: it is UI, not
+  // part of the character. Overlapping the head's corner rather than floating clear of it -
+  // detached, it read as an unrelated coloured box hovering beside the character.
+  const headL = PAD_X + hb.x;
+  const headR = headL + hb.w;
+  const headTop = PAD_TOP + hb.y;
+  // Screen-space edges: a mirrored head's front and back swap sides.
+  const screenLeft = mirror ? AV_W - headR : headL;
+  const screenRight = mirror ? AV_W - headL : headR;
 
-  // The nape and collar from behind. Drawn after the head so they replace its bottom outline
-  // at the centre: the neck is the one place where head and body meet without an outline.
-  if (!headOnly && facingUp && hairStyle !== 'long') {
-    f(6, HEAD_Y + HEAD_H, 4, 1, skin.dark); // nape
-    f(6, TORSO_Y, 4, 1, outfit.dark); // collar, seen from behind
-  }
-
-  // --- Presence pip -----------------------------------------------------------
-  // Never mirrored: it is UI, not part of the character. Overlapping the head's corner
-  // rather than floating clear of it - detached, it read as an unrelated coloured box
-  // hovering beside the character.
   if (presence) {
     const color = PRESENCE_COLORS[presence] || PRESENCE_COLORS.available;
     ctx.fillStyle = AV_INK;
-    ctx.fillRect(ox + 11 * scale, oy + 1 * scale, 4 * scale, 4 * scale);
+    ctx.fillRect(ox + (screenRight - 3) * scale, oy + headTop * scale, 4 * scale, 4 * scale);
     ctx.fillStyle = color;
-    ctx.fillRect(ox + 12 * scale, oy + 2 * scale, 2 * scale, 2 * scale);
+    ctx.fillRect(
+      ox + (screenRight - 2) * scale,
+      oy + (headTop + 1) * scale,
+      2 * scale,
+      2 * scale
+    );
   }
 
-  // --- Status emoji chip ------------------------------------------------------
-  // Tucked against the head's opposite corner, deliberately outside the body: any larger
-  // or further in and it sits squarely on the torso, hiding the outfit and one whole arm.
+  // --- Status emoji chip ------------------------------------------------------------------
+  // Tucked against the head's opposite corner, deliberately outside the body: any larger or
+  // further in and it sits squarely on the torso, hiding the outfit and one whole arm.
   if (showEmoji) {
     const size = 4 * scale;
-    const bx = ox - scale;
-    const by = oy + 1 * scale;
+    const bx = ox + (screenLeft - 3) * scale;
+    const by = oy + headTop * scale;
     ctx.fillStyle = AV_INK;
     ctx.fillRect(bx - 2, by - 2, size + 4, size + 4);
     ctx.fillStyle = ACCENT.yellow;

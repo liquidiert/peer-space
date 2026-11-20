@@ -1,0 +1,34 @@
+[project]
+name = "pixel-generator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "liquidiert", email = "haberederkorbinian@googlemail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "accelerate>=1.16.0",
+    "diffusers>=0.43.0",
+    "gguf>=0.19.0",
+    "numpy>=2.5.5",
+    "peft>=0.21.3",
+    "pillow>=13.0.0",
+    "torch",
+    "transformers>=5.23.0",
+]
+
+[project.scripts]
+pixel-generator = "pixel_generator:main"
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu132" }]

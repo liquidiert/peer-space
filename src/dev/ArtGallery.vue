@@ -158,7 +158,8 @@ const SHEET_SCALE = 4;
 const SHEET_GUTTER = 110;
 const SHEET_HEADER = 24;
 const CELL_W = 96;
-const CELL_H = 96;
+// The sprite box plus a gap, so one sprite's ground shadow never lands in the next row's top margin.
+const CELL_H = AV_H * SHEET_SCALE + 24;
 const HEAD_ROW_H = 84;
 const SHEET_BG = '#dfe6f0';
 const SHEET_INK = '#1e293b';
@@ -220,7 +221,7 @@ function drawSheet() {
     ctx.fillText(row.label, 8, top + CELL_H / 2);
     SHEET_COLS.forEach((col, c) => {
       const ox = SHEET_GUTTER + c * CELL_W + (CELL_W - AV_W * SHEET_SCALE) / 2;
-      const oy = top + 12;
+      const oy = top + 8;
       drawAvatarSprite(ctx, ox, oy, SHEET_SCALE, row.avatar, {
         direction: col.direction,
         walkPhase: col.walkPhase,

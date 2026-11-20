@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  AV_HEAD_TOP_Y,
+  AV_INK,
+  AV_W,
   AVATAR_HEAD_SIZE,
   drawAvatarHead,
   drawAvatarSprite,
 } from "../src/lib/avatarSprite";
+import { BODY_FRAMES, BODY_PASSING_COLUMN } from "../src/lib/avatarBodyData";
+import { mixHex, rampFrom } from "../src/lib/pixelArt";
 import type { AvatarCustomization, Direction } from "../src/types";
 
 interface Rect {
@@ -101,8 +106,9 @@ function fullRects(
 }
 
 describe("AVATAR_HEAD_SIZE", () => {
-  it("is the head block in art pixels: the face, hair and hat, without the torso", () => {
-    expect(AVATAR_HEAD_SIZE).toEqual({ w: 14, h: 11 });
+  it("is the head block in art pixels: the full sprite width, from the top of the box to the bottom of the idle head", () => {
+    const idleHead = BODY_FRAMES.down[BODY_PASSING_COLUMN].headBox;
+    expect(AVATAR_HEAD_SIZE).toEqual({ w: AV_W, h: AV_HEAD_TOP_Y + idleHead.h });
   });
 });
 
@@ -162,19 +168,21 @@ describe("drawAvatarHead", () => {
     const down = headRects({ direction: "down" });
     const scale = 2;
 
-    // Facing away: the hair mass runs from the crown row down the back of the skull (8 art px
-    // tall, HEAD_H + 1) across its full width (10 art px).
-    const hairBack = (rs: Rect[]) =>
-      rs.some((r) => r.w === 10 * scale && r.h === 8 * scale);
-    expect(hairBack(up)).toBe(true);
-    expect(hairBack(down)).toBe(false);
+    // The hair colour is the base of the hair ramp; its area in art pixels is the hair coverage.
+    const hairFill = rampFrom("#aa3300").base;
+    const hairArea = (rs: Rect[]) =>
+      rs
+        .filter((r) => r.fill === hairFill)
+        .reduce((sum, r) => sum + (r.w * r.h) / (scale * scale), 0);
+    expect(hairArea(up)).toBeGreaterThan(25);
+    expect(hairArea(up)).toBeGreaterThan(hairArea(down));
 
-    // Facing the camera: two 2x2 eyes. Facing away: no eyes at all.
+    // An eye is a 1x1 catch-light over a 1x1 ink pixel. Facing the camera there are two; facing
+    // away there are none.
+    const catchLight = mixHex(AV_INK, "#ffffff", 0.75);
     const eyes = (rs: Rect[]) =>
-      rs.filter(
-        (r) => r.w === 2 * scale && r.h === 2 * scale && r.fill === "#1e293b",
-      );
-    expect(eyes(down).length).toBeGreaterThanOrEqual(2);
+      rs.filter((r) => r.w === scale && r.h === scale && r.fill === catchLight);
+    expect(eyes(down)).toHaveLength(2);
     expect(eyes(up)).toHaveLength(0);
 
     expect(up.length).not.toBe(down.length);
@@ -186,11 +194,11 @@ describe("drawAvatarHead", () => {
     const left = headRects({ scale, direction: "left" });
     expect(left.length).toBe(right.length);
     expect(left).not.toEqual(right);
-    // Mirrored about the block's centre column, so the bounding box is unchanged.
-    const span = (rs: Rect[]) => [
-      Math.min(...rs.map((r) => r.x)),
-      Math.max(...rs.map((r) => r.x + r.w)),
-    ];
-    expect(span(left)).toEqual(span(right));
+    // Mirror the right-facing rects about the centre of the box (the head is centred on CX).
+    // The profile nose protrudes past the head, so the painted extent is not symmetric; the
+    // mirrored rects must still be exactly the left-facing ones.
+    const key = (r: Rect) => `${r.x},${r.y},${r.w},${r.h},${r.fill},${r.alpha}`;
+    const mirrored = right.map((r) => ({ ...r, x: 2 * CX - r.x - r.w }));
+    expect(mirrored.map(key).sort()).toEqual(left.map(key).sort());
   });
 });
